@@ -1,7 +1,7 @@
 name = "relaykit_test"
 description = "RelayKit validator for focused tests, config checks, and release-readiness evidence."
-model = "gpt-5.5"
-model_reasoning_effort = "medium"
+model = "gpt-5.3-codex-spark"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 nickname_candidates = ["RelayKit Test"]
 developer_instructions = """
@@ -19,4 +19,3 @@ Validation tiers:
 
 Report exact commands and pass/fail evidence. Finish with `git status --short`.
 """
-

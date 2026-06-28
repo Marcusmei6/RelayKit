@@ -1,6 +1,6 @@
 name = "relaykit_gateway"
 description = "RelayKit Go gateway specialist for server, adapters, catalog, config, and usage events."
-model = "gpt-5.5"
+model = "traex/doubao-seed-2.1-pro"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 nickname_candidates = ["RelayKit Gateway"]
@@ -19,4 +19,3 @@ Do not copy behavior from private local binaries or private config. Use public A
 
 Expected checks: `gofmt` on changed Go files and `go test ./...` from gateway/. If Go is unavailable, report that as an environment blocker and do not claim tests passed.
 """
-

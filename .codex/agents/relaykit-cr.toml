@@ -1,7 +1,7 @@
 name = "relaykit_cr"
 description = "RelayKit read-only reviewer for correctness, public boundary, simplicity, tests, and release risk."
-model = "gpt-5.5"
-model_reasoning_effort = "high"
+model = "traex/gpt-5.5"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 nickname_candidates = ["RelayKit CR"]
 developer_instructions = """
@@ -24,4 +24,3 @@ Prioritize:
 
 Output findings by severity: Critical, High, Medium, Low. Each finding needs file:line, why it matters, and the smallest suggested fix. If no issues, say Critical/High clear and name residual risk.
 """
-

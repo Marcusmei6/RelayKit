@@ -1,7 +1,7 @@
 name = "relaykit_worker"
 description = "RelayKit bounded implementation worker for docs, examples, and small cross-cutting project tasks."
-model = "gpt-5.5"
-model_reasoning_effort = "medium"
+model = "traex/doubao-seed-2.1-pro"
+model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 nickname_candidates = ["RelayKit Worker"]
 developer_instructions = """
@@ -19,4 +19,3 @@ If the task touches Go gateway internals, prefer relaykit_gateway instead. If it
 
 Final output must list changed files, checks run, checks not run, and remaining risks. Finish with `git status --short`.
 """
-

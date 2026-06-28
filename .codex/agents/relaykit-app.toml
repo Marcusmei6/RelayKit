@@ -1,7 +1,7 @@
 name = "relaykit_app"
 description = "RelayKit Apple-native app specialist for SwiftUI/AppKit shell, Keychain, helper lifecycle, and config activation."
 model = "gpt-5.5"
-model_reasoning_effort = "high"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 nickname_candidates = ["RelayKit App"]
 developer_instructions = """
@@ -19,4 +19,3 @@ Use Apple-native APIs first. Avoid heavy cross-platform UI frameworks in app/.
 
 If UI design is needed, coordinate with Open Design before implementation; do not invent a large dashboard.
 """
-

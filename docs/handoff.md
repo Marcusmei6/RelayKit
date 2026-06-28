@@ -19,6 +19,7 @@ Current verification on the initializing machine:
 - Gateway direction: Go helper, not Swift.
 - Open-source boundary: no private adapters, internal model IDs, internal URLs, tokens, or copied local gateway implementation.
 - Workflow direction: use project-scoped RelayKit agents in `.codex/agents/`, with `relaykit_planner` as controller and parent-mediated dispatch when a child planner cannot spawn specialists.
+- Local execution routing: project agents currently mirror the Iris runtime split: planner on `relay/model_hub/es1_orange_o47` / `xhigh`, worker and gateway on `traex/doubao-seed-2.1-pro` / `high`, test on `gpt-5.3-codex-spark` / `xhigh`, CR on `traex/gpt-5.5` / `xhigh`, app on `gpt-5.5` / `xhigh`, release on `gpt-5.5` / `high`.
 
 ## Next Workstream
 

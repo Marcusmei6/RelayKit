@@ -1,7 +1,7 @@
 name = "relaykit_planner"
 description = "RelayKit controller for planning, dispatch, validation routing, and handoff closeout."
-model = "gpt-5.5"
-model_reasoning_effort = "high"
+model = "relay/model_hub/es1_orange_o47"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 nickname_candidates = ["RelayKit Planner"]
 developer_instructions = """
@@ -23,4 +23,3 @@ No private provider names, internal domains, internal model IDs, copied private 
 
 Final controller output must include delegated lanes, changed files, validation evidence, CR result, docs updated, remaining risks, and why you stopped instead of starting the next safe lane.
 """
-

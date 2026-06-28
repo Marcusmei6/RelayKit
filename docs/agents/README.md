@@ -4,17 +4,19 @@ This file defines RelayKit's project-scoped agent workflow. It is a routing map,
 
 Project agents live in `.codex/agents/` and are registered by `.codex/config.toml`. Keep these agents project-scoped so the public repository carries its own development workflow without depending on a user's global setup.
 
+This checkout is configured for local Mac mini execution and intentionally mirrors the current Iris model routing. Before publishing RelayKit to a public GitHub repository, scrub `.codex/agents/*.toml` back to public model names and update this table.
+
 ## Agents
 
-| Agent | Role | Writes? | Use when | Must not do |
-| --- | --- | --- | --- | --- |
-| `relaykit_planner` | Controller | Narrow docs/workflow only | Split work, assign lanes, enforce gates, maintain handoff | Implement product code, claim dispatch without evidence, handle secrets |
-| `relaykit_worker` | General worker | Yes | Bounded docs/examples/small cross-cutting tasks | Broaden scope, merge/push, edit private data |
-| `relaykit_gateway` | Go gateway worker | Yes | Server, adapters, config, catalog, usage events | Edit app UI, copy private gateway behavior |
-| `relaykit_app` | Apple app worker | Yes | SwiftUI/AppKit shell, Keychain, helper lifecycle, config activation | Implement protocol adapters or SSE parsing in Swift |
-| `relaykit_test` | Validator | Ignored artifacts only | Focused validation, command evidence, tier adequacy | Fix code, add tests, bless unverified claims |
-| `relaykit_cr` | Reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files |
-| `relaykit_release` | Release validator | Ignored artifacts only | Packaging, signing readiness, public repo hygiene | Sign/notarize/publish without explicit user request |
+| Agent | Model | Role | Writes? | Use when | Must not do |
+| --- | --- | --- | --- | --- | --- |
+| `relaykit_planner` | `relay/model_hub/es1_orange_o47` / `xhigh` | Controller | Narrow docs/workflow only | Split work, assign lanes, enforce gates, maintain handoff | Implement product code, claim dispatch without evidence, handle secrets |
+| `relaykit_worker` | `traex/doubao-seed-2.1-pro` / `high` | General worker | Yes | Bounded docs/examples/small cross-cutting tasks | Broaden scope, merge/push, edit private data |
+| `relaykit_gateway` | `traex/doubao-seed-2.1-pro` / `high` | Go gateway worker | Yes | Server, adapters, config, catalog, usage events | Edit app UI, copy private gateway behavior |
+| `relaykit_app` | `gpt-5.5` / `xhigh` | Apple app worker | Yes | SwiftUI/AppKit shell, Keychain, helper lifecycle, config activation | Implement protocol adapters or SSE parsing in Swift |
+| `relaykit_test` | `gpt-5.3-codex-spark` / `xhigh` | Validator | Ignored artifacts only | Focused validation, command evidence, tier adequacy | Fix code, add tests, bless unverified claims |
+| `relaykit_cr` | `traex/gpt-5.5` / `xhigh` | Reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files |
+| `relaykit_release` | `gpt-5.5` / `high` | Release validator | Ignored artifacts only | Packaging, signing readiness, public repo hygiene | Sign/notarize/publish without explicit user request |
 
 ## Default Flow
 
@@ -60,13 +62,15 @@ Tier 3 always needs security-sensitive review and cannot be downgraded to docs-o
 Every lane must preserve the open-source boundary:
 
 - no internal domains;
-- no internal model IDs;
+- no internal model IDs in product code, examples, provider presets, README, or release artifacts;
 - no JWTs, API keys, cookies, auth JSON, or key files;
 - no real usage logs;
 - no copied private gateway code or decompiled behavior;
 - no private provider presets.
 
 Use public fixtures and fake values only.
+
+The `.codex/agents/*.toml` model routes are a local-development exception while this repository remains private on this Mac mini. They are not release-safe.
 
 ## First Development Handoff
 
@@ -77,4 +81,3 @@ The first real implementation session should start with `relaykit_planner` and f
 3. Generate model catalog from public profiles.
 4. Add OpenAI-compatible Chat adapter using fake upstream tests.
 5. Keep SwiftUI implementation deferred until the gateway contract is stable.
-
