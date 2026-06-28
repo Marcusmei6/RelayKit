@@ -16,11 +16,18 @@ import (
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:19777", "loopback listen address")
+	configPath := flag.String("config", "../examples/providers.example.json", "provider profile JSON path")
 	flag.Parse()
+
+	handler, err := server.New(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gateway config failed: %v\n", err)
+		os.Exit(1)
+	}
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           server.New(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

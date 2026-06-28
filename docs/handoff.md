@@ -2,26 +2,35 @@
 
 ## Current State
 
-The repository has been initialized as a public-safe skeleton. It contains docs, ownership rules, public examples, and a minimal Go gateway placeholder.
+The repository has been initialized as a public-safe skeleton. It contains docs, ownership rules, public examples, and a minimal Go gateway Phase 1 implementation.
 
-This session could not safely implement gateway code because `go` and `gofmt` are not installed on PATH. Per the project goal, work continued only on docs/spec tasks.
+The previous Go toolchain blocker is resolved on this Mac mini. `go` and `gofmt` are available at `/opt/homebrew/bin/`, installed through Homebrew.
 
-Phase 1 spec drafted at `docs/spec/gateway-phase1.md`; awaiting Go toolchain for implementation.
+Phase 1 implementation now covers `docs/spec/gateway-phase1.md`:
+
+- provider profile loading from JSON;
+- stable config error codes;
+- `/v1/models` generated from configured providers;
+- `-listen` and `-config` gateway flags;
+- non-streaming `/v1/responses` to OpenAI Chat-compatible upstream translation, covered with a fake upstream test.
+
 Phase 2 and Phase 3 stubs drafted at `docs/spec/gateway-phase2-streaming.md` and `docs/spec/gateway-phase3-anthropic.md`.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 
-Latest committed work:
+Latest committed baseline before Phase 1 implementation:
 
-- `e9e5f37 docs: specify gateway phase contracts`
-- Current HEAD records this handoff closeout and the repeated Go/gofmt blocker.
+- `128c033 docs: record relaykit handoff blocker`
 
-Current verification on the initializing machine:
+Current verification on this machine:
 
-- File/path sanity check passed.
-- `go test ./...` was not run because `go`/`gofmt` are not installed on this machine's PATH.
-- `git diff --check` passed during docs validation.
+- `cd gateway && go test ./... -count=1` passed.
+- `cd gateway && gofmt -l .` returned empty.
+- `cd gateway && go vet ./...` passed.
+- `git diff --check` passed.
 - Private-string scan passed for publishable docs, examples, and gateway product surfaces.
-- Toolchain recheck: `go: missing from PATH`; `gofmt: missing from PATH`.
+- Missing config startup check returns `config_read_error`.
+- `relaykit_test` validation passed all Phase 1 acceptance rows.
+- `relaykit_cr` first review returned NEEDS WORK for ignored test write errors and one avoidable single-use abstraction; both were fixed. A second CR dispatch was attempted but failed at the local subagent provider route with `502 Bad Gateway` / connection refused, not a code finding.
 
 ## Important Decisions
 
@@ -36,11 +45,11 @@ Current verification on the initializing machine:
 
 ## Next Workstream
 
-Start with toolchain readiness, then Phase 1 from `docs/spec/gateway-phase1.md`:
+Continue from the completed Phase 1 gateway slice:
 
-1. Install Go >= 1.22 or make `go` and `gofmt` available on PATH.
-2. Run `go test ./...` from `gateway/` to establish the current baseline.
-3. Implement Phase 1 against `docs/spec/gateway-phase1.md`.
+1. Re-run `cd gateway && go test ./... -count=1` before further gateway edits.
+2. Decide whether to harden Phase 1 before Phase 2: request timeouts, richer Responses input arrays, or stricter response validation.
+3. Start Phase 2 streaming from `docs/spec/gateway-phase2-streaming.md` only after a fresh validation pass.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Keep the app directory documentation-only until the gateway contract is real.
 
@@ -50,10 +59,10 @@ Plan id: `relaykit-phase1-gateway-mvp`
 
 | Lane | Assignment | Owned Paths | Status |
 | --- | --- | --- | --- |
-| `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, and fake-upstream non-streaming Chat adapter once Go is available. | `gateway/`, `examples/` | Blocked: `go`/`gofmt` missing |
-| `relaykit_worker` | Keep public docs/examples aligned with the minimal ProviderProfile contract. | `docs/handoff.md`, `docs/development-plan.md`, `gateway/README.md`, `examples/` | Done for docs-only slice |
-| `relaykit_test` | Run `go test ./...`, `gofmt`, and private-string scan after implementation. | ignored validation artifacts only | Blocked until Go is available |
-| `relaykit_cr` | Review simplicity, public boundary, and credential handling before any publish/push. | read-only | Docs-only slice reviewed; public-boundary issue fixed |
+| `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, and fake-upstream non-streaming Chat adapter. | `gateway/`, `examples/` | Done for Phase 1 |
+| `relaykit_worker` | Keep public docs/examples aligned with the minimal ProviderProfile contract. | `docs/handoff.md`, `docs/development-plan.md`, `gateway/README.md`, `examples/` | Done for current slice |
+| `relaykit_test` | Run `go test ./...`, `gofmt`, `go vet`, missing-config check, and private-string scan after implementation. | ignored validation artifacts only | Passed for Phase 1 |
+| `relaykit_cr` | Review simplicity, public boundary, and credential handling before any publish/push. | read-only | First review findings fixed; second dispatch blocked by local provider route |
 
 ## Suggested First Agent Assignment
 
@@ -64,7 +73,7 @@ Recommended initial prompt:
 ```text
 WORKTREE: /Users/marcusmacmini/workplace/RelayKit
 BRANCH: main
-PLAN: RelayKit Phase 1 Gateway MVP from docs/spec/gateway-phase1.md
+PLAN: RelayKit Gateway Phase 2 streaming MVP from docs/spec/gateway-phase2-streaming.md, after fresh Phase 1 validation
 OWNED PATHS: gateway/, examples/, docs/handoff.md, docs/development-plan.md
 BLOCKED PATHS: app/, private provider configs, real credentials, hosted telemetry
 Change Risk Tier: Tier 2
@@ -72,15 +81,15 @@ Validation Tier: Tier 2
 CR Tier: Tier 2
 STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing, or unclear public boundary
 
-Use relaykit_planner as controller. Build the dispatch board and implement Gateway MVP against docs/spec/gateway-phase1.md only. Do not start SwiftUI yet.
+Use relaykit_planner as controller. Build the dispatch board, re-run Phase 1 validation, then implement Phase 2 streaming against docs/spec/gateway-phase2-streaming.md only. Do not start SwiftUI yet.
 ```
 
 Acceptance:
 
-- `go test ./...` passes.
-- Gateway loads a public example provider file.
-- `/v1/models` returns configured model IDs.
-- Non-streaming `/v1/responses` can call a fake upstream in tests and return Responses-shaped JSON.
+- `cd gateway && go test ./... -count=1` passes.
+- Existing Phase 1 tests keep passing.
+- Streaming tests use fake upstreams only.
+- Public-boundary scan has no disallowed hits.
 
 ## Workflow Assets Added
 
