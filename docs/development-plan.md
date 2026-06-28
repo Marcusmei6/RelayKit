@@ -46,6 +46,27 @@ Go gateway helper
 - Add request/response tests.
 - Add CLI flags for config path and listen address.
 
+Minimal public `ProviderProfile` contract:
+
+```json
+{
+  "id": "local-openai-compatible",
+  "name": "Local OpenAI Compatible",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "api_format": "openai_chat",
+  "auth_env": "RELAYKIT_EXAMPLE_API_KEY",
+  "models": [
+    {
+      "id": "qwen3-coder",
+      "display_name": "Qwen3 Coder",
+      "context_window": 128000
+    }
+  ]
+}
+```
+
+Phase 1 should reject missing `id`, `base_url`, `api_format`, or empty `models`. `auth_env` is optional for local fake providers and must name an environment variable, not contain a secret.
+
 ## Phase 2: Streaming MVP
 
 - Add SSE parser.

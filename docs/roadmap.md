@@ -10,13 +10,14 @@
 ## Milestone 1: Gateway Contract
 
 - Define provider profile schema.
-- Load providers from `providers.json`.
+- Load providers from `examples/providers.example.json` via `-config`.
 - Generate model catalog JSON.
 - Add OpenAI-compatible Chat adapter behind tests.
 - Add deterministic non-streaming `/v1/responses` translation test.
 
 ## Milestone 2: Streaming
 
+- Spec stub: `docs/spec/gateway-phase2-streaming.md`.
 - Translate Chat Completions SSE into Responses-style SSE.
 - Preserve usage tokens when upstream includes usage.
 - Add malformed stream and upstream failure tests.
@@ -41,4 +42,3 @@
 - Usage summary endpoint.
 - Log tail in app.
 - Health/status page.
-

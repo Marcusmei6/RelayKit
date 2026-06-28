@@ -5,6 +5,7 @@
       "name": "Local OpenAI Compatible",
       "base_url": "http://127.0.0.1:11434/v1",
       "api_format": "openai_chat",
+      "auth_env": "RELAYKIT_EXAMPLE_API_KEY",
       "models": [
         {
           "id": "qwen3-coder",
@@ -15,4 +16,3 @@
     }
   ]
 }
-

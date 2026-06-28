@@ -10,3 +10,9 @@ First milestone:
 
 The current implementation is a safe placeholder: it proves the server shape and returns deterministic local responses. Real adapters will be added behind tests.
 
+Next implementation slice:
+
+- load `examples/providers.example.json`;
+- return configured model IDs from `/v1/models`;
+- translate one non-streaming Responses request through an OpenAI Chat-compatible fake upstream;
+- add `-config` for the config path while keeping `-listen` loopback by default.

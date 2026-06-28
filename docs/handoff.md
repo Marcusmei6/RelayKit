@@ -4,11 +4,18 @@
 
 The repository has been initialized as a public-safe skeleton. It contains docs, ownership rules, public examples, and a minimal Go gateway placeholder.
 
+This session could not safely implement gateway code because `go` and `gofmt` are not installed on PATH. Per the project goal, work continued only on docs/spec tasks.
+
+Phase 1 spec drafted at `docs/spec/gateway-phase1.md`; awaiting Go toolchain for implementation.
+Phase 2 and Phase 3 stubs drafted at `docs/spec/gateway-phase2-streaming.md` and `docs/spec/gateway-phase3-anthropic.md`.
+Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
+
 Current verification on the initializing machine:
 
 - File/path sanity check passed.
-- Private-string quick scan passed for known local internal keywords.
 - `go test ./...` was not run because `go`/`gofmt` are not installed on this machine's PATH.
+- `git diff --check` passed during docs validation.
+- Private-string scan passed for publishable docs, examples, and gateway product surfaces.
 
 ## Important Decisions
 
@@ -19,17 +26,28 @@ Current verification on the initializing machine:
 - Gateway direction: Go helper, not Swift.
 - Open-source boundary: no private adapters, internal model IDs, internal URLs, tokens, or copied local gateway implementation.
 - Workflow direction: use project-scoped RelayKit agents in `.codex/agents/`, with `relaykit_planner` as controller and parent-mediated dispatch when a child planner cannot spawn specialists.
-- Local execution routing: project agents currently mirror the Iris runtime split: planner on `relay/model_hub/es1_orange_o47` / `xhigh`, worker and gateway on `traex/doubao-seed-2.1-pro` / `high`, test on `gpt-5.3-codex-spark` / `xhigh`, CR on `traex/gpt-5.5` / `xhigh`, app on `gpt-5.5` / `xhigh`, release on `gpt-5.5` / `high`.
+- Local execution routing: project agents currently mirror a private local runtime split. Exact local model IDs are intentionally omitted from publishable docs; inspect `.codex/agents/*.toml` only on this private checkout.
 
 ## Next Workstream
 
-Start with Phase 1 from `docs/development-plan.md`:
+Start with toolchain readiness, then Phase 1 from `docs/spec/gateway-phase1.md`:
 
-1. Define provider profile schema.
-2. Load `examples/providers.example.json`.
-3. Generate catalog from public profiles.
-4. Add OpenAI-compatible Chat adapter behind tests.
+1. Install Go >= 1.22 or make `go` and `gofmt` available on PATH.
+2. Run `go test ./...` from `gateway/` to establish the current baseline.
+3. Implement Phase 1 against `docs/spec/gateway-phase1.md`.
+4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Keep the app directory documentation-only until the gateway contract is real.
+
+## Dispatch Board
+
+Plan id: `relaykit-phase1-gateway-mvp`
+
+| Lane | Assignment | Owned Paths | Status |
+| --- | --- | --- | --- |
+| `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, and fake-upstream non-streaming Chat adapter once Go is available. | `gateway/`, `examples/` | Blocked: `go`/`gofmt` missing |
+| `relaykit_worker` | Keep public docs/examples aligned with the minimal ProviderProfile contract. | `docs/handoff.md`, `docs/development-plan.md`, `gateway/README.md`, `examples/` | Done for docs-only slice |
+| `relaykit_test` | Run `go test ./...`, `gofmt`, and private-string scan after implementation. | ignored validation artifacts only | Blocked until Go is available |
+| `relaykit_cr` | Review simplicity, public boundary, and credential handling before any publish/push. | read-only | Pending |
 
 ## Suggested First Agent Assignment
 
@@ -40,7 +58,7 @@ Recommended initial prompt:
 ```text
 WORKTREE: /Users/marcusmacmini/workplace/RelayKit
 BRANCH: main
-PLAN: RelayKit Phase 1 Gateway MVP
+PLAN: RelayKit Phase 1 Gateway MVP from docs/spec/gateway-phase1.md
 OWNED PATHS: gateway/, examples/, docs/handoff.md, docs/development-plan.md
 BLOCKED PATHS: app/, private provider configs, real credentials, hosted telemetry
 Change Risk Tier: Tier 2
@@ -48,7 +66,7 @@ Validation Tier: Tier 2
 CR Tier: Tier 2
 STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing, or unclear public boundary
 
-Use relaykit_planner as controller. Build the dispatch board and implement Gateway MVP only. Do not start SwiftUI yet.
+Use relaykit_planner as controller. Build the dispatch board and implement Gateway MVP against docs/spec/gateway-phase1.md only. Do not start SwiftUI yet.
 ```
 
 Acceptance:
