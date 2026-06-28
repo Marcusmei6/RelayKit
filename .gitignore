@@ -1,0 +1,13 @@
+.DS_Store
+*.log
+*.tmp
+dist/
+build/
+.env
+.env.*
+!.env.example
+coverage/
+app/DerivedData/
+gateway/bin/
+data/
+

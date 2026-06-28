@@ -1,0 +1,10 @@
+model = "qwen3-coder"
+model_provider = "relaykit"
+model_catalog_json = "/path/to/relaykit/catalog.generated.json"
+
+[model_providers.relaykit]
+name = "RelayKit"
+base_url = "http://127.0.0.1:19777/v1"
+wire_api = "responses"
+experimental_bearer_token = "relaykit-local"
+
