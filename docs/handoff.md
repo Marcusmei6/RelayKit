@@ -10,12 +10,18 @@ Phase 1 spec drafted at `docs/spec/gateway-phase1.md`; awaiting Go toolchain for
 Phase 2 and Phase 3 stubs drafted at `docs/spec/gateway-phase2-streaming.md` and `docs/spec/gateway-phase3-anthropic.md`.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 
+Latest committed work:
+
+- `e9e5f37 docs: specify gateway phase contracts`
+- Current HEAD records this handoff closeout and the repeated Go/gofmt blocker.
+
 Current verification on the initializing machine:
 
 - File/path sanity check passed.
 - `go test ./...` was not run because `go`/`gofmt` are not installed on this machine's PATH.
 - `git diff --check` passed during docs validation.
 - Private-string scan passed for publishable docs, examples, and gateway product surfaces.
+- Toolchain recheck: `go: missing from PATH`; `gofmt: missing from PATH`.
 
 ## Important Decisions
 
@@ -47,7 +53,7 @@ Plan id: `relaykit-phase1-gateway-mvp`
 | `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, and fake-upstream non-streaming Chat adapter once Go is available. | `gateway/`, `examples/` | Blocked: `go`/`gofmt` missing |
 | `relaykit_worker` | Keep public docs/examples aligned with the minimal ProviderProfile contract. | `docs/handoff.md`, `docs/development-plan.md`, `gateway/README.md`, `examples/` | Done for docs-only slice |
 | `relaykit_test` | Run `go test ./...`, `gofmt`, and private-string scan after implementation. | ignored validation artifacts only | Blocked until Go is available |
-| `relaykit_cr` | Review simplicity, public boundary, and credential handling before any publish/push. | read-only | Pending |
+| `relaykit_cr` | Review simplicity, public boundary, and credential handling before any publish/push. | read-only | Docs-only slice reviewed; public-boundary issue fixed |
 
 ## Suggested First Agent Assignment
 
