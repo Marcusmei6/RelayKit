@@ -1,0 +1,26 @@
+[agents]
+max_threads = 8
+max_depth = 2
+job_max_runtime_seconds = 1800
+
+[agents.relaykit_planner]
+config_file = "agents/relaykit-planner.toml"
+
+[agents.relaykit_worker]
+config_file = "agents/relaykit-worker.toml"
+
+[agents.relaykit_gateway]
+config_file = "agents/relaykit-gateway.toml"
+
+[agents.relaykit_app]
+config_file = "agents/relaykit-app.toml"
+
+[agents.relaykit_test]
+config_file = "agents/relaykit-test.toml"
+
+[agents.relaykit_cr]
+config_file = "agents/relaykit-cr.toml"
+
+[agents.relaykit_release]
+config_file = "agents/relaykit-release.toml"
+

@@ -78,10 +78,15 @@ Go gateway helper
 
 ## Task Ownership
 
-- Main coordinator owns roadmap, review, release gates, and public boundary.
-- Gateway lane owns Go helper, adapters, tests.
-- App lane owns SwiftUI shell, Keychain, helper lifecycle.
-- Docs lane owns README, examples, comparisons, and handoff docs.
+- `relaykit_planner` owns roadmap, dispatch, review/validation gates, release gates, and public boundary.
+- `relaykit_gateway` owns Go helper, adapters, catalog, config parsing, usage events, and gateway tests.
+- `relaykit_app` owns SwiftUI/AppKit shell, Keychain, helper lifecycle, LaunchAgent, config activation, and app tests.
+- `relaykit_worker` owns bounded docs/examples/small cross-cutting implementation tasks.
+- `relaykit_test` owns validation evidence and tier adequacy.
+- `relaykit_cr` owns read-only correctness, simplicity, public-boundary, and security-sensitive review.
+- `relaykit_release` owns packaging, signing readiness, helper layout, and public repo hygiene checks.
+
+See `docs/agents/README.md` for the assignment header and dispatch rules.
 
 ## Release Gate
 
@@ -93,4 +98,3 @@ First public release requires:
 - one public provider works end-to-end;
 - Codex config activation has backup and rollback;
 - no hosted telemetry.
-

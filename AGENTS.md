@@ -15,10 +15,18 @@ RelayKit is intended to become a public open-source project. Keep the repository
 - `gateway/` is the portable local gateway helper: HTTP server, protocol adapters, model catalog, usage events.
 - `docs/` is the product and engineering source of truth.
 - `examples/` contains safe public sample config only.
+- `.codex/agents/` contains project-scoped RelayKit development agents. See `docs/agents/README.md`.
+
+## Workflow
+
+- Non-trivial project work starts with `relaykit_planner`.
+- Implementation goes to bounded specialist lanes: `relaykit_gateway`, `relaykit_app`, or `relaykit_worker`.
+- Validation goes to `relaykit_test`; review goes to `relaykit_cr`; packaging/release scope goes to `relaykit_release`.
+- If the planner cannot spawn specialists, it must emit `PARENT DISPATCH REQUIRED` with exact assignments for the parent/root session.
+- Specialist assignments must include WORKTREE, BRANCH, PLAN, OWNED PATHS, BLOCKED PATHS, Change Risk Tier, Validation Tier, CR Tier, and STOP CONDITIONS.
 
 ## Verification
 
 - Gateway changes need `go test ./...`.
 - Documentation-only changes need a link/path sanity check.
 - Any change touching config or credentials must include a redaction review before completion.
-
