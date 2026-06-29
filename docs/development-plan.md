@@ -114,6 +114,9 @@ Status: local LaunchAgent flow complete.
 
 ## Phase 5: Local Observability
 
+Status: started with local helper log tail.
+
+- Added a local helper log tail command for `/tmp/relaykit-gateway.{out,err}.log`.
 - Write usage JSONL.
 - Summarize local usage by model/provider/day.
 - Add app usage view.

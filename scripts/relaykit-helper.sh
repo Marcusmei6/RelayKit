@@ -6,6 +6,8 @@ LABEL="dev.relaykit.gateway"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 BINARY="${ROOT}/gateway/bin/relaykit-gateway"
 LISTEN="127.0.0.1:19777"
+OUT_LOG="/tmp/relaykit-gateway.out.log"
+ERR_LOG="/tmp/relaykit-gateway.err.log"
 
 usage() {
   cat <<EOF
@@ -13,6 +15,7 @@ Usage:
   $0 install --config /path/to/providers.json [--binary /path/to/relaykit-gateway]
   $0 uninstall
   $0 status
+  $0 logs [--lines 80] [--follow]
 EOF
 }
 
@@ -97,9 +100,9 @@ install_helper() {
   <key>KeepAlive</key>
   <false/>
   <key>StandardOutPath</key>
-  <string>/tmp/relaykit-gateway.out.log</string>
+  <string>${OUT_LOG}</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/relaykit-gateway.err.log</string>
+  <string>${ERR_LOG}</string>
 </dict>
 </plist>
 EOF
@@ -107,8 +110,8 @@ EOF
   sleep 1
   if ! is_running; then
     echo "gateway LaunchAgent did not stay running" >&2
-    if [[ -f /tmp/relaykit-gateway.err.log ]]; then
-      tail -n 20 /tmp/relaykit-gateway.err.log >&2
+    if [[ -f "${ERR_LOG}" ]]; then
+      tail -n 20 "${ERR_LOG}" >&2
     fi
     launchctl bootout "gui/$(id -u)" "${PLIST}" >/dev/null 2>&1 || true
     rm -f "${PLIST}"
@@ -132,6 +135,45 @@ status_helper() {
   fi
 }
 
+logs_helper() {
+  local lines="80"
+  local follow="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --lines)
+        if [[ $# -lt 2 || ! "${2:-}" =~ ^[0-9]+$ ]]; then
+          echo "--lines requires a non-negative integer" >&2
+          exit 2
+        fi
+        lines="$2"
+        shift 2
+        ;;
+      --follow)
+        follow="true"
+        shift
+        ;;
+      *)
+        usage >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  local files=()
+  [[ -f "${OUT_LOG}" ]] && files+=("${OUT_LOG}")
+  [[ -f "${ERR_LOG}" ]] && files+=("${ERR_LOG}")
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo "no RelayKit helper logs found"
+    exit 0
+  fi
+
+  if [[ "${follow}" == "true" ]]; then
+    tail -n "${lines}" -f "${files[@]}"
+  else
+    tail -n "${lines}" "${files[@]}"
+  fi
+}
+
 case "${1:-}" in
   install)
     shift
@@ -142,6 +184,10 @@ case "${1:-}" in
     ;;
   status)
     status_helper
+    ;;
+  logs)
+    shift
+    logs_helper "$@"
     ;;
   *)
     usage >&2

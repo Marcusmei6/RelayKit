@@ -21,6 +21,7 @@ Safe Codex config activation now has a minimal gateway primitive in `gateway/int
 Mac MVP app shell exists in `app/` as a SwiftPM SwiftUI app. It can start/stop an explicitly configured gateway binary, check `/healthz`, read `/v1/models`, and call the explicit Codex config activation CLI.
 Local alpha smoke is covered by `scripts/local-alpha-smoke.sh`.
 Durable local helper lifecycle is covered by `scripts/relaykit-helper.sh`, which installs/uninstalls only `~/Library/LaunchAgents/dev.relaykit.gateway.plist` and requires an explicit provider config path.
+Local helper log tail is available through `scripts/relaykit-helper.sh logs`; it reads only `/tmp/relaykit-gateway.{out,err}.log` and does not collect or upload usage events.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 
 Latest committed baseline before Phase 1 implementation:
@@ -86,6 +87,10 @@ Current verification on this machine:
   - `/healthz` and `/v1/models` worked through the LaunchAgent-started helper;
   - `scripts/relaykit-helper.sh uninstall` removed the LaunchAgent and stopped the helper.
   - deliberate Phase 4.5 simplifications: `127.0.0.1:19777` is hardcoded, and helper stdout/stderr go to `/tmp/relaykit-gateway.{out,err}.log`.
+- Phase 5 local log-tail start:
+  - `scripts/relaykit-helper.sh logs --lines 5` reads existing helper stdout/stderr logs when present;
+  - `scripts/relaykit-helper.sh logs --lines nope` exits with an explicit `--lines requires a non-negative integer` error;
+  - this is local helper stdout/stderr only, not usage JSONL or cloud telemetry.
 
 ## Important Decisions
 
@@ -100,10 +105,10 @@ Current verification on this machine:
 
 ## Next Workstream
 
-Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, and Phase 4.5 helper lifecycle:
+Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, and the first Phase 5 log-tail utility:
 
 1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
-2. Choose the next safe item from `docs/development-plan.md`: local log tail, provider config editing without secrets, usage JSONL without cloud upload, or Anthropic/tool-use hardening.
+2. Choose the next safe item from `docs/development-plan.md`: usage JSONL without cloud upload, provider config editing without secrets, or Anthropic/tool-use hardening.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/provider editing only after the gateway and app shell review gates stay green.
@@ -118,6 +123,7 @@ Plan id: `relaykit-local-alpha-to-helper-lifecycle`
 | `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, fake-upstream non-streaming Chat adapter, Phase 2 text streaming MVP, and Phase 3 Anthropic Messages MVP. | `gateway/`, `examples/`, `docs/spec/` | Done through Phase 3 MVP |
 | `relaykit_app` | Implement SwiftUI/AppKit shell, helper lifecycle, health/models UI, and safe activation UI. | `app/` | Mac MVP shell implemented |
 | `relaykit_app` | Add smallest LaunchAgent or packaged-helper flow for the existing built gateway binary. | `app/`, `scripts/`, `docs/handoff.md` | Done for local LaunchAgent flow |
+| `relaykit_app` | Add local helper log tail for LaunchAgent stdout/stderr. | `scripts/`, `app/README.md`, `docs/handoff.md`, `docs/development-plan.md` | Done for local log tail |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |
 | `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |
