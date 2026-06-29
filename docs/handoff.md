@@ -17,6 +17,7 @@ Phase 1 implementation now covers `docs/spec/gateway-phase1.md`:
 Phase 2 streaming MVP implemented at `docs/spec/gateway-phase2-streaming.md`.
 Phase 3 Anthropic Messages MVP implemented at `docs/spec/gateway-phase3-anthropic.md`.
 Phase 4 Codex local integration is documented at `docs/spec/codex-local-integration.md` and `examples/codex.config.example.toml`.
+Safe Codex config activation now has a minimal gateway primitive in `gateway/internal/codexconfig`; it only writes an explicitly supplied target path, backs up existing files first, and has no default `~/.codex` target.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 
 Latest committed baseline before Phase 1 implementation:
@@ -50,6 +51,13 @@ Current verification on this machine:
 - Phase 4 Codex local integration docs/examples slice committed as `b4501f2 docs: add codex local integration spec`.
 - Final `relaykit_test` validation passed Phase 3 and Phase 4 checks.
 - Final `relaykit_cr` dispatch was attempted for Phase 3/4 and did not return after a five-minute wait plus a one-minute retry; treat as a workflow/provider availability blocker, not a code failure. Follow-up fix changed `relaykit_cr` to the stable local `gpt-5.5` route and documented root read-only review as the fallback when CR provider availability fails.
+- Codex config activation primitive validation passed:
+  - `cd gateway && go test ./... -count=1` passed.
+  - `cd gateway && go vet ./...` passed.
+  - `cd gateway && test -z "$(gofmt -l .)"` passed.
+  - `git diff --check` passed.
+  - `relaykit_test` passed the explicit-target, backup, restore, no-home-default, and public-boundary checks.
+  - `relaykit_cr` returned SHIP IT with no Critical/High/Medium/Low findings.
 
 ## Important Decisions
 
@@ -64,11 +72,11 @@ Current verification on this machine:
 
 ## Next Workstream
 
-Continue from the completed Phase 3 adapter and Phase 4 docs/examples slice:
+Continue from the completed Phase 3 adapter and Phase 4 activation primitive:
 
 1. Re-run `cd gateway && go test ./... -count=1` before further gateway edits.
-2. Re-attempt `relaykit_cr` for commits `1202f69` and `b4501f2`; if it fails once, use the documented root read-only review fallback instead of blocking gateway development.
-3. Decide whether to add safe Codex config activation code under the app lane, with backup/rollback tests first.
+2. Decide whether to add an explicit CLI or app caller for `internal/codexconfig`; any caller must require a target path and must not default to `~/.codex/config.toml`.
+3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Keep the app directory documentation-only until the gateway contract is real.
 
@@ -80,7 +88,7 @@ Plan id: `relaykit-phase1-gateway-mvp`
 | --- | --- | --- | --- |
 | `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, fake-upstream non-streaming Chat adapter, Phase 2 text streaming MVP, and Phase 3 Anthropic Messages MVP. | `gateway/`, `examples/`, `docs/spec/` | Done through Phase 3 MVP |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
-| `relaykit_test` | Run `go test ./...`, `gofmt`, `go vet`, missing-config check, streaming acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Phase 2 |
+| `relaykit_test` | Run `go test ./...`, `gofmt`, `go vet`, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for activation primitive |
 | `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |
 
 ## Suggested First Agent Assignment

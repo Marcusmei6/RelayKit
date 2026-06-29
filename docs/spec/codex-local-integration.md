@@ -41,11 +41,11 @@ A future config activation command must:
 - refuse to overwrite a real config without backup success;
 - never read, print, or persist real provider credentials.
 
-Activation code is not part of this docs/examples slice.
+The gateway package `internal/codexconfig` contains the minimal activation primitive for this contract. It has no default target path: callers must pass the destination config path explicitly.
 
 ## Not In This Slice
 
-- writing to `~/.codex/config.toml`;
+- automatic writing to `~/.codex/config.toml`;
 - merging with a user's existing Codex config;
 - model catalog generation;
 - SwiftUI/AppKit UI;
