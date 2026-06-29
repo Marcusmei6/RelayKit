@@ -47,6 +47,12 @@ Planner owns small missing contracts. If the next safe item is blocked only by m
 
 Do not ask for human input for small local defaults when the conservative choice is reversible and public-safe. Human input is allowed only when the missing decision changes product scope, public API compatibility, security posture, irreversible user data behavior, real credentials, private providers, signing, publishing, hosted telemetry, or destructive operations.
 
+## Backlog Expansion Gate
+
+If the dispatch board has fewer than two ready safe lanes, planner must expand the backlog before stopping. Read `docs/development-plan.md`, `docs/handoff.md`, `README.md`, `app/README.md`, `gateway/README.md`, and `docs/public-boundary-checklist.md`; add or refine P0/P1 items only when scope is local, reversible, public-safe, and has clear owned paths and validation.
+
+After expansion, rebuild the dispatch board. If one safe lane remains, run it. Stop only when no safe lane remains, or the next lane needs real credentials, private providers, signing, publishing, hosted telemetry, destructive operations, public API/security posture changes, or irreversible user data behavior.
+
 ## Assignment Header
 
 Every specialist assignment must start with:
@@ -95,7 +101,7 @@ The `.codex/agents/*.toml` model routes are a local-development exception while 
 
 New implementation sessions should start with `relaykit_planner`, run the smoke baseline, then continue from `docs/development-plan.md` rather than a single-feature prompt. The current safe next milestone is Phase 5 local usage JSONL:
 
-1. Use the conservative usage contract in `docs/development-plan.md`.
-2. Write local JSONL only; no cloud upload or hosted telemetry.
-3. Do not record request bodies, response bodies, prompts, headers, cookies, API keys, private domains, or raw credential-bearing URLs.
+1. Use the current milestone backlog in `docs/development-plan.md`.
+2. Prefer provider config editing without secrets, app usage polish, or Anthropic tool-use hardening.
+3. Do not record or store credentials, request bodies, response bodies, prompts, headers, cookies, API keys, private domains, or raw credential-bearing URLs.
 4. Continue to README/handoff closeout and the next safe hardening item if validation passes.

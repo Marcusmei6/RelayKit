@@ -120,11 +120,11 @@ Current verification on this machine:
 Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, Phase 5 usage JSONL writer, and app usage view:
 
 1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
-2. Choose the next safe item from `docs/development-plan.md`: provider config editing without secrets or Anthropic/tool-use hardening.
+2. Choose the next safe item from `docs/development-plan.md`: provider config editing without secrets, app usage polish, Anthropic/tool-use hardening, or local release readiness.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/provider editing only after the gateway and app shell review gates stay green.
-6. Use the planner Continuation Gate and Spec Gap Repair Gate in `docs/agents/README.md`; do not stop after one commit if the next safe item is available, and do not treat small missing local contracts as human blockers.
+6. Use the planner Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate in `docs/agents/README.md`; do not stop after one commit if the next safe item is available, and do not treat small missing local contracts as human blockers.
 
 ## Dispatch Board
 
@@ -139,6 +139,9 @@ Plan id: `relaykit-local-alpha-to-helper-lifecycle`
 | `relaykit_gateway` | Add local usage JSONL writer using the conservative Phase 5 contract. | `gateway/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local writer |
 | `relaykit_gateway` | Add local usage summary CLI by day/provider/model. | `gateway/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local summary |
 | `relaykit_app` | Add minimal app usage view backed by local summary CLI. | `app/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local app view |
+| `relaykit_app` | Add provider config editing without secrets. | `app/`, `gateway/internal/config/`, `examples/`, `docs/handoff.md` | Next safe lane |
+| `relaykit_gateway` | Harden Anthropic tool-use mapping with fake upstream tests. | `gateway/`, `docs/handoff.md` | Queued safe lane |
+| `relaykit_worker` | Refresh README/local release readiness and public scrub notes. | `README.md`, `app/README.md`, `gateway/README.md`, `docs/public-boundary-checklist.md`, `docs/handoff.md` | Queued safe lane |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |
 | `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |
@@ -152,7 +155,7 @@ Recommended initial prompt:
 ```text
 WORKTREE: /Users/marcusmacmini/workplace/RelayKit
 BRANCH: main
-PLAN: RelayKit Phase 5 local usage JSONL, with planner continuation gate
+PLAN: RelayKit local alpha hardening backlog, with planner continuation/spec-gap/backlog gates
 OWNED PATHS: gateway/, app/, scripts/, docs/handoff.md, docs/development-plan.md, docs/agents/README.md
 BLOCKED PATHS: private provider configs, real credentials, hosted telemetry, public GitHub push, signing, notarization, publishing
 Change Risk Tier: Tier 2
@@ -160,7 +163,7 @@ Validation Tier: Tier 2
 CR Tier: Tier 2
 STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing/notarization, or unclear public boundary
 
-Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then implement the smallest local usage JSONL slice using docs/development-plan.md Phase 5's conservative contract. After each passing commit, apply docs/agents/README.md Continuation Gate and Spec Gap Repair Gate, then continue to the next safe item from docs/development-plan.md. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
+Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then implement provider config editing without secrets or the next safe lane from docs/development-plan.md. After each passing commit, apply docs/agents/README.md Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate, then continue to the next safe item. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
 ```
 
 Acceptance:
@@ -171,6 +174,7 @@ Acceptance:
 - CR returns SHIP IT or actionable findings are addressed.
 - Public-boundary scan has no disallowed hits.
 - Handoff states why the planner stopped instead of taking the next safe item.
+- Handoff states the backlog expansion result when fewer than two safe lanes remain.
 
 ## Workflow Assets Added
 

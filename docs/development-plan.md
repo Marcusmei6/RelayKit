@@ -135,6 +135,36 @@ Minimal usage JSONL contract:
 
 These defaults are intentionally conservative and are not a product blocker. If a later caller needs more fields, add them behind review with a public-boundary test.
 
+## Phase 5.5: Local Configuration Editing
+
+Status: next safe milestone.
+
+- Add provider config editing without secrets.
+- Edit only public provider metadata and model list: provider id, display name, base URL, API format, auth env var name, model id, display name, and context window.
+- Never edit, display, or store API keys, bearer tokens, cookies, or credential values.
+- Preserve explicit config paths; no default writes to private provider configs.
+- Validate JSON before writing and keep backup/restore behavior for existing files.
+- Add focused tests for invalid JSON, missing required fields, and no credential persistence.
+- App UI may expose this as a simple editor only after the file contract is tested.
+
+## Phase 3.5: Anthropic Tool-Use Hardening
+
+Status: safe follow-on after config editing or app usage polish.
+
+- Map minimal Anthropic `tool_use` blocks to Responses-shaped output items using fake upstream tests.
+- Preserve unsupported cases as explicit errors or documented omissions.
+- Do not add real provider calls or private provider behavior.
+- Keep streaming tool-use support separate unless the non-streaming contract is already tested.
+
+## Phase 6: Local Release Readiness
+
+Status: queued.
+
+- Make README install/run commands match the current local alpha.
+- Run `docs/public-boundary-checklist.md`.
+- Prepare public-scrub notes for `.codex/agents/*.toml`.
+- Keep signing, notarization, publishing, and GitHub push out of scope until explicitly requested.
+
 ## Task Ownership
 
 - `relaykit_planner` owns roadmap, dispatch, review/validation gates, release gates, and public boundary.
