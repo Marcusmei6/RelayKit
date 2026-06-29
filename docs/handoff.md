@@ -112,7 +112,7 @@ Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usabl
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/provider editing only after the gateway and app shell review gates stay green.
-6. Use the planner continuation gate in `docs/agents/README.md`; do not stop after one commit if the next safe item in `docs/development-plan.md` is still available.
+6. Use the planner Continuation Gate and Spec Gap Repair Gate in `docs/agents/README.md`; do not stop after one commit if the next safe item is available, and do not treat small missing local contracts as human blockers.
 
 ## Dispatch Board
 
@@ -146,7 +146,7 @@ Validation Tier: Tier 2
 CR Tier: Tier 2
 STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing/notarization, or unclear public boundary
 
-Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then implement the smallest local usage JSONL slice using docs/development-plan.md Phase 5's conservative contract. After each passing commit, apply docs/agents/README.md Continuation Gate and continue to the next safe item from docs/development-plan.md. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
+Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then implement the smallest local usage JSONL slice using docs/development-plan.md Phase 5's conservative contract. After each passing commit, apply docs/agents/README.md Continuation Gate and Spec Gap Repair Gate, then continue to the next safe item from docs/development-plan.md. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
 ```
 
 Acceptance:

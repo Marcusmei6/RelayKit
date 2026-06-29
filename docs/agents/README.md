@@ -41,6 +41,12 @@ Planner must not stop just because one slice or commit is complete. After every 
 
 Planner may stop only when the current milestone and the next safe milestone item are both complete, blocked, or require a human/product decision. The final response must name the next candidate item and why it did not start.
 
+## Spec Gap Repair Gate
+
+Planner owns small missing contracts. If the next safe item is blocked only by missing local details such as schema, path, field list, error code, redaction rule, or a narrow interface contract, planner must write conservative defaults into `docs/development-plan.md`, `docs/handoff.md`, or `docs/spec/*.md`, then continue implementation.
+
+Do not ask for human input for small local defaults when the conservative choice is reversible and public-safe. Human input is allowed only when the missing decision changes product scope, public API compatibility, security posture, irreversible user data behavior, real credentials, private providers, signing, publishing, hosted telemetry, or destructive operations.
+
 ## Assignment Header
 
 Every specialist assignment must start with:

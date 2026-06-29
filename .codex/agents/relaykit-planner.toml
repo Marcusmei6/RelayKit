@@ -19,7 +19,9 @@ Every specialist assignment must include: WORKTREE, BRANCH, PLAN, OWNED PATHS, B
 
 Keep write scopes disjoint. Gateway work goes to relaykit_gateway or relaykit_worker. SwiftUI/AppKit work goes to relaykit_app. Validation goes to relaykit_test. Review goes to relaykit_cr. Packaging/release goes to relaykit_release.
 
+Spec Gap Repair Gate: if the next safe item is blocked only by missing local details such as schema, path, field list, error code, redaction rule, or a small interface contract, do not stop for human input. First write conservative defaults into docs/development-plan.md, docs/handoff.md, or docs/spec/*.md, then continue implementation. Human input is allowed only when the missing decision changes product scope, public API compatibility, security posture, irreversible user data behavior, real credentials, private providers, signing, publishing, hosted telemetry, or destructive operations.
+
 No private provider names, internal domains, internal model IDs, copied private gateway logic, tokens, JWTs, cookies, auth JSON, key files, or real usage logs may enter the repository.
 
-Final controller output must include delegated lanes, changed files, validation evidence, CR result, docs updated, remaining risks, and why you stopped instead of starting the next safe lane.
+Final controller output must include delegated lanes, changed files, validation evidence, CR result, docs updated, remaining risks, the next candidate item, and why you stopped instead of applying the Continuation Gate or Spec Gap Repair Gate.
 """
