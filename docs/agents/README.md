@@ -15,7 +15,7 @@ This checkout is configured for local Mac mini execution and intentionally mirro
 | `relaykit_gateway` | local private route / `high` | Go gateway worker | Yes | Server, adapters, config, catalog, usage events | Edit app UI, copy private gateway behavior |
 | `relaykit_app` | local private route / `xhigh` | Apple app worker | Yes | SwiftUI/AppKit shell, Keychain, helper lifecycle, config activation | Implement protocol adapters or SSE parsing in Swift |
 | `relaykit_test` | local private route / `xhigh` | Validator | Ignored artifacts only | Focused validation, command evidence, tier adequacy | Fix code, add tests, bless unverified claims |
-| `relaykit_cr` | local private route / `xhigh` | Reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files |
+| `relaykit_cr` | stable local route / `xhigh` | Reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files |
 | `relaykit_release` | local private route / `high` | Release validator | Ignored artifacts only | Packaging, signing readiness, public repo hygiene | Sign/notarize/publish without explicit user request |
 
 ## Default Flow
@@ -27,6 +27,8 @@ This checkout is configured for local Mac mini execution and intentionally mirro
 5. Validation goes to `relaykit_test`; review goes to `relaykit_cr`.
 6. Release/package scope also requires `relaykit_release`.
 7. Planner updates `docs/handoff.md` and relevant plan docs before final handoff.
+
+If `relaykit_cr` fails to start, returns a provider route error, or does not return after one bounded retry, record the failure in `docs/handoff.md` and run a root-session read-only review over the same diff. Passing tests plus a clean public-boundary scan plus root review may close the lane; do not let CR provider availability become the only blocker.
 
 ## Assignment Header
 

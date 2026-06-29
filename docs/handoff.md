@@ -49,7 +49,7 @@ Current verification on this machine:
   - Public-boundary scan had only documented checklist regex hits and standard auth header assembly.
 - Phase 4 Codex local integration docs/examples slice committed as `b4501f2 docs: add codex local integration spec`.
 - Final `relaykit_test` validation passed Phase 3 and Phase 4 checks.
-- Final `relaykit_cr` dispatch was attempted for Phase 3/4 and did not return after a five-minute wait plus a one-minute retry; treat as a workflow/provider availability blocker, not a code failure.
+- Final `relaykit_cr` dispatch was attempted for Phase 3/4 and did not return after a five-minute wait plus a one-minute retry; treat as a workflow/provider availability blocker, not a code failure. Follow-up fix changed `relaykit_cr` to the stable local `gpt-5.5` route and documented root read-only review as the fallback when CR provider availability fails.
 
 ## Important Decisions
 
@@ -67,7 +67,7 @@ Current verification on this machine:
 Continue from the completed Phase 3 adapter and Phase 4 docs/examples slice:
 
 1. Re-run `cd gateway && go test ./... -count=1` before further gateway edits.
-2. Re-attempt `relaykit_cr` for commits `1202f69` and `b4501f2` when the provider route is healthy.
+2. Re-attempt `relaykit_cr` for commits `1202f69` and `b4501f2`; if it fails once, use the documented root read-only review fallback instead of blocking gateway development.
 3. Decide whether to add safe Codex config activation code under the app lane, with backup/rollback tests first.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Keep the app directory documentation-only until the gateway contract is real.
@@ -81,7 +81,7 @@ Plan id: `relaykit-phase1-gateway-mvp`
 | `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, fake-upstream non-streaming Chat adapter, Phase 2 text streaming MVP, and Phase 3 Anthropic Messages MVP. | `gateway/`, `examples/`, `docs/spec/` | Done through Phase 3 MVP |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, `gofmt`, `go vet`, missing-config check, streaming acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Phase 2 |
-| `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Pending: Phase 3/4 dispatch did not return after retry |
+| `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |
 
 ## Suggested First Agent Assignment
 
