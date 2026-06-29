@@ -103,12 +103,13 @@ Status: local usable alpha complete.
 
 ## Phase 4.5: Helper Lifecycle Hardening
 
-Status: next.
+Status: local LaunchAgent flow complete.
 
-- Add the smallest LaunchAgent or packaged-helper flow for the existing built gateway binary.
-- Keep explicit provider config paths.
-- Do not add credentials, signing, notarization, or publishing.
-- Keep uninstall/stop behavior scoped to RelayKit-owned helper state.
+- Added the smallest LaunchAgent flow for the existing built gateway binary.
+- Kept explicit provider config paths.
+- Did not add credentials, signing, notarization, or publishing.
+- Kept uninstall/stop behavior scoped to RelayKit-owned helper state.
+- Kept the listen address fixed at `127.0.0.1:19777` and helper stdout/stderr at `/tmp/relaykit-gateway.{out,err}.log` for this local alpha slice.
 - Preserve `./scripts/local-alpha-smoke.sh` as the baseline.
 
 ## Phase 5: Local Observability

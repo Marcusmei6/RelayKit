@@ -41,10 +41,24 @@ From the repository root:
 ./scripts/local-alpha-smoke.sh
 ```
 
+## Durable Local Helper
+
+The app Start/Stop buttons control the foreground helper process launched by the app. For a local user LaunchAgent flow, use the repo script from the repository root:
+
+```bash
+cd gateway
+go build -o bin/relaykit-gateway ./cmd/gateway
+cd ..
+./scripts/relaykit-helper.sh install --config "$PWD/examples/providers.example.json"
+./scripts/relaykit-helper.sh status
+./scripts/relaykit-helper.sh uninstall
+```
+
+The script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requires an explicit provider config path, and stores absolute binary/config paths in the plist. Phase 4.5 keeps the listen address fixed at `127.0.0.1:19777` and writes helper stdout/stderr to `/tmp/relaykit-gateway.{out,err}.log`.
+
 ## Not In This Slice
 
 - Keychain credential storage;
-- LaunchAgent install;
 - provider editing;
 - log tail;
 - signing, notarization, or release packaging.
