@@ -31,17 +31,24 @@ The template points Codex at:
 
 3. `/v1/responses` should be validated through gateway tests with fake upstreams. The public example provider file is loopback-only and does not start a real upstream.
 
-## Activation Contract
+## Activation Command
 
-A future config activation command must:
+The gateway CLI exposes a minimal activation command:
+
+```bash
+go run ./cmd/gateway activate-codex-config -source /path/to/codex.toml -target /path/to/config.toml
+```
+
+The command must:
 
 - require an explicit target config path;
+- require an explicit source config path;
 - create a timestamped backup before writing;
 - print the backup path and exact rollback command;
 - refuse to overwrite a real config without backup success;
 - never read, print, or persist real provider credentials.
 
-The gateway package `internal/codexconfig` contains the minimal activation primitive for this contract. It has no default target path: callers must pass the destination config path explicitly.
+The gateway package `internal/codexconfig` contains the activation primitive. The CLI has no default target path and no default source path: callers must pass both explicitly.
 
 ## Not In This Slice
 

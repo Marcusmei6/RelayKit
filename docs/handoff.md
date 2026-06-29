@@ -17,7 +17,7 @@ Phase 1 implementation now covers `docs/spec/gateway-phase1.md`:
 Phase 2 streaming MVP implemented at `docs/spec/gateway-phase2-streaming.md`.
 Phase 3 Anthropic Messages MVP implemented at `docs/spec/gateway-phase3-anthropic.md`.
 Phase 4 Codex local integration is documented at `docs/spec/codex-local-integration.md` and `examples/codex.config.example.toml`.
-Safe Codex config activation now has a minimal gateway primitive in `gateway/internal/codexconfig`; it only writes an explicitly supplied target path, backs up existing files first, and has no default `~/.codex` target.
+Safe Codex config activation now has a minimal gateway primitive in `gateway/internal/codexconfig` and an explicit CLI caller, `gateway activate-codex-config -source <path> -target <path>`; it only writes an explicitly supplied target path, backs up existing files first, and has no default `~/.codex` target.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 
 Latest committed baseline before Phase 1 implementation:
@@ -58,6 +58,11 @@ Current verification on this machine:
   - `git diff --check` passed.
   - `relaykit_test` passed the explicit-target, backup, restore, no-home-default, and public-boundary checks.
   - `relaykit_cr` returned SHIP IT with no Critical/High/Medium/Low findings.
+- Codex config activation CLI caller validation passed:
+  - `go test ./cmd/gateway -count=1` covered missing `-target` rejection and explicit source-to-target activation with rollback output.
+  - `relaykit_test` passed the CLI caller validation and public-boundary checks.
+  - `relaykit_cr` returned SHIP IT for the CLI caller with no severity findings.
+  - A `relaykit_planner` control dispatch disconnected with `magic number mismatch`; root continued under the documented parent-mediated workflow.
 
 ## Important Decisions
 
@@ -72,10 +77,10 @@ Current verification on this machine:
 
 ## Next Workstream
 
-Continue from the completed Phase 3 adapter and Phase 4 activation primitive:
+Continue from the completed Phase 3 adapter and Phase 4 activation CLI:
 
 1. Re-run `cd gateway && go test ./... -count=1` before further gateway edits.
-2. Decide whether to add an explicit CLI or app caller for `internal/codexconfig`; any caller must require a target path and must not default to `~/.codex/config.toml`.
+2. Decide whether to add app UI around `gateway activate-codex-config`; any caller must require a target path, must not default to `~/.codex/config.toml`, and should pass only RelayKit-generated credential-free source configs.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Keep the app directory documentation-only until the gateway contract is real.
