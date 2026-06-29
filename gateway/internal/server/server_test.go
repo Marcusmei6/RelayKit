@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -179,6 +180,90 @@ func TestResponsesProxiesToFakeOpenAIChat(t *testing.T) {
 	}
 	if resp.Usage == nil || resp.Usage["total_tokens"] != 5 {
 		t.Fatalf("usage = %+v", resp.Usage)
+	}
+}
+
+func TestUsageJSONLOmitsBodiesHeadersAndURLs(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":    "chatcmpl-usage",
+			"model": "qwen3-coder",
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "secret-response-body"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","auth_env":"RELAYKIT_TEST_API_KEY","models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAYKIT_TEST_API_KEY", "secret-env-token")
+
+	usagePath := filepath.Join(dir, "usage.jsonl")
+	h, err := NewWithUsageLog(cfgPath, usagePath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"qwen3-coder","input":"prompt-secret-value api_key=secret"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer request-header-secret")
+	req.Header.Set("Cookie", "session=request-cookie-secret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	raw, err := os.ReadFile(usagePath)
+	if err != nil {
+		t.Fatalf("read usage log err = %v", err)
+	}
+	line := string(raw)
+	for _, forbidden := range []string{
+		"prompt-secret-value",
+		"api_key",
+		"secret-response-body",
+		"request-header-secret",
+		"request-cookie-secret",
+		"secret-env-token",
+		upstream.URL,
+		"Authorization",
+		"headers",
+		"body",
+	} {
+		if strings.Contains(line, forbidden) {
+			t.Fatalf("usage log leaked %q in %s", forbidden, line)
+		}
+	}
+	var event struct {
+		ProviderID   string `json:"provider_id"`
+		Model        string `json:"model"`
+		Route        string `json:"route"`
+		Status       string `json:"status"`
+		HTTPStatus   int    `json:"http_status"`
+		InputTokens  int    `json:"input_tokens"`
+		OutputTokens int    `json:"output_tokens"`
+		TotalTokens  int    `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &event); err != nil {
+		t.Fatalf("decode usage log err = %v; raw=%s", err, raw)
+	}
+	if event.ProviderID != "test" || event.Model != "qwen3-coder" || event.Route != "/v1/responses" || event.Status != "completed" || event.HTTPStatus != http.StatusOK {
+		t.Fatalf("event = %+v", event)
+	}
+	if event.InputTokens != 7 || event.OutputTokens != 3 || event.TotalTokens != 10 {
+		t.Fatalf("tokens = %+v", event)
 	}
 }
 

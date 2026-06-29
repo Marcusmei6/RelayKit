@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -69,11 +70,12 @@ func runServer(args []string, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", "127.0.0.1:19777", "loopback listen address")
 	configPath := fs.String("config", "../examples/providers.example.json", "provider profile JSON path")
+	usageLogPath := fs.String("usage-log", defaultUsageLogPath(), "local usage JSONL path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	handler, err := server.New(*configPath)
+	handler, err := server.NewWithUsageLog(*configPath, *usageLogPath)
 	if err != nil {
 		return fmt.Errorf("gateway config failed: %w", err)
 	}
@@ -109,4 +111,12 @@ func runServer(args []string, stderr io.Writer) error {
 		return fmt.Errorf("shutdown failed: %w", err)
 	}
 	return nil
+}
+
+func defaultUsageLogPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "RelayKit", "usage.jsonl")
 }

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,12 +18,18 @@ import (
 )
 
 type Server struct {
-	config *config.Config
-	client *http.Client
+	config       *config.Config
+	client       *http.Client
+	usageLogPath string
 }
 
 func New(configPath string) (http.Handler, error) {
+	return NewWithUsageLog(configPath, "")
+}
+
+func NewWithUsageLog(configPath, usageLogPath string) (http.Handler, error) {
 	s := &Server{client: http.DefaultClient}
+	s.usageLogPath = usageLogPath
 	if configPath != "" {
 		cfg, err := config.Load(configPath)
 		if err != nil {
@@ -73,6 +81,7 @@ func (s *Server) models(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	if r.Header.Get("Content-Type") == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]string{
@@ -146,7 +155,8 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	var chat chatResponse
 	if provider.APIFormat == config.APIFormatAnthropicMessages {
 		if req.Stream {
-			s.streamAnthropic(w, resp.Body, req.Model)
+			result := s.streamAnthropic(w, resp.Body, req.Model)
+			s.recordCompletedUsage(provider.ID, req.Model, result.ID, result.Status, true, result.Usage, start)
 			return
 		}
 		var msg anthropicResponse
@@ -155,10 +165,12 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, responsesFromAnthropic(msg, req.Model))
+		s.recordCompletedUsage(provider.ID, req.Model, responseID(msg.ID), statusFromFinish(msg.StopReason), false, msg.Usage, start)
 		return
 	}
 	if req.Stream {
-		s.streamChat(w, resp.Body, req.Model)
+		result := s.streamChat(w, resp.Body, req.Model)
+		s.recordCompletedUsage(provider.ID, req.Model, result.ID, result.Status, true, result.Usage, start)
 		return
 	}
 
@@ -167,6 +179,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, responsesFromChat(chat, req.Model))
+	s.recordCompletedUsage(provider.ID, req.Model, responseID(chat.ID), chatStatus(chat), false, chat.Usage, start)
 }
 
 func upstreamPath(apiFormat string) string {
@@ -282,7 +295,13 @@ type anthropicStreamEvent struct {
 	Usage map[string]any `json:"usage,omitempty"`
 }
 
-func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedModel string) {
+type streamResult struct {
+	ID     string
+	Status string
+	Usage  map[string]any
+}
+
+func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedModel string) streamResult {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -290,6 +309,7 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 	scanner := bufio.NewScanner(body)
 	created := false
 	finishReason := ""
+	id := ""
 	var usage map[string]any
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -307,9 +327,9 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 				"finish_reason": finishReason,
 				"usage":         usage,
 			}) {
-				return
+				return streamResult{}
 			}
-			return
+			return streamResult{ID: responseID(id), Status: statusFromFinish(finishReason), Usage: usage}
 		}
 
 		var chunk chatStreamChunk
@@ -318,11 +338,12 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 				"type":    "response.error",
 				"message": err.Error(),
 			}) {
-				return
+				return streamResult{}
 			}
-			return
+			return streamResult{}
 		}
 		if !created {
+			id = chunk.ID
 			if chunk.Model == "" {
 				chunk.Model = requestedModel
 			}
@@ -332,7 +353,7 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 				"model":  chunk.Model,
 				"status": "in_progress",
 			}) {
-				return
+				return streamResult{}
 			}
 			created = true
 		}
@@ -348,7 +369,7 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 					"type":  "response.output_text.delta",
 					"delta": choice.Delta.Content,
 				}) {
-					return
+					return streamResult{}
 				}
 			}
 		}
@@ -358,19 +379,20 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 			"type":    "response.error",
 			"message": err.Error(),
 		}) {
-			return
+			return streamResult{}
 		}
-		return
+		return streamResult{}
 	}
 	if !writeSSE(w, "response.error", map[string]any{
 		"type":    "response.error",
 		"message": "upstream stream ended before [DONE]",
 	}) {
-		return
+		return streamResult{}
 	}
+	return streamResult{}
 }
 
-func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requestedModel string) {
+func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requestedModel string) streamResult {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -378,6 +400,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 	scanner := bufio.NewScanner(body)
 	event := ""
 	finishReason := ""
+	id := ""
 	var usage map[string]any
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -395,14 +418,13 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 		var payload anthropicStreamEvent
 		if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &payload); err != nil {
 			if !writeSSE(w, "response.error", map[string]any{"type": "response.error", "message": err.Error()}) {
-				return
+				return streamResult{}
 			}
-			return
+			return streamResult{}
 		}
 		switch event {
 		case "message_start":
 			model := requestedModel
-			id := ""
 			if payload.Message != nil {
 				if payload.Message.Model != "" {
 					model = payload.Message.Model
@@ -410,12 +432,12 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 				id = payload.Message.ID
 			}
 			if !writeSSE(w, "response.created", map[string]any{"type": "response.created", "id": responseID(id), "model": model, "status": "in_progress"}) {
-				return
+				return streamResult{}
 			}
 		case "content_block_delta":
 			if payload.Delta != nil && payload.Delta.Text != "" {
 				if !writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "delta": payload.Delta.Text}) {
-					return
+					return streamResult{}
 				}
 			}
 		case "message_delta":
@@ -427,20 +449,21 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 			}
 		case "message_stop":
 			if !writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "status": statusFromFinish(finishReason), "finish_reason": finishReason, "usage": usage}) {
-				return
+				return streamResult{}
 			}
-			return
+			return streamResult{ID: responseID(id), Status: statusFromFinish(finishReason), Usage: usage}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		if !writeSSE(w, "response.error", map[string]any{"type": "response.error", "message": err.Error()}) {
-			return
+			return streamResult{}
 		}
-		return
+		return streamResult{}
 	}
 	if !writeSSE(w, "response.error", map[string]any{"type": "response.error", "message": "upstream stream ended before message_stop"}) {
-		return
+		return streamResult{}
 	}
+	return streamResult{}
 }
 
 func responsesFromChat(chat chatResponse, requestedModel string) map[string]any {
@@ -525,6 +548,85 @@ func statusFromFinish(finishReason string) string {
 		return "completed"
 	}
 	return "incomplete"
+}
+
+func chatStatus(chat chatResponse) string {
+	if len(chat.Choices) > 0 {
+		return statusFromFinish(chat.Choices[0].FinishReason)
+	}
+	return "incomplete"
+}
+
+type usageEvent struct {
+	Timestamp    string `json:"timestamp"`
+	RequestID    string `json:"request_id,omitempty"`
+	ProviderID   string `json:"provider_id"`
+	Model        string `json:"model"`
+	Route        string `json:"route"`
+	Streaming    bool   `json:"streaming"`
+	Status       string `json:"status"`
+	HTTPStatus   int    `json:"http_status"`
+	InputTokens  int64  `json:"input_tokens,omitempty"`
+	OutputTokens int64  `json:"output_tokens,omitempty"`
+	TotalTokens  int64  `json:"total_tokens,omitempty"`
+	DurationMS   int64  `json:"duration_ms"`
+}
+
+func (s *Server) recordCompletedUsage(providerID, model, requestID, status string, streaming bool, usage map[string]any, start time.Time) {
+	s.recordUsage(usageEvent{
+		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
+		RequestID:    requestID,
+		ProviderID:   providerID,
+		Model:        model,
+		Route:        "/v1/responses",
+		Streaming:    streaming,
+		Status:       status,
+		HTTPStatus:   http.StatusOK,
+		DurationMS:   time.Since(start).Milliseconds(),
+		InputTokens:  tokenCount(usage, "input_tokens", "prompt_tokens"),
+		OutputTokens: tokenCount(usage, "output_tokens", "completion_tokens"),
+		TotalTokens:  tokenCount(usage, "total_tokens"),
+	})
+}
+
+func (s *Server) recordUsage(event usageEvent) {
+	if s.usageLogPath == "" || event.Status == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.usageLogPath), 0700); err != nil {
+		log.Printf("usage log mkdir failed: %v", err)
+		return
+	}
+	f, err := os.OpenFile(s.usageLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		log.Printf("usage log open failed: %v", err)
+		return
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			log.Printf("usage log close failed: %v", err)
+		}
+	}()
+	if err := json.NewEncoder(f).Encode(event); err != nil {
+		log.Printf("usage log write failed: %v", err)
+	}
+}
+
+func tokenCount(usage map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		switch v := usage[key].(type) {
+		case float64:
+			return int64(v)
+		case int:
+			return int64(v)
+		case int64:
+			return v
+		case json.Number:
+			n, _ := v.Int64()
+			return n
+		}
+	}
+	return 0
 }
 
 func errorBody(kind, message string) map[string]any {
