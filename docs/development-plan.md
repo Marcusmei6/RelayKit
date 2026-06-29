@@ -158,11 +158,11 @@ Status: non-streaming tool-use mapping implemented.
 
 ## Phase 6: Local Release Readiness
 
-Status: queued.
+Status: README and public-scrub notes refreshed.
 
-- Make README install/run commands match the current local alpha.
+- Made README install/run commands match the current local alpha.
 - Run `docs/public-boundary-checklist.md`.
-- Prepare public-scrub notes for `.codex/agents/*.toml`.
+- Prepared public-scrub notes for `.codex/agents/*.toml`.
 - Keep signing, notarization, publishing, and GitHub push out of scope until explicitly requested.
 
 ## Task Ownership

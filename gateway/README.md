@@ -2,17 +2,35 @@
 
 The gateway is a local loopback HTTP helper. It provides client-facing OpenAI-compatible surfaces and routes requests to configured upstream providers.
 
-First milestone:
+Current local alpha:
 
 - `GET /healthz`
 - `GET /v1/models`
 - `POST /v1/responses`
+- provider loading from explicit JSON config files;
+- OpenAI Chat-compatible upstream translation;
+- Anthropic Messages upstream translation, including non-streaming `tool_use` to Responses `function_call`;
+- text streaming for OpenAI Chat-compatible and Anthropic Messages providers;
+- local usage JSONL writes and day/provider/model summary.
 
-The current implementation is a safe placeholder: it proves the server shape and returns deterministic local responses. Real adapters will be added behind tests.
+## Build And Run
 
-Next implementation slice:
+```bash
+go test ./...
+go vet ./...
+test -z "$(gofmt -l .)"
+go build -o bin/relaykit-gateway ./cmd/gateway
+./bin/relaykit-gateway -listen 127.0.0.1:19777 -config ../examples/providers.example.json
+```
 
-- load `examples/providers.example.json`;
-- return configured model IDs from `/v1/models`;
-- translate one non-streaming Responses request through an OpenAI Chat-compatible fake upstream;
-- add `-config` for the config path while keeping `-listen` loopback by default.
+## Local Usage Summary
+
+```bash
+./bin/relaykit-gateway summarize-usage -path "$HOME/Library/Application Support/RelayKit/usage.jsonl"
+```
+
+The summary command reads local JSONL only and emits day/provider/model aggregates.
+
+## Public Boundary
+
+Example configs must stay fake and public-safe. Provider credentials are read from environment variables named by `auth_env`; config files must never contain credential values.

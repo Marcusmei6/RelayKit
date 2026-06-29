@@ -18,6 +18,8 @@ RelayKit combines:
 - Anthropic Messages upstream adapter.
 - Generated model catalog for clients that support external catalogs.
 - Local-only usage event log.
+- Local LaunchAgent helper lifecycle for this checkout.
+- Minimal SwiftUI app for gateway control, usage summaries, and provider config JSON editing without secrets.
 
 ## Out Of Scope For The First Release
 
@@ -30,19 +32,30 @@ RelayKit combines:
 ## Repository Layout
 
 ```text
-app/        Apple-native app shell plans and future SwiftUI source
+app/        SwiftUI macOS app shell
 gateway/    Go local gateway helper
 docs/       architecture, roadmap, product decisions, handoff notes
 examples/   public sample provider and Codex config files
 scripts/    developer helper scripts
 ```
 
-## Development
+## Local Alpha Smoke
+
+From the repository root:
+
+```bash
+./scripts/local-alpha-smoke.sh
+```
+
+The smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, and runs the app-side provider config validation executable.
+
+## Gateway Development
 
 ```bash
 cd gateway
 go test ./...
-go run ./cmd/gateway -listen 127.0.0.1:19777
+go build -o bin/relaykit-gateway ./cmd/gateway
+./bin/relaykit-gateway -listen 127.0.0.1:19777 -config ../examples/providers.example.json
 ```
 
 Then in another terminal:
@@ -52,3 +65,30 @@ curl http://127.0.0.1:19777/healthz
 curl http://127.0.0.1:19777/v1/models
 ```
 
+## Mac App
+
+```bash
+cd app
+swift build
+swift run RelayKitApp
+```
+
+The development app expects the gateway binary at `../gateway/bin/relaykit-gateway`.
+
+## Durable Local Helper
+
+```bash
+cd gateway
+go build -o bin/relaykit-gateway ./cmd/gateway
+cd ..
+./scripts/relaykit-helper.sh install --config "$PWD/examples/providers.example.json"
+./scripts/relaykit-helper.sh status
+./scripts/relaykit-helper.sh logs --lines 80
+./scripts/relaykit-helper.sh uninstall
+```
+
+The helper script affects only `~/Library/LaunchAgents/dev.relaykit.gateway.plist` and uses explicit provider config paths.
+
+## Public Release Readiness
+
+Before any public push or release, run `docs/public-boundary-checklist.md`. `.codex/agents/*.toml` currently contains local development model routes and must be scrubbed to public defaults before publishing.

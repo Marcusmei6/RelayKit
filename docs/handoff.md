@@ -112,6 +112,9 @@ Current verification on this machine:
 - Phase 3.5 Anthropic tool-use hardening:
   - non-streaming Anthropic `tool_use` blocks map to Responses `function_call` output items with fake upstream coverage;
   - streaming tool-use remains deferred.
+- Phase 6 local release readiness:
+  - root README and gateway README now match the current local alpha commands;
+  - public release remains blocked on `docs/public-boundary-checklist.md`, especially scrubbing `.codex/agents/*.toml` local model routes.
 
 ## Important Decisions
 
@@ -150,7 +153,7 @@ Plan id: `relaykit-local-alpha-to-helper-lifecycle`
 | `relaykit_app` | Add minimal app usage view backed by local summary CLI. | `app/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local app view |
 | `relaykit_app` | Add provider config editing without secrets. | `app/`, `docs/handoff.md`, `docs/development-plan.md` | Done for minimal JSON editor |
 | `relaykit_gateway` | Harden Anthropic tool-use mapping with fake upstream tests. | `gateway/`, `docs/handoff.md` | Done for non-streaming tool_use |
-| `relaykit_worker` | Refresh README/local release readiness and public scrub notes. | `README.md`, `app/README.md`, `gateway/README.md`, `docs/public-boundary-checklist.md`, `docs/handoff.md` | Queued safe lane |
+| `relaykit_worker` | Refresh README/local release readiness and public scrub notes. | `README.md`, `app/README.md`, `gateway/README.md`, `docs/public-boundary-checklist.md`, `docs/handoff.md` | Done for README/scrub notes |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |
 | `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |
