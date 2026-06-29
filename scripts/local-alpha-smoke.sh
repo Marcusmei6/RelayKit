@@ -29,5 +29,6 @@ curl -fsS http://127.0.0.1:19777/v1/models >/dev/null
 
 cd "${ROOT}/app"
 swift build
+swift run RelayKitAppValidationTests
 
 echo "RelayKit local alpha smoke passed"

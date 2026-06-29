@@ -137,15 +137,15 @@ These defaults are intentionally conservative and are not a product blocker. If 
 
 ## Phase 5.5: Local Configuration Editing
 
-Status: next safe milestone.
+Status: minimal provider config editor implemented.
 
-- Add provider config editing without secrets.
-- Edit only public provider metadata and model list: provider id, display name, base URL, API format, auth env var name, model id, display name, and context window.
+- Added provider config editing without secrets.
+- Edit only public provider metadata and model list through explicit JSON text: provider id, display name, base URL, API format, auth env var name, model id, display name, and context window.
 - Never edit, display, or store API keys, bearer tokens, cookies, or credential values.
 - Preserve explicit config paths; no default writes to private provider configs.
-- Validate JSON before writing and keep backup/restore behavior for existing files.
-- Add focused tests for invalid JSON, missing required fields, and no credential persistence.
-- App UI may expose this as a simple editor only after the file contract is tested.
+- Validate JSON before displaying or writing and keep backup behavior for existing files.
+- Reject credential-looking keys/values and base URLs with userinfo, query strings, or fragments before writing.
+- Cover the credential-boundary validator through the SwiftPM `RelayKitAppValidationTests` executable run by local smoke.
 
 ## Phase 3.5: Anthropic Tool-Use Hardening
 

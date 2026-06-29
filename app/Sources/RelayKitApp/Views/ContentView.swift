@@ -8,6 +8,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 gatewayControls
+                providerConfigEditor
                 models
                 usage
                 activation
@@ -64,6 +65,24 @@ struct ContentView: View {
                     }
                 }
                 .frame(minHeight: 120)
+            }
+        }
+    }
+
+    private var providerConfigEditor: some View {
+        GroupBox("Provider Config") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Button("Load Config") { model.loadProviderConfig() }
+                    Button("Save Config") { model.saveProviderConfig() }
+                }
+                TextEditor(text: $model.providerConfigText)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 140)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(.quaternary)
+                    )
             }
         }
     }

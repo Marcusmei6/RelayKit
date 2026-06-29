@@ -33,6 +33,7 @@ The development app expects a gateway binary at `../gateway/bin/relaykit-gateway
 - activate Codex config through the gateway CLI with explicit `-source` and `-target` paths.
 - remember the last provider config path locally with `UserDefaults`.
 - show local usage summaries from an explicit JSONL path.
+- load and save explicit provider config JSON after local validation and backup.
 
 ## Smoke
 
@@ -41,6 +42,8 @@ From the repository root:
 ```bash
 ./scripts/local-alpha-smoke.sh
 ```
+
+The smoke also runs `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
 
 ## Durable Local Helper
 
@@ -62,5 +65,5 @@ The script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requ
 ## Not In This Slice
 
 - Keychain credential storage;
-- provider editing;
+- provider credential editing;
 - signing, notarization, or release packaging.

@@ -1,4 +1,5 @@
 import Foundation
+import RelayKitCore
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -14,6 +15,7 @@ final class AppModel: ObservableObject {
     @Published var gatewayStatus = "stopped"
     @Published var models: [RelayModel] = []
     @Published var usageSummaries: [UsageSummary] = []
+    @Published var providerConfigText = ""
     @Published var message = ""
 
     private let gateway = GatewayProcess()
@@ -59,6 +61,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func loadProviderConfig() {
+        do {
+            let text = try String(contentsOfFile: providerConfigPath, encoding: .utf8)
+            let json = try JSONSerialization.jsonObject(with: Data(text.utf8))
+            try ProviderConfigValidator.validate(json)
+            providerConfigText = text
+            message = "Loaded provider config"
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    func saveProviderConfig() {
+        do {
+            let data = Data(providerConfigText.utf8)
+            let json = try JSONSerialization.jsonObject(with: data)
+            try ProviderConfigValidator.validate(json)
+            let pretty = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            var backupPath: String?
+            if FileManager.default.fileExists(atPath: providerConfigPath) {
+                let backup = providerConfigPath + ".bak." + String(Int(Date().timeIntervalSince1970))
+                try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
+                backupPath = backup
+            }
+            try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
+            providerConfigText = String(data: pretty, encoding: .utf8) ?? providerConfigText
+            if let backupPath {
+                message = "Saved provider config; backup: \(backupPath)"
+            } else {
+                message = "Saved provider config"
+            }
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
     func refreshUsageSummary() async {
         do {
             let output = try gateway.summarizeUsage(binaryPath: gatewayBinaryPath, usageLogPath: usageLogPath)
@@ -91,4 +129,5 @@ final class AppModel: ObservableObject {
             .appendingPathComponent("Library/Application Support/RelayKit/usage.jsonl")
             .path
     }
+
 }
