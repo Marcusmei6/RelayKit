@@ -1,6 +1,6 @@
-# Gateway Phase 3 Anthropic Stub
+# Gateway Phase 3 Anthropic MVP
 
-Stub: pending Phase 1 acceptance. This file records the intended public adapter boundary only.
+Phase 3 adds a minimal public Anthropic Messages adapter. It uses fake upstream tests only and keeps private provider extensions out of the repository.
 
 ## Request Mapping
 
@@ -12,6 +12,8 @@ Stub: pending Phase 1 acceptance. This file records the intended public adapter 
 | `system` | system instruction | system message or Responses instruction field |
 | `tools` | tool definitions | Responses tools |
 
+Phase 3 MVP sends `model`, `messages`, `max_tokens`, and `stream` when requested.
+
 ## Response Mapping
 
 | Anthropic response field | Internal canonical | Responses field |
@@ -21,6 +23,8 @@ Stub: pending Phase 1 acceptance. This file records the intended public adapter 
 | text content block | assistant text | `output[].content[].text` |
 | `tool_use` | tool call | `output[].tool_call` |
 | `usage` | token usage | `usage` |
+
+Phase 3 MVP maps text content blocks and usage. Tool-use blocks remain part of the public contract but are deferred until tool-call routing is implemented.
 
 ## Tool Use And Stop Reasons
 
@@ -43,6 +47,15 @@ Stub: pending Phase 1 acceptance. This file records the intended public adapter 
 | `message_delta` stop/usage | final metadata |
 | `message_stop` | `response.completed` |
 
+Phase 3 MVP streams text deltas, final stop reason, and usage when present.
+
 ## Unsupported Fields
 
 Unsupported public fields must be rejected when they change execution semantics, and ignored only when they are metadata. Private provider extensions do not belong in this repository.
+
+## Not In Phase 3 MVP
+
+- Anthropic tool-use execution;
+- private Anthropic-compatible provider presets;
+- real provider smoke tests;
+- client config activation.

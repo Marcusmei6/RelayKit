@@ -322,3 +322,124 @@ func TestResponsesStreamTruncationEmitsError(t *testing.T) {
 		t.Fatalf("stream did not preserve delta and emit truncation error:\n%s", got)
 	}
 }
+
+func TestResponsesProxiesToFakeAnthropicMessages(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		var req struct {
+			Model     string `json:"model"`
+			MaxTokens int    `json:"max_tokens"`
+			Messages  []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream err = %v", err)
+		}
+		if req.Model != "claude-example" || req.MaxTokens == 0 || req.Stream {
+			t.Fatalf("upstream request = %+v", req)
+		}
+		if len(req.Messages) != 1 || req.Messages[0].Role != "user" || req.Messages[0].Content != "Say hi" {
+			t.Fatalf("messages = %+v", req.Messages)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg-test",
+			"model":       "claude-example",
+			"stop_reason": "end_turn",
+			"content":     []map[string]string{{"type": "text", "text": "hi"}},
+			"usage":       map[string]int{"input_tokens": 4, "output_tokens": 1},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeTestProviderConfig(t, upstream.URL, "anthropic_messages", "claude-example"))
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"claude-example","input":"Say hi"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"text":"hi"`) || !strings.Contains(rec.Body.String(), `"status":"completed"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream err = %v", err)
+		}
+		if req.Model != "claude-example" || !req.Stream {
+			t.Fatalf("upstream request = %+v", req)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunks := []string{
+			`event: message_start` + "\n" + `data: {"message":{"id":"msg-stream","model":"claude-example"}}`,
+			`event: content_block_delta` + "\n" + `data: {"delta":{"type":"text_delta","text":"he"}}`,
+			`event: content_block_delta` + "\n" + `data: {"delta":{"type":"text_delta","text":"llo"}}`,
+			`event: message_delta` + "\n" + `data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
+			`event: message_stop` + "\n" + `data: {}`,
+		}
+		for _, chunk := range chunks {
+			if _, err := w.Write([]byte(chunk + "\n\n")); err != nil {
+				t.Fatalf("write upstream chunk err = %v", err)
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeTestProviderConfig(t, upstream.URL, "anthropic_messages", "claude-example"))
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"claude-example","input":"Say hi","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := rec.Body.String()
+	for _, want := range []string{
+		"event: response.created",
+		`"model":"claude-example"`,
+		`"delta":"he"`,
+		`"delta":"llo"`,
+		"event: response.completed",
+		`"finish_reason":"end_turn"`,
+		`"output_tokens":1`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stream missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func writeTestProviderConfig(t *testing.T, baseURL, apiFormat, model string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + baseURL + `","api_format":"` + apiFormat + `","models":[{"id":"` + model + `"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
+}

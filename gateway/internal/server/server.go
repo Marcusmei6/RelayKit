@@ -99,18 +99,14 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamReq := map[string]any{
-		"model":    req.Model,
-		"messages": messages,
-		"stream":   req.Stream,
-	}
+	upstreamReq := upstreamRequest(provider.APIFormat, req.Model, messages, req.Stream)
 	payload, err := json.Marshal(upstreamReq)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", err.Error()))
 		return
 	}
 
-	upstreamURL, err := url.JoinPath(provider.BaseURL, "chat/completions")
+	upstreamURL, err := url.JoinPath(provider.BaseURL, upstreamPath(provider.APIFormat))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", err.Error()))
 		return
@@ -123,7 +119,11 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	httpReq.Header.Set("Content-Type", "application/json")
 	if provider.AuthEnv != "" {
 		if token := os.Getenv(provider.AuthEnv); token != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+token)
+			if provider.APIFormat == config.APIFormatAnthropicMessages {
+				httpReq.Header.Set("x-api-key", token)
+			} else {
+				httpReq.Header.Set("Authorization", "Bearer "+token)
+			}
 		}
 	}
 
@@ -144,6 +144,19 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var chat chatResponse
+	if provider.APIFormat == config.APIFormatAnthropicMessages {
+		if req.Stream {
+			s.streamAnthropic(w, resp.Body, req.Model)
+			return
+		}
+		var msg anthropicResponse
+		if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+			writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", err.Error()))
+			return
+		}
+		writeJSON(w, http.StatusOK, responsesFromAnthropic(msg, req.Model))
+		return
+	}
 	if req.Stream {
 		s.streamChat(w, resp.Body, req.Model)
 		return
@@ -154,6 +167,29 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, responsesFromChat(chat, req.Model))
+}
+
+func upstreamPath(apiFormat string) string {
+	if apiFormat == config.APIFormatAnthropicMessages {
+		return "messages"
+	}
+	return "chat/completions"
+}
+
+func upstreamRequest(apiFormat, model string, messages []chatMessage, stream bool) map[string]any {
+	if apiFormat == config.APIFormatAnthropicMessages {
+		return map[string]any{
+			"model":      model,
+			"max_tokens": 1024,
+			"messages":   messages,
+			"stream":     stream,
+		}
+	}
+	return map[string]any{
+		"model":    model,
+		"messages": messages,
+		"stream":   stream,
+	}
 }
 
 func (s *Server) providerForModel(model string) (config.ProviderProfile, bool) {
@@ -218,6 +254,32 @@ type chatStreamChunk struct {
 type chatStreamChoice struct {
 	Delta        chatMessage `json:"delta"`
 	FinishReason string      `json:"finish_reason"`
+}
+
+type anthropicResponse struct {
+	ID         string           `json:"id"`
+	Model      string           `json:"model"`
+	Content    []anthropicBlock `json:"content"`
+	StopReason string           `json:"stop_reason"`
+	Usage      map[string]any   `json:"usage,omitempty"`
+}
+
+type anthropicBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type anthropicStreamEvent struct {
+	Message *struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+	} `json:"message,omitempty"`
+	Delta *struct {
+		Type       string `json:"type,omitempty"`
+		Text       string `json:"text,omitempty"`
+		StopReason string `json:"stop_reason,omitempty"`
+	} `json:"delta,omitempty"`
+	Usage map[string]any `json:"usage,omitempty"`
 }
 
 func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedModel string) {
@@ -308,6 +370,79 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 	}
 }
 
+func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requestedModel string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	scanner := bufio.NewScanner(body)
+	event := ""
+	finishReason := ""
+	var usage map[string]any
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		var payload anthropicStreamEvent
+		if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &payload); err != nil {
+			if !writeSSE(w, "response.error", map[string]any{"type": "response.error", "message": err.Error()}) {
+				return
+			}
+			return
+		}
+		switch event {
+		case "message_start":
+			model := requestedModel
+			id := ""
+			if payload.Message != nil {
+				if payload.Message.Model != "" {
+					model = payload.Message.Model
+				}
+				id = payload.Message.ID
+			}
+			if !writeSSE(w, "response.created", map[string]any{"type": "response.created", "id": responseID(id), "model": model, "status": "in_progress"}) {
+				return
+			}
+		case "content_block_delta":
+			if payload.Delta != nil && payload.Delta.Text != "" {
+				if !writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "delta": payload.Delta.Text}) {
+					return
+				}
+			}
+		case "message_delta":
+			if payload.Delta != nil {
+				finishReason = payload.Delta.StopReason
+			}
+			if payload.Usage != nil {
+				usage = payload.Usage
+			}
+		case "message_stop":
+			if !writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "status": statusFromFinish(finishReason), "finish_reason": finishReason, "usage": usage}) {
+				return
+			}
+			return
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if !writeSSE(w, "response.error", map[string]any{"type": "response.error", "message": err.Error()}) {
+			return
+		}
+		return
+	}
+	if !writeSSE(w, "response.error", map[string]any{"type": "response.error", "message": "upstream stream ended before message_stop"}) {
+		return
+	}
+}
+
 func responsesFromChat(chat chatResponse, requestedModel string) map[string]any {
 	model := chat.Model
 	if model == "" {
@@ -343,6 +478,38 @@ func responsesFromChat(chat chatResponse, requestedModel string) map[string]any 
 	}
 }
 
+func responsesFromAnthropic(msg anthropicResponse, requestedModel string) map[string]any {
+	model := msg.Model
+	if model == "" {
+		model = requestedModel
+	}
+	text := ""
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			text += block.Text
+		}
+	}
+	return map[string]any{
+		"id":     responseID(msg.ID),
+		"object": "response",
+		"status": statusFromFinish(msg.StopReason),
+		"model":  model,
+		"output": []map[string]any{
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]string{
+					{
+						"type": "output_text",
+						"text": text,
+					},
+				},
+			},
+		},
+		"usage": msg.Usage,
+	}
+}
+
 func responseID(id string) string {
 	if id == "" {
 		return fmt.Sprintf("resp_%d", time.Now().UnixNano())
@@ -354,7 +521,7 @@ func responseID(id string) string {
 }
 
 func statusFromFinish(finishReason string) string {
-	if finishReason == "stop" {
+	if finishReason == "stop" || finishReason == "end_turn" || finishReason == "stop_sequence" {
 		return "completed"
 	}
 	return "incomplete"

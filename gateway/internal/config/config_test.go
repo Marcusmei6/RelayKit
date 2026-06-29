@@ -13,10 +13,13 @@ func TestLoadExampleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load err = %v", err)
 	}
-	if len(cfg.Providers) != 1 {
-		t.Fatalf("providers = %d, want 1", len(cfg.Providers))
+	var p ProviderProfile
+	for _, provider := range cfg.Providers {
+		if provider.ID == "local-openai-compatible" {
+			p = provider
+			break
+		}
 	}
-	p := cfg.Providers[0]
 	if p.ID != "local-openai-compatible" {
 		t.Fatalf("id = %q", p.ID)
 	}
@@ -148,5 +151,20 @@ func TestAuthEnvOptional(t *testing.T) {
 	}
 	if cfg.Providers[0].AuthEnv != "" {
 		t.Fatalf("auth_env = %q, want empty", cfg.Providers[0].AuthEnv)
+	}
+}
+
+func TestValidationAcceptsAnthropicMessagesFormat(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	if err := os.WriteFile(p, []byte(`{"providers":[{"id":"p","name":"n","base_url":"http://x","api_format":"anthropic_messages","models":[{"id":"claude-example"}]}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if cfg.Providers[0].APIFormat != APIFormatAnthropicMessages {
+		t.Fatalf("api_format = %q", cfg.Providers[0].APIFormat)
 	}
 }

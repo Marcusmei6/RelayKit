@@ -13,6 +13,20 @@
           "context_window": 128000
         }
       ]
+    },
+    {
+      "id": "local-anthropic-compatible",
+      "name": "Local Anthropic Compatible",
+      "base_url": "http://127.0.0.1:11435/v1",
+      "api_format": "anthropic_messages",
+      "auth_env": "RELAYKIT_EXAMPLE_ANTHROPIC_API_KEY",
+      "models": [
+        {
+          "id": "claude-example",
+          "display_name": "Claude Example",
+          "context_window": 200000
+        }
+      ]
     }
   ]
 }

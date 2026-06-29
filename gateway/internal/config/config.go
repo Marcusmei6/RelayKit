@@ -7,11 +7,12 @@ import (
 )
 
 const (
-	CodeReadError         = "config_read_error"
-	CodeParseError        = "config_parse_error"
-	CodeValidationError   = "config_validation_error"
-	CodeUnsupportedFormat = "unsupported_provider_format"
-	APIFormatOpenAIChat   = "openai_chat"
+	CodeReadError              = "config_read_error"
+	CodeParseError             = "config_parse_error"
+	CodeValidationError        = "config_validation_error"
+	CodeUnsupportedFormat      = "unsupported_provider_format"
+	APIFormatOpenAIChat        = "openai_chat"
+	APIFormatAnthropicMessages = "anthropic_messages"
 )
 
 type Error struct {
@@ -73,7 +74,7 @@ func validate(cfg Config) error {
 		if p.ID == "" || p.Name == "" || p.BaseURL == "" || p.APIFormat == "" || len(p.Models) == 0 {
 			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid provider %q", p.ID)}
 		}
-		if p.APIFormat != APIFormatOpenAIChat {
+		if p.APIFormat != APIFormatOpenAIChat && p.APIFormat != APIFormatAnthropicMessages {
 			return &Error{Code: CodeUnsupportedFormat, Err: fmt.Errorf("unsupported api_format %q", p.APIFormat)}
 		}
 		for _, m := range p.Models {
