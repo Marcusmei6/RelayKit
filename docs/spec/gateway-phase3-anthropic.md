@@ -21,19 +21,19 @@ Phase 3 MVP sends `model`, `messages`, `max_tokens`, and `stream` when requested
 | `id` | upstream id | `id` or synthesized response id |
 | `model` | model id | `model` |
 | text content block | assistant text | `output[].content[].text` |
-| `tool_use` | tool call | `output[].tool_call` |
+| `tool_use` | tool call | `output[]` `function_call` item |
 | `usage` | token usage | `usage` |
 
-Phase 3 MVP maps text content blocks and usage. Tool-use blocks remain part of the public contract but are deferred until tool-call routing is implemented.
+Phase 3.5 maps non-streaming tool-use blocks to Responses `function_call` output items. Streaming tool-use remains deferred.
 
 ## Tool Use And Stop Reasons
 
 | Anthropic concept | Responses concept |
 | --- | --- |
-| `tool_use` | tool call |
+| `tool_use` | `function_call` output item |
 | `tool_result` | function/tool output |
 | `end_turn` | completed |
-| `tool_use` stop reason | requires tool output |
+| `tool_use` stop reason | completed response requiring caller tool output |
 | `max_tokens` | incomplete |
 | `stop_sequence` | completed with stop metadata |
 
@@ -43,7 +43,7 @@ Phase 3 MVP maps text content blocks and usage. Tool-use blocks remain part of t
 | --- | --- |
 | `message_start` | `response.created` |
 | `content_block_delta` text | `response.output_text.delta` |
-| `content_block_delta` tool data | `response.tool_call.*` |
+| `content_block_delta` tool data | deferred |
 | `message_delta` stop/usage | final metadata |
 | `message_stop` | `response.completed` |
 

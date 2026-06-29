@@ -278,8 +278,11 @@ type anthropicResponse struct {
 }
 
 type anthropicBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 type anthropicStreamEvent struct {
@@ -507,17 +510,26 @@ func responsesFromAnthropic(msg anthropicResponse, requestedModel string) map[st
 		model = requestedModel
 	}
 	text := ""
+	output := []map[string]any{}
 	for _, block := range msg.Content {
 		if block.Type == "text" {
 			text += block.Text
 		}
+		if block.Type == "tool_use" {
+			arguments := "{}"
+			if len(block.Input) > 0 {
+				arguments = string(block.Input)
+			}
+			output = append(output, map[string]any{
+				"type":      "function_call",
+				"call_id":   block.ID,
+				"name":      block.Name,
+				"arguments": arguments,
+			})
+		}
 	}
-	return map[string]any{
-		"id":     responseID(msg.ID),
-		"object": "response",
-		"status": statusFromFinish(msg.StopReason),
-		"model":  model,
-		"output": []map[string]any{
+	if text != "" {
+		output = append([]map[string]any{
 			{
 				"type": "message",
 				"role": "assistant",
@@ -528,8 +540,15 @@ func responsesFromAnthropic(msg anthropicResponse, requestedModel string) map[st
 					},
 				},
 			},
-		},
-		"usage": msg.Usage,
+		}, output...)
+	}
+	return map[string]any{
+		"id":     responseID(msg.ID),
+		"object": "response",
+		"status": statusFromFinish(msg.StopReason),
+		"model":  model,
+		"output": output,
+		"usage":  msg.Usage,
 	}
 }
 
@@ -544,7 +563,7 @@ func responseID(id string) string {
 }
 
 func statusFromFinish(finishReason string) string {
-	if finishReason == "stop" || finishReason == "end_turn" || finishReason == "stop_sequence" {
+	if finishReason == "stop" || finishReason == "end_turn" || finishReason == "stop_sequence" || finishReason == "tool_use" {
 		return "completed"
 	}
 	return "incomplete"

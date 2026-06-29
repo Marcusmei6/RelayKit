@@ -463,6 +463,64 @@ func TestResponsesProxiesToFakeAnthropicMessages(t *testing.T) {
 	}
 }
 
+func TestResponsesMapsAnthropicToolUse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg-tool",
+			"model":       "claude-example",
+			"stop_reason": "tool_use",
+			"content": []map[string]any{
+				{"type": "text", "text": "checking"},
+				{
+					"type":  "tool_use",
+					"id":    "toolu_123",
+					"name":  "lookup",
+					"input": map[string]any{"query": "relaykit"},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeTestProviderConfig(t, upstream.URL, "anthropic_messages", "claude-example"))
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"claude-example","input":"Search"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Output []map[string]any `json:"output"`
+		Status string           `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response err = %v; body=%s", err, rec.Body.String())
+	}
+	if len(got.Output) != 2 {
+		t.Fatalf("output = %+v", got.Output)
+	}
+	if got.Status != "completed" {
+		t.Fatalf("status = %q", got.Status)
+	}
+	call := got.Output[1]
+	if call["type"] != "function_call" || call["call_id"] != "toolu_123" || call["name"] != "lookup" || call["arguments"] != `{"query":"relaykit"}` {
+		t.Fatalf("function call = %+v", call)
+	}
+}
+
 func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

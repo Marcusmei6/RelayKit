@@ -149,11 +149,11 @@ Status: minimal provider config editor implemented.
 
 ## Phase 3.5: Anthropic Tool-Use Hardening
 
-Status: safe follow-on after config editing or app usage polish.
+Status: non-streaming tool-use mapping implemented.
 
-- Map minimal Anthropic `tool_use` blocks to Responses-shaped output items using fake upstream tests.
+- Mapped minimal Anthropic `tool_use` blocks to Responses `function_call` output items using fake upstream tests.
 - Preserve unsupported cases as explicit errors or documented omissions.
-- Do not add real provider calls or private provider behavior.
+- Did not add real provider calls or private provider behavior.
 - Keep streaming tool-use support separate unless the non-streaming contract is already tested.
 
 ## Phase 6: Local Release Readiness
