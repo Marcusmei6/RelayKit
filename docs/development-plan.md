@@ -83,12 +83,12 @@ Phase 1 should reject missing `id`, `base_url`, `api_format`, or empty `models`.
 
 ## Phase 4: Mac App MVP
 
-- Create SwiftUI menu-bar app.
-- Add gateway helper lifecycle.
-- Store API keys in Keychain.
-- Add provider CRUD.
-- Activate Codex config with backup/rollback.
-- Show gateway status and log tail.
+- Create SwiftUI app shell.
+- Add development gateway helper lifecycle.
+- Show gateway status.
+- Read `/healthz` and `/v1/models`.
+- Activate Codex config with explicit source/target paths and backup/rollback output.
+- Defer Keychain, provider CRUD, LaunchAgent install, and log tail until the visible shell is reviewed.
 
 ## Phase 5: Local Observability
 

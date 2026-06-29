@@ -1,15 +1,41 @@
 # RelayKit Mac App
 
-The Mac app will be a SwiftUI/AppKit shell around the gateway helper.
+The Mac app is a SwiftUI shell around the gateway helper.
 
-Initial app work is intentionally deferred until the gateway contract and product flow settle. UI design should later use Open Design, taking Beacon as the main native-app reference while keeping RelayKit focused on a stronger gateway core.
+## Build
 
-Planned first views:
+```bash
+cd gateway
+go build -o bin/relaykit-gateway ./cmd/gateway
+cd app
+swift build
+```
 
-- Profile list.
-- Add/edit provider.
-- Activate/deactivate current route.
-- Gateway status.
-- Usage summary.
-- Log tail.
+## Run
 
+```bash
+cd app
+swift run RelayKitApp
+```
+
+The development app expects a gateway binary at `../gateway/bin/relaykit-gateway` and starts it with:
+
+```bash
+../gateway/bin/relaykit-gateway -listen 127.0.0.1:19777 -config <provider-config-path>
+```
+
+## Current MVP
+
+- start and stop the gateway process launched by this app;
+- show gateway status;
+- call `/healthz`;
+- call `/v1/models` and list model IDs;
+- activate Codex config through the gateway CLI with explicit `-source` and `-target` paths.
+
+## Not In This Slice
+
+- Keychain credential storage;
+- LaunchAgent install;
+- provider editing;
+- log tail;
+- signing, notarization, or release packaging.

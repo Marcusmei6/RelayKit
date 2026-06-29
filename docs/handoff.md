@@ -18,6 +18,7 @@ Phase 2 streaming MVP implemented at `docs/spec/gateway-phase2-streaming.md`.
 Phase 3 Anthropic Messages MVP implemented at `docs/spec/gateway-phase3-anthropic.md`.
 Phase 4 Codex local integration is documented at `docs/spec/codex-local-integration.md` and `examples/codex.config.example.toml`.
 Safe Codex config activation now has a minimal gateway primitive in `gateway/internal/codexconfig` and an explicit CLI caller, `gateway activate-codex-config -source <path> -target <path>`; it only writes an explicitly supplied target path, backs up existing files first, and has no default `~/.codex` target.
+Mac MVP app shell exists in `app/` as a SwiftPM SwiftUI app. It can start/stop an explicitly configured gateway binary, check `/healthz`, read `/v1/models`, and call the explicit Codex config activation CLI.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 
 Latest committed baseline before Phase 1 implementation:
@@ -63,6 +64,14 @@ Current verification on this machine:
   - `relaykit_test` passed the CLI caller validation and public-boundary checks.
   - `relaykit_cr` returned SHIP IT for the CLI caller with no severity findings.
   - A `relaykit_planner` control dispatch disconnected with `magic number mismatch`; root continued under the documented parent-mediated workflow.
+- Mac MVP app shell validation passed:
+  - `cd app && swift build` passed.
+  - `cd app && swift run RelayKitApp` launched and was stopped manually after startup.
+  - `cd gateway && go build -o bin/relaykit-gateway ./cmd/gateway` produced the dev helper binary used by the app.
+  - A built gateway binary smoke returned `{"status":"ok"}` from `/healthz` and model IDs from `/v1/models`.
+  - The app uses the configured gateway binary for both server start and Codex config activation.
+  - `relaykit_test` passed Mac MVP shell validation.
+  - `relaykit_cr` returned SHIP IT after confirming the helper lifecycle and activation path use the configured binary.
 
 ## Important Decisions
 
@@ -77,13 +86,13 @@ Current verification on this machine:
 
 ## Next Workstream
 
-Continue from the completed Phase 3 adapter and Phase 4 activation CLI:
+Continue from the completed Phase 3 adapter, Phase 4 activation CLI, and Mac MVP shell:
 
-1. Re-run `cd gateway && go test ./... -count=1` before further gateway edits.
-2. Decide whether to add app UI around `gateway activate-codex-config`; any caller must require a target path, must not default to `~/.codex/config.toml`, and should pass only RelayKit-generated credential-free source configs.
+1. Re-run `cd gateway && go test ./... -count=1` and `cd app && swift build` before further edits.
+2. Decide whether to promote the built helper binary flow into a LaunchAgent.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
-5. Keep the app directory documentation-only until the gateway contract is real.
+5. Add Keychain/provider editing only after the gateway and app shell review gates stay green.
 
 ## Dispatch Board
 
@@ -92,8 +101,9 @@ Plan id: `relaykit-phase1-gateway-mvp`
 | Lane | Assignment | Owned Paths | Status |
 | --- | --- | --- | --- |
 | `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, fake-upstream non-streaming Chat adapter, Phase 2 text streaming MVP, and Phase 3 Anthropic Messages MVP. | `gateway/`, `examples/`, `docs/spec/` | Done through Phase 3 MVP |
+| `relaykit_app` | Implement SwiftUI/AppKit shell, helper lifecycle, health/models UI, and safe activation UI. | `app/` | Mac MVP shell implemented |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
-| `relaykit_test` | Run `go test ./...`, `gofmt`, `go vet`, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for activation primitive |
+| `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |
 | `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |
 
 ## Suggested First Agent Assignment

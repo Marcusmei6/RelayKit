@@ -8,6 +8,6 @@ build/
 !.env.example
 coverage/
 app/DerivedData/
+app/.build/
 gateway/bin/
 data/
-
