@@ -96,6 +96,9 @@ Current verification on this machine:
   - gateway accepts `-usage-log <path>` and defaults to the local app support usage path;
   - completed `/v1/responses` requests append one JSON line with provider/model/route/status/token metadata;
   - focused tests prove prompts, response body text, auth headers, cookies, env token values, API-key-looking prompt text, and upstream URLs are not written.
+- Phase 5 local usage summary:
+  - `gateway summarize-usage -path <usage.jsonl>` aggregates by day/provider/model and prints the conservative JSON summary contract;
+  - missing usage files return an empty summary instead of creating user data.
 
 ## Important Decisions
 
@@ -113,7 +116,7 @@ Current verification on this machine:
 Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, and Phase 5 usage JSONL writer:
 
 1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
-2. Choose the next safe item from `docs/development-plan.md`: local usage summary by day/provider/model, then app usage view.
+2. Choose the next safe item from `docs/development-plan.md`: app usage view.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/provider editing only after the gateway and app shell review gates stay green.

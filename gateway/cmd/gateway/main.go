@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
@@ -25,11 +28,107 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "activate-codex-config" {
 		return activateCodexConfig(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "summarize-usage" {
+		return summarizeUsage(args[1:], stdout, stderr)
+	}
 	if err := runServer(args, stderr); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
 	return 0
+}
+
+type usageLogEvent struct {
+	Timestamp    string `json:"timestamp"`
+	ProviderID   string `json:"provider_id"`
+	Model        string `json:"model"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+	DurationMS   int64  `json:"duration_ms"`
+}
+
+type usageSummary struct {
+	Day          string `json:"day"`
+	ProviderID   string `json:"provider_id"`
+	Model        string `json:"model"`
+	Requests     int64  `json:"requests"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+	DurationMS   int64  `json:"duration_ms"`
+}
+
+func summarizeUsage(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("summarize-usage", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	path := fs.String("path", defaultUsageLogPath(), "usage JSONL path")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	summaries, err := readUsageSummaries(*path)
+	if err != nil {
+		fmt.Fprintf(stderr, "summarize usage failed: %v\n", err)
+		return 1
+	}
+	if err := json.NewEncoder(stdout).Encode(summaries); err != nil {
+		fmt.Fprintf(stderr, "write summary failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func readUsageSummaries(path string) ([]usageSummary, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []usageSummary{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	byKey := map[string]*usageSummary{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var event usageLogEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return nil, err
+		}
+		day := event.Timestamp
+		if len(day) >= len("2006-01-02") {
+			day = day[:len("2006-01-02")]
+		}
+		key := day + "\x00" + event.ProviderID + "\x00" + event.Model
+		summary := byKey[key]
+		if summary == nil {
+			summary = &usageSummary{Day: day, ProviderID: event.ProviderID, Model: event.Model}
+			byKey[key] = summary
+		}
+		summary.Requests++
+		summary.InputTokens += event.InputTokens
+		summary.OutputTokens += event.OutputTokens
+		summary.TotalTokens += event.TotalTokens
+		summary.DurationMS += event.DurationMS
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]usageSummary, 0, len(byKey))
+	for _, summary := range byKey {
+		out = append(out, *summary)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Day != out[j].Day {
+			return out[i].Day < out[j].Day
+		}
+		if out[i].ProviderID != out[j].ProviderID {
+			return out[i].ProviderID < out[j].ProviderID
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out, nil
 }
 
 func activateCodexConfig(args []string, stdout, stderr io.Writer) int {

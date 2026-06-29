@@ -118,7 +118,7 @@ Status: local usage JSONL writer implemented.
 
 - Added a local helper log tail command for `/tmp/relaykit-gateway.{out,err}.log`.
 - Added local usage JSONL writes with the conservative contract below.
-- Summarize local usage by model/provider/day.
+- Added local usage summary by day/provider/model.
 - Add app usage view.
 - Keep cloud upload out of scope.
 
@@ -131,6 +131,7 @@ Minimal usage JSONL contract:
 - Unknown token counts may be omitted or written as zero; do not invent estimates.
 - Writes are local-only append operations. No cloud upload, daemon sync, or hosted telemetry.
 - App summary may read this file and aggregate by day/provider/model only.
+- Summary output is a JSON array sorted by day, provider id, and model. Fields: day, provider id, model, requests, input tokens, output tokens, total tokens, and duration milliseconds.
 
 These defaults are intentionally conservative and are not a product blocker. If a later caller needs more fields, add them behind review with a public-boundary test.
 
