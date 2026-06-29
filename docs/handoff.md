@@ -19,6 +19,7 @@ Phase 3 Anthropic Messages MVP implemented at `docs/spec/gateway-phase3-anthropi
 Phase 4 Codex local integration is documented at `docs/spec/codex-local-integration.md` and `examples/codex.config.example.toml`.
 Safe Codex config activation now has a minimal gateway primitive in `gateway/internal/codexconfig` and an explicit CLI caller, `gateway activate-codex-config -source <path> -target <path>`; it only writes an explicitly supplied target path, backs up existing files first, and has no default `~/.codex` target.
 Mac MVP app shell exists in `app/` as a SwiftPM SwiftUI app. It can start/stop an explicitly configured gateway binary, check `/healthz`, read `/v1/models`, and call the explicit Codex config activation CLI.
+Local alpha smoke is covered by `scripts/local-alpha-smoke.sh`.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 
 Latest committed baseline before Phase 1 implementation:
@@ -51,7 +52,7 @@ Current verification on this machine:
   - Public-boundary scan had only documented checklist regex hits and standard auth header assembly.
 - Phase 4 Codex local integration docs/examples slice committed as `b4501f2 docs: add codex local integration spec`.
 - Final `relaykit_test` validation passed Phase 3 and Phase 4 checks.
-- Final `relaykit_cr` dispatch was attempted for Phase 3/4 and did not return after a five-minute wait plus a one-minute retry; treat as a workflow/provider availability blocker, not a code failure. Follow-up fix changed `relaykit_cr` to the stable local `gpt-5.5` route and documented root read-only review as the fallback when CR provider availability fails.
+- Final `relaykit_cr` dispatch was attempted for Phase 3/4 and did not return after a five-minute wait plus a one-minute retry; treat as a workflow/provider availability blocker, not a code failure. Follow-up fix changed `relaykit_cr` to a stable local route and documented root read-only review as the fallback when CR provider availability fails.
 - Codex config activation primitive validation passed:
   - `cd gateway && go test ./... -count=1` passed.
   - `cd gateway && go vet ./...` passed.
@@ -72,6 +73,10 @@ Current verification on this machine:
   - The app uses the configured gateway binary for both server start and Codex config activation.
   - `relaykit_test` passed Mac MVP shell validation.
   - `relaykit_cr` returned SHIP IT after confirming the helper lifecycle and activation path use the configured binary.
+- Local usable alpha hardening:
+  - provider config path is persisted with `UserDefaults`;
+  - gateway startup reports immediate helper exit as an error instead of showing a false running state;
+  - `scripts/local-alpha-smoke.sh` builds the gateway, runs gateway tests/vet/gofmt, checks `/healthz` and `/v1/models`, and builds the app.
 
 ## Important Decisions
 
@@ -86,9 +91,9 @@ Current verification on this machine:
 
 ## Next Workstream
 
-Continue from the completed Phase 3 adapter, Phase 4 activation CLI, and Mac MVP shell:
+Continue from the completed Phase 3 adapter, Phase 4 activation CLI, and local usable Mac alpha:
 
-1. Re-run `cd gateway && go test ./... -count=1` and `cd app && swift build` before further edits.
+1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
 2. Decide whether to promote the built helper binary flow into a LaunchAgent.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.

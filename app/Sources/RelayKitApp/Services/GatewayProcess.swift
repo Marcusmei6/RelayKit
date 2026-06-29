@@ -13,8 +13,14 @@ final class GatewayProcess {
         }
         let process = makeStartProcess(binaryPath: binaryPath, configPath: configPath)
         process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        let errors = Pipe()
+        process.standardError = errors
         try process.run()
+        Thread.sleep(forTimeInterval: 0.2)
+        if !process.isRunning {
+            let stderr = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw GatewayProcessError.commandFailed(stderr.isEmpty ? "gateway exited during startup" : stderr)
+        }
         self.process = process
     }
 
@@ -51,10 +57,6 @@ final class GatewayProcess {
             throw GatewayProcessError.commandFailed(stderr.isEmpty ? stdout : stderr)
         }
         return stdout
-    }
-
-    private func gatewayDirectory() -> URL {
-        URL(fileURLWithPath: "../gateway", relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardized
     }
 
     private func appDirectory() -> URL {

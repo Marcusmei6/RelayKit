@@ -2,7 +2,11 @@ import Foundation
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var providerConfigPath = "../examples/providers.example.json"
+    @Published var providerConfigPath: String {
+        didSet {
+            UserDefaults.standard.set(providerConfigPath, forKey: "providerConfigPath")
+        }
+    }
     @Published var gatewayBinaryPath = "../gateway/bin/relaykit-gateway"
     @Published var codexSourcePath = "../examples/codex.config.example.toml"
     @Published var codexTargetPath = ""
@@ -12,6 +16,10 @@ final class AppModel: ObservableObject {
 
     private let gateway = GatewayProcess()
     private let client = GatewayClient()
+
+    init() {
+        providerConfigPath = UserDefaults.standard.string(forKey: "providerConfigPath") ?? "../examples/providers.example.json"
+    }
 
     func startGateway() {
         do {

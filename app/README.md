@@ -7,7 +7,7 @@ The Mac app is a SwiftUI shell around the gateway helper.
 ```bash
 cd gateway
 go build -o bin/relaykit-gateway ./cmd/gateway
-cd app
+cd ../app
 swift build
 ```
 
@@ -31,6 +31,15 @@ The development app expects a gateway binary at `../gateway/bin/relaykit-gateway
 - call `/healthz`;
 - call `/v1/models` and list model IDs;
 - activate Codex config through the gateway CLI with explicit `-source` and `-target` paths.
+- remember the last provider config path locally with `UserDefaults`.
+
+## Smoke
+
+From the repository root:
+
+```bash
+./scripts/local-alpha-smoke.sh
+```
 
 ## Not In This Slice
 
