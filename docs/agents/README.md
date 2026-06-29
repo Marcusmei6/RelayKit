@@ -87,9 +87,9 @@ The `.codex/agents/*.toml` model routes are a local-development exception while 
 
 ## Current Milestone Handoff
 
-New implementation sessions should start with `relaykit_planner`, run the smoke baseline, then continue from `docs/development-plan.md` rather than a single-feature prompt. The current safe next milestone is LaunchAgent or packaged-helper flow for the existing gateway binary:
+New implementation sessions should start with `relaykit_planner`, run the smoke baseline, then continue from `docs/development-plan.md` rather than a single-feature prompt. The current safe next milestone is Phase 5 local usage JSONL:
 
-1. Keep using the built helper binary.
-2. Add only reversible local helper lifecycle plumbing.
-3. Do not add real credentials, signing, notarization, publishing, or provider key storage.
+1. Use the conservative usage contract in `docs/development-plan.md`.
+2. Write local JSONL only; no cloud upload or hosted telemetry.
+3. Do not record request bodies, response bodies, prompts, headers, cookies, API keys, private domains, or raw credential-bearing URLs.
 4. Continue to README/handoff closeout and the next safe hardening item if validation passes.

@@ -117,10 +117,22 @@ Status: local LaunchAgent flow complete.
 Status: started with local helper log tail.
 
 - Added a local helper log tail command for `/tmp/relaykit-gateway.{out,err}.log`.
-- Write usage JSONL.
+- Write local usage JSONL with the conservative contract below.
 - Summarize local usage by model/provider/day.
 - Add app usage view.
 - Keep cloud upload out of scope.
+
+Minimal usage JSONL contract:
+
+- Path: `~/Library/Application Support/RelayKit/usage.jsonl` for the app/helper flow; tests may pass an explicit temporary path.
+- Format: one JSON object per completed gateway request.
+- Allowed fields: timestamp, request id, provider id, model, route, streaming flag, status, HTTP status, input tokens, output tokens, total tokens, duration milliseconds, and error code.
+- Forbidden fields: request body, response body, prompts, tool arguments, headers, authorization values, cookies, API keys, local usernames, private domains, and raw upstream URLs containing credentials.
+- Unknown token counts may be omitted or written as zero; do not invent estimates.
+- Writes are local-only append operations. No cloud upload, daemon sync, or hosted telemetry.
+- App summary may read this file and aggregate by day/provider/model only.
+
+These defaults are intentionally conservative and are not a product blocker. If a later caller needs more fields, add them behind review with a public-boundary test.
 
 ## Task Ownership
 
