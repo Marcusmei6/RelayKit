@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -101,7 +102,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	upstreamReq := map[string]any{
 		"model":    req.Model,
 		"messages": messages,
-		"stream":   false,
+		"stream":   req.Stream,
 	}
 	payload, err := json.Marshal(upstreamReq)
 	if err != nil {
@@ -143,6 +144,11 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var chat chatResponse
+	if req.Stream {
+		s.streamChat(w, resp.Body, req.Model)
+		return
+	}
+
 	if err := json.NewDecoder(resp.Body).Decode(&chat); err != nil {
 		writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", err.Error()))
 		return
@@ -162,8 +168,9 @@ func (s *Server) providerForModel(model string) (config.ProviderProfile, bool) {
 }
 
 type responsesRequest struct {
-	Model string          `json:"model"`
-	Input json.RawMessage `json:"input"`
+	Model  string          `json:"model"`
+	Input  json.RawMessage `json:"input"`
+	Stream bool            `json:"stream"`
 }
 
 type chatMessage struct {
@@ -201,16 +208,110 @@ type chatChoice struct {
 	FinishReason string      `json:"finish_reason"`
 }
 
+type chatStreamChunk struct {
+	ID      string             `json:"id"`
+	Model   string             `json:"model"`
+	Choices []chatStreamChoice `json:"choices"`
+	Usage   map[string]any     `json:"usage,omitempty"`
+}
+
+type chatStreamChoice struct {
+	Delta        chatMessage `json:"delta"`
+	FinishReason string      `json:"finish_reason"`
+}
+
+func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedModel string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	scanner := bufio.NewScanner(body)
+	created := false
+	finishReason := ""
+	var usage map[string]any
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			if !writeSSE(w, "response.completed", map[string]any{
+				"type":          "response.completed",
+				"status":        statusFromFinish(finishReason),
+				"finish_reason": finishReason,
+				"usage":         usage,
+			}) {
+				return
+			}
+			return
+		}
+
+		var chunk chatStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			if !writeSSE(w, "response.error", map[string]any{
+				"type":    "response.error",
+				"message": err.Error(),
+			}) {
+				return
+			}
+			return
+		}
+		if !created {
+			if chunk.Model == "" {
+				chunk.Model = requestedModel
+			}
+			if !writeSSE(w, "response.created", map[string]any{
+				"type":   "response.created",
+				"id":     responseID(chunk.ID),
+				"model":  chunk.Model,
+				"status": "in_progress",
+			}) {
+				return
+			}
+			created = true
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+			if choice.Delta.Content != "" {
+				if !writeSSE(w, "response.output_text.delta", map[string]any{
+					"type":  "response.output_text.delta",
+					"delta": choice.Delta.Content,
+				}) {
+					return
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if !writeSSE(w, "response.error", map[string]any{
+			"type":    "response.error",
+			"message": err.Error(),
+		}) {
+			return
+		}
+		return
+	}
+	if !writeSSE(w, "response.error", map[string]any{
+		"type":    "response.error",
+		"message": "upstream stream ended before [DONE]",
+	}) {
+		return
+	}
+}
+
 func responsesFromChat(chat chatResponse, requestedModel string) map[string]any {
 	model := chat.Model
 	if model == "" {
 		model = requestedModel
-	}
-	id := chat.ID
-	if id == "" {
-		id = fmt.Sprintf("resp_%d", time.Now().UnixNano())
-	} else if !strings.HasPrefix(id, "resp_") {
-		id = "resp_" + id
 	}
 	text := ""
 	status := "incomplete"
@@ -222,7 +323,7 @@ func responsesFromChat(chat chatResponse, requestedModel string) map[string]any 
 	}
 
 	return map[string]any{
-		"id":     id,
+		"id":     responseID(chat.ID),
 		"object": "response",
 		"status": status,
 		"model":  model,
@@ -242,8 +343,40 @@ func responsesFromChat(chat chatResponse, requestedModel string) map[string]any 
 	}
 }
 
+func responseID(id string) string {
+	if id == "" {
+		return fmt.Sprintf("resp_%d", time.Now().UnixNano())
+	}
+	if strings.HasPrefix(id, "resp_") {
+		return id
+	}
+	return "resp_" + id
+}
+
+func statusFromFinish(finishReason string) string {
+	if finishReason == "stop" {
+		return "completed"
+	}
+	return "incomplete"
+}
+
 func errorBody(kind, message string) map[string]any {
 	return map[string]any{"error": map[string]string{"message": message, "type": kind}}
+}
+
+func writeSSE(w http.ResponseWriter, event string, value any) bool {
+	body, err := json.Marshal(value)
+	if err != nil {
+		body = []byte(`{"type":"response.error","message":"sse_encode_error"}`)
+		event = "response.error"
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, body); err != nil {
+		return false
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

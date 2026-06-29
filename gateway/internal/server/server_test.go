@@ -181,3 +181,144 @@ func TestResponsesProxiesToFakeOpenAIChat(t *testing.T) {
 		t.Fatalf("usage = %+v", resp.Usage)
 	}
 }
+
+func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream err = %v", err)
+		}
+		if req.Model != "qwen3-coder" || !req.Stream {
+			t.Fatalf("upstream request = %+v", req)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunks := []string{
+			`data: {"id":"chatcmpl-stream","model":"qwen3-coder","choices":[{"delta":{"role":"assistant"}}]}`,
+			`data: {"id":"chatcmpl-stream","model":"qwen3-coder","choices":[{"delta":{"content":"he"}}]}`,
+			`data: {"id":"chatcmpl-stream","model":"qwen3-coder","choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}],"usage":{"total_tokens":5}}`,
+			`data: [DONE]`,
+		}
+		for _, chunk := range chunks {
+			if _, err := w.Write([]byte(chunk + "\n\n")); err != nil {
+				t.Fatalf("write upstream chunk err = %v", err)
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"qwen3-coder","input":"Say hi","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("content-type = %q", ct)
+	}
+	got := rec.Body.String()
+	for _, want := range []string{
+		"event: response.created",
+		`"type":"response.created"`,
+		"event: response.output_text.delta",
+		`"delta":"he"`,
+		`"delta":"llo"`,
+		"event: response.completed",
+		`"finish_reason":"stop"`,
+		`"total_tokens":5`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stream missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestResponsesStreamMalformedChunkEmitsError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := w.Write([]byte("data: {not json}\n\n")); err != nil {
+			t.Fatalf("write upstream chunk err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"qwen3-coder","input":"Say hi","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := rec.Body.String()
+	if !strings.Contains(got, "event: response.error") || !strings.Contains(got, `"type":"response.error"`) {
+		t.Fatalf("stream did not emit error frame:\n%s", got)
+	}
+}
+
+func TestResponsesStreamTruncationEmitsError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := w.Write([]byte(`data: {"id":"chatcmpl-stream","model":"qwen3-coder","choices":[{"delta":{"content":"hi"}}]}` + "\n\n")); err != nil {
+			t.Fatalf("write upstream chunk err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"qwen3-coder","input":"Say hi","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := rec.Body.String()
+	if !strings.Contains(got, `"delta":"hi"`) || !strings.Contains(got, "event: response.error") {
+		t.Fatalf("stream did not preserve delta and emit truncation error:\n%s", got)
+	}
+}
