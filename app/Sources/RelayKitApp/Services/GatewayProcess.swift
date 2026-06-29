@@ -41,11 +41,19 @@ final class GatewayProcess {
     }
 
     func activateCodexConfig(binaryPath: String, source: String, target: String) throws -> String {
+        try runGatewayCommand(binaryPath: binaryPath, arguments: ["activate-codex-config", "-source", source, "-target", target])
+    }
+
+    func summarizeUsage(binaryPath: String, usageLogPath: String) throws -> String {
+        try runGatewayCommand(binaryPath: binaryPath, arguments: ["summarize-usage", "-path", usageLogPath])
+    }
+
+    private func runGatewayCommand(binaryPath: String, arguments: [String]) throws -> String {
         let process = Process()
         let output = Pipe()
         let errors = Pipe()
         process.executableURL = URL(fileURLWithPath: binaryPath, relativeTo: appDirectory()).standardized
-        process.arguments = ["activate-codex-config", "-source", source, "-target", target]
+        process.arguments = arguments
         process.standardOutput = output
         process.standardError = errors
         try process.run()

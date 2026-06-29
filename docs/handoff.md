@@ -23,6 +23,7 @@ Local alpha smoke is covered by `scripts/local-alpha-smoke.sh`.
 Durable local helper lifecycle is covered by `scripts/relaykit-helper.sh`, which installs/uninstalls only `~/Library/LaunchAgents/dev.relaykit.gateway.plist` and requires an explicit provider config path.
 Local helper log tail is available through `scripts/relaykit-helper.sh logs`; it reads only `/tmp/relaykit-gateway.{out,err}.log` and does not collect or upload usage events.
 Local usage JSONL is written by the gateway to `~/Library/Application Support/RelayKit/usage.jsonl` by default, with tests injecting a temp path. It records only allowed metadata fields and token counts; it does not record request/response bodies, prompts, headers, cookies, auth values, API keys, private domains, or raw upstream URLs.
+The Mac app has a Usage section that calls the gateway binary's local `summarize-usage` command for an explicit usage JSONL path.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 
 Latest committed baseline before Phase 1 implementation:
@@ -99,6 +100,9 @@ Current verification on this machine:
 - Phase 5 local usage summary:
   - `gateway summarize-usage -path <usage.jsonl>` aggregates by day/provider/model and prints the conservative JSON summary contract;
   - missing usage files return an empty summary instead of creating user data.
+- Phase 5 app usage view:
+  - app exposes a usage JSONL path field and Refresh Usage button;
+  - the view displays day/provider/model/request/token totals returned by the local gateway binary summary command.
 
 ## Important Decisions
 
@@ -113,10 +117,10 @@ Current verification on this machine:
 
 ## Next Workstream
 
-Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, and Phase 5 usage JSONL writer:
+Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, Phase 5 usage JSONL writer, and app usage view:
 
 1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
-2. Choose the next safe item from `docs/development-plan.md`: app usage view.
+2. Choose the next safe item from `docs/development-plan.md`: provider config editing without secrets or Anthropic/tool-use hardening.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/provider editing only after the gateway and app shell review gates stay green.
@@ -133,6 +137,8 @@ Plan id: `relaykit-local-alpha-to-helper-lifecycle`
 | `relaykit_app` | Add smallest LaunchAgent or packaged-helper flow for the existing built gateway binary. | `app/`, `scripts/`, `docs/handoff.md` | Done for local LaunchAgent flow |
 | `relaykit_app` | Add local helper log tail for LaunchAgent stdout/stderr. | `scripts/`, `app/README.md`, `docs/handoff.md`, `docs/development-plan.md` | Done for local log tail |
 | `relaykit_gateway` | Add local usage JSONL writer using the conservative Phase 5 contract. | `gateway/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local writer |
+| `relaykit_gateway` | Add local usage summary CLI by day/provider/model. | `gateway/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local summary |
+| `relaykit_app` | Add minimal app usage view backed by local summary CLI. | `app/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local app view |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |
 | `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |

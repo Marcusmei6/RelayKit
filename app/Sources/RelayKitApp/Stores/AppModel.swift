@@ -8,10 +8,12 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var gatewayBinaryPath = "../gateway/bin/relaykit-gateway"
+    @Published var usageLogPath = AppModel.defaultUsageLogPath()
     @Published var codexSourcePath = "../examples/codex.config.example.toml"
     @Published var codexTargetPath = ""
     @Published var gatewayStatus = "stopped"
     @Published var models: [RelayModel] = []
+    @Published var usageSummaries: [UsageSummary] = []
     @Published var message = ""
 
     private let gateway = GatewayProcess()
@@ -57,6 +59,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func refreshUsageSummary() async {
+        do {
+            let output = try gateway.summarizeUsage(binaryPath: gatewayBinaryPath, usageLogPath: usageLogPath)
+            usageSummaries = try JSONDecoder().decode([UsageSummary].self, from: Data(output.utf8))
+            message = "Loaded \(usageSummaries.count) usage row(s)"
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
     func activateCodexConfig() async {
         guard !codexTargetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             message = "Codex target path is required"
@@ -72,5 +84,11 @@ final class AppModel: ObservableObject {
         } catch {
             message = error.localizedDescription
         }
+    }
+
+    private static func defaultUsageLogPath() -> String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/RelayKit/usage.jsonl")
+            .path
     }
 }

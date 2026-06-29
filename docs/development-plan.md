@@ -114,12 +114,12 @@ Status: local LaunchAgent flow complete.
 
 ## Phase 5: Local Observability
 
-Status: local usage JSONL writer implemented.
+Status: local usage view implemented.
 
 - Added a local helper log tail command for `/tmp/relaykit-gateway.{out,err}.log`.
 - Added local usage JSONL writes with the conservative contract below.
 - Added local usage summary by day/provider/model.
-- Add app usage view.
+- Added app usage view backed by the local summary CLI.
 - Keep cloud upload out of scope.
 
 Minimal usage JSONL contract:

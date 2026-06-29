@@ -32,6 +32,7 @@ The development app expects a gateway binary at `../gateway/bin/relaykit-gateway
 - call `/v1/models` and list model IDs;
 - activate Codex config through the gateway CLI with explicit `-source` and `-target` paths.
 - remember the last provider config path locally with `UserDefaults`.
+- show local usage summaries from an explicit JSONL path.
 
 ## Smoke
 
@@ -62,5 +63,4 @@ The script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requ
 
 - Keychain credential storage;
 - provider editing;
-- usage JSONL and app usage summaries;
 - signing, notarization, or release packaging.

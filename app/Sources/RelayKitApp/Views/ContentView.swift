@@ -4,14 +4,17 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            header
-            gatewayControls
-            models
-            activation
-            status
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                gatewayControls
+                models
+                usage
+                activation
+                status
+            }
+            .padding(24)
         }
-        .padding(24)
     }
 
     private var header: some View {
@@ -74,6 +77,43 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                 Button("Activate") {
                     Task { await model.activateCodexConfig() }
+                }
+            }
+        }
+    }
+
+    private var usage: some View {
+        GroupBox("Usage") {
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("Usage JSONL path", text: $model.usageLogPath)
+                    .textFieldStyle(.roundedBorder)
+                Button("Refresh Usage") {
+                    Task { await model.refreshUsageSummary() }
+                }
+                if model.usageSummaries.isEmpty {
+                    Text("No usage loaded")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                        GridRow {
+                            Text("Day")
+                            Text("Provider")
+                            Text("Model")
+                            Text("Requests")
+                            Text("Tokens")
+                        }
+                        .foregroundStyle(.secondary)
+                        ForEach(model.usageSummaries) { item in
+                            GridRow {
+                                Text(item.day)
+                                Text(item.providerId)
+                                Text(item.model)
+                                Text("\(item.requests)")
+                                Text("\(item.totalTokens)")
+                            }
+                        }
+                    }
                 }
             }
         }
