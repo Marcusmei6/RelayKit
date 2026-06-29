@@ -120,7 +120,10 @@ struct ContentView: View {
                             Text("Provider")
                             Text("Model")
                             Text("Requests")
-                            Text("Tokens")
+                            Text("Input")
+                            Text("Output")
+                            Text("Total")
+                            Text("Duration")
                         }
                         .foregroundStyle(.secondary)
                         ForEach(model.usageSummaries) { item in
@@ -129,7 +132,10 @@ struct ContentView: View {
                                 Text(item.providerId)
                                 Text(item.model)
                                 Text("\(item.requests)")
+                                Text("\(item.inputTokens)")
+                                Text("\(item.outputTokens)")
                                 Text("\(item.totalTokens)")
+                                Text("\(item.durationMs)ms")
                             }
                         }
                     }

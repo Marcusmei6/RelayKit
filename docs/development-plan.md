@@ -119,7 +119,7 @@ Status: local usage view implemented.
 - Added a local helper log tail command for `/tmp/relaykit-gateway.{out,err}.log`.
 - Added local usage JSONL writes with the conservative contract below.
 - Added local usage summary by day/provider/model.
-- Added app usage view backed by the local summary CLI.
+- Added app usage view backed by the local summary CLI, including request, token, and duration aggregates.
 - Keep cloud upload out of scope.
 
 Minimal usage JSONL contract:

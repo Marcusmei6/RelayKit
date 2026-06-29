@@ -103,7 +103,7 @@ Current verification on this machine:
   - missing usage files return an empty summary instead of creating user data.
 - Phase 5 app usage view:
   - app exposes a usage JSONL path field and Refresh Usage button;
-  - the view displays day/provider/model/request/token totals returned by the local gateway binary summary command.
+  - the view displays day/provider/model/request/input/output/total/duration aggregates returned by the local gateway binary summary command.
 - Phase 5.5 provider config editing:
   - app exposes explicit Load Config and Save Config actions for the configured provider JSON path;
   - load and save validate required provider/model fields, supported API formats, base URLs without userinfo/query/fragment, and no credential-looking keys/values before display or write;
@@ -129,13 +129,13 @@ Current verification on this machine:
 
 ## Next Workstream
 
-Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, Phase 5 usage JSONL writer, and app usage view:
+Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, Phase 5 usage JSONL writer, app usage view, provider config editor, non-streaming Anthropic tool-use mapping, and local release readiness docs:
 
 1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
-2. Choose the next safe item from `docs/development-plan.md`: Anthropic/tool-use hardening, local release readiness, or app usage polish.
+2. Choose the next safe item from `docs/development-plan.md`: streaming tool-use hardening only after a focused contract is added, or Keychain/signing/publishing only after explicit selection.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
-5. Add Keychain/provider editing only after the gateway and app shell review gates stay green.
+5. Add Keychain/credential storage only after the gateway and app shell review gates stay green.
 6. Use the planner Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate in `docs/agents/README.md`; do not stop after one commit if the next safe item is available, and do not treat small missing local contracts as human blockers.
 
 ## Dispatch Board
