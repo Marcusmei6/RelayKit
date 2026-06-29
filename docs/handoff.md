@@ -98,15 +98,17 @@ Continue from the completed Phase 3 adapter, Phase 4 activation CLI, and local u
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/provider editing only after the gateway and app shell review gates stay green.
+6. Use the planner continuation gate in `docs/agents/README.md`; do not stop after one commit if the next safe item in `docs/development-plan.md` is still available.
 
 ## Dispatch Board
 
-Plan id: `relaykit-phase1-gateway-mvp`
+Plan id: `relaykit-local-alpha-to-helper-lifecycle`
 
 | Lane | Assignment | Owned Paths | Status |
 | --- | --- | --- | --- |
 | `relaykit_gateway` | Implement provider loading, catalog generation, `-config`, fake-upstream non-streaming Chat adapter, Phase 2 text streaming MVP, and Phase 3 Anthropic Messages MVP. | `gateway/`, `examples/`, `docs/spec/` | Done through Phase 3 MVP |
 | `relaykit_app` | Implement SwiftUI/AppKit shell, helper lifecycle, health/models UI, and safe activation UI. | `app/` | Mac MVP shell implemented |
+| `relaykit_app` | Add smallest LaunchAgent or packaged-helper flow for the existing built gateway binary. | `app/`, `scripts/`, `docs/handoff.md` | Next safe lane |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |
 | `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |
@@ -120,23 +122,24 @@ Recommended initial prompt:
 ```text
 WORKTREE: /Users/marcusmacmini/workplace/RelayKit
 BRANCH: main
-PLAN: Re-attempt RelayKit CR for Phase 3/4, then plan safe Codex activation or Phase 3 hardening
-OWNED PATHS: gateway/, examples/, docs/handoff.md, docs/development-plan.md
-BLOCKED PATHS: app/, private provider configs, real credentials, hosted telemetry
+PLAN: RelayKit local alpha to durable helper lifecycle, with planner continuation gate
+OWNED PATHS: app/, scripts/, docs/handoff.md, docs/development-plan.md, docs/agents/README.md
+BLOCKED PATHS: private provider configs, real credentials, hosted telemetry, public GitHub push, signing, notarization, publishing
 Change Risk Tier: Tier 2
 Validation Tier: Tier 2
 CR Tier: Tier 2
-STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing, or unclear public boundary
+STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing/notarization, or unclear public boundary
 
-Use relaykit_planner as controller. Re-run gateway validation, re-attempt relaykit_cr if the provider route is healthy, then decide whether to implement safe Codex config activation with backup/rollback or harden Anthropic tool-use support. Do not push or publish.
+Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then implement the smallest LaunchAgent or packaged-helper flow for the existing built gateway binary. After each passing commit, apply docs/agents/README.md Continuation Gate and continue to the next safe item from docs/development-plan.md. Do not push, publish, sign, notarize, or add real credentials.
 ```
 
 Acceptance:
 
-- `cd gateway && go test ./... -count=1` passes.
-- Existing Phase 1, Phase 2, and Phase 3 tests keep passing.
+- `./scripts/local-alpha-smoke.sh` passes.
+- `cd app && swift build` passes.
 - CR returns SHIP IT or actionable findings are addressed.
 - Public-boundary scan has no disallowed hits.
+- Handoff states why the planner stopped instead of taking the next safe item.
 
 ## Workflow Assets Added
 

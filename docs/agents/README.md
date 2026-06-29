@@ -30,6 +30,17 @@ This checkout is configured for local Mac mini execution and intentionally mirro
 
 If `relaykit_cr` fails to start, returns a provider route error, or does not return after one bounded retry, record the failure in `docs/handoff.md` and run a root-session read-only review over the same diff. Passing tests plus a clean public-boundary scan plus root review may close the lane; do not let CR provider availability become the only blocker.
 
+## Continuation Gate
+
+Planner must not stop just because one slice or commit is complete. After every clean commit or parked blocker, it must re-read `docs/development-plan.md` and `docs/handoff.md`, rebuild the dispatch board, and continue to the next safe P0/P1 item when all of these are true:
+
+- `main` is clean and validation for the previous slice passed;
+- the next item has clear owned paths and no dependency on real credentials, signing, publishing, private providers, hosted telemetry, or destructive operations;
+- the work can stay inside the current milestone or the next listed milestone in `docs/development-plan.md`;
+- a specialist lane can own the work without overlapping another writer.
+
+Planner may stop only when the current milestone and the next safe milestone item are both complete, blocked, or require a human/product decision. The final response must name the next candidate item and why it did not start.
+
 ## Assignment Header
 
 Every specialist assignment must start with:
@@ -74,12 +85,11 @@ Use public fixtures and fake values only.
 
 The `.codex/agents/*.toml` model routes are a local-development exception while this repository remains private on this Mac mini. They are not release-safe.
 
-## First Development Handoff
+## Current Milestone Handoff
 
-The first real implementation session should start with `relaykit_planner` and focus on Gateway MVP:
+New implementation sessions should start with `relaykit_planner`, run the smoke baseline, then continue from `docs/development-plan.md` rather than a single-feature prompt. The current safe next milestone is LaunchAgent or packaged-helper flow for the existing gateway binary:
 
-1. Define provider profile schema.
-2. Load `examples/providers.example.json`.
-3. Generate model catalog from public profiles.
-4. Add OpenAI-compatible Chat adapter using fake upstream tests.
-5. Keep SwiftUI implementation deferred until the gateway contract is stable.
+1. Keep using the built helper binary.
+2. Add only reversible local helper lifecycle plumbing.
+3. Do not add real credentials, signing, notarization, publishing, or provider key storage.
+4. Continue to README/handoff closeout and the next safe hardening item if validation passes.

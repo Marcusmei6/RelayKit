@@ -31,20 +31,24 @@ Go gateway helper
 
 ## Phase 0: Repository Foundation
 
-- Initialize Git repository.
-- Add open-source boundary docs.
-- Add `app/` and `gateway/` ownership rules.
-- Add minimal gateway with `/healthz`, `/v1/models`, `/v1/responses`.
-- Add tests and initial commit.
+Status: complete.
+
+- Initialized Git repository.
+- Added open-source boundary docs.
+- Added `app/` and `gateway/` ownership rules.
+- Added minimal gateway with `/healthz`, `/v1/models`, `/v1/responses`.
+- Added tests and initial commits.
 
 ## Phase 1: Gateway MVP
 
-- Define `ProviderProfile` schema.
-- Load profiles from JSON.
-- Add OpenAI Chat adapter.
-- Add model catalog generator.
-- Add request/response tests.
-- Add CLI flags for config path and listen address.
+Status: complete.
+
+- Defined `ProviderProfile` schema.
+- Loaded profiles from JSON.
+- Added OpenAI Chat adapter.
+- Added model catalog generator.
+- Added request/response tests.
+- Added CLI flags for config path and listen address.
 
 Minimal public `ProviderProfile` contract:
 
@@ -69,26 +73,43 @@ Phase 1 should reject missing `id`, `base_url`, `api_format`, or empty `models`.
 
 ## Phase 2: Streaming MVP
 
-- Add SSE parser.
-- Translate Chat Completions stream into Responses stream.
-- Preserve output text, tool calls, finish reason, and usage when present.
-- Add stream interruption tests.
+Status: complete for text streaming MVP.
+
+- Added SSE parser.
+- Translated Chat Completions stream into Responses stream.
+- Preserved output text, finish reason, and usage when present.
+- Added malformed/truncated stream tests.
 
 ## Phase 3: Anthropic Adapter
 
-- Add Messages request adapter.
-- Add Messages stream adapter.
-- Map tool-use and stop reasons.
-- Keep unsupported fields explicit and tested.
+Status: complete for Messages MVP.
+
+- Added Messages request adapter.
+- Added Messages stream adapter.
+- Kept unsupported fields explicit and tested.
+- Tool-use hardening remains a later focused item.
 
 ## Phase 4: Mac App MVP
 
-- Create SwiftUI app shell.
-- Add development gateway helper lifecycle.
-- Show gateway status.
+Status: local usable alpha complete.
+
+- Created SwiftUI app shell.
+- Added development gateway helper lifecycle.
+- Showed gateway status.
 - Read `/healthz` and `/v1/models`.
-- Activate Codex config with explicit source/target paths and backup/rollback output.
+- Activated Codex config with explicit source/target paths and backup/rollback output.
+- Added local alpha smoke script.
 - Defer Keychain, provider CRUD, LaunchAgent install, and log tail until the visible shell is reviewed.
+
+## Phase 4.5: Helper Lifecycle Hardening
+
+Status: next.
+
+- Add the smallest LaunchAgent or packaged-helper flow for the existing built gateway binary.
+- Keep explicit provider config paths.
+- Do not add credentials, signing, notarization, or publishing.
+- Keep uninstall/stop behavior scoped to RelayKit-owned helper state.
+- Preserve `./scripts/local-alpha-smoke.sh` as the baseline.
 
 ## Phase 5: Local Observability
 
