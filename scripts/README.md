@@ -25,3 +25,11 @@ cd ..
 
 The helper script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requires an explicit provider config path, and stores absolute binary/config paths in the plist. Phase 4.5 keeps the listen address fixed at `127.0.0.1:19777` and writes helper stdout/stderr to `/tmp/relay.{out,err}.log`.
 `logs` reads those local helper stdout/stderr files only; it does not upload, redact, or collect usage events.
+
+## Local Release Package
+
+```bash
+./script/package_release.sh --verify
+```
+
+The package script builds the local app bundle, writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, and verifies the extracted bundled gateway plus public demo provider and Codex config examples. It does not sign, notarize, publish, or upload anything.

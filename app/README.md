@@ -19,7 +19,7 @@ From the repository root:
 ./script/build_and_run.sh
 ```
 
-This builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app starts with the bundled gateway and `../examples/providers.example.json`, which is the public no-secret demo provider config.
+This builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app starts with the bundled gateway and bundled public no-secret demo provider config.
 
 For a direct SwiftPM run:
 
@@ -55,6 +55,16 @@ From the repository root:
 
 The smoke also checks explicit Codex config activation, local usage summary, temporary LaunchAgent install/status/health/logs/uninstall, bundled app gateway startup, and `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
 
+## Local Release Package
+
+From the repository root:
+
+```bash
+./script/package_release.sh --verify
+```
+
+This writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, confirms the extracted app contains `Contents/MacOS/relay` plus the bundled public demo provider and Codex config examples, opens the extracted app, and verifies the extracted bundled gateway. It does not sign, notarize, publish, or write a real Codex config.
+
 ## Durable Local Helper
 
 The app Start/Stop buttons control the foreground helper process launched by the app. For a local user LaunchAgent flow, use the repo script from the repository root:
@@ -76,4 +86,4 @@ The script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requ
 
 - Keychain credential storage;
 - provider credential editing;
-- signing, notarization, or release packaging.
+- signing, notarization, or public distribution.

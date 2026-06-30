@@ -71,7 +71,7 @@ curl http://127.0.0.1:19777/v1/models
 ./script/build_and_run.sh
 ```
 
-The run script builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app defaults to the bundled gateway and the public no-secret demo config at `examples/providers.example.json`.
+The run script builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app defaults to the bundled gateway and bundled public no-secret demo config.
 
 For a lower-level SwiftPM run:
 
@@ -83,6 +83,14 @@ swift run RelayKitApp
 ```
 
 The bundled app uses its bundled `relay` helper. A direct SwiftPM run falls back to `../gateway/bin/relay`.
+
+## Local Release Package
+
+```bash
+./script/package_release.sh --verify
+```
+
+This creates `dist/RelayKitApp-local.zip`, extracts it locally, verifies `RelayKitApp.app/Contents/MacOS/relay` plus the bundled public demo provider and Codex config examples, opens the extracted app, and checks the extracted bundled gateway through `/healthz` and `/v1/models`. The package is unsigned and not notarized.
 
 ## Durable Local Helper
 

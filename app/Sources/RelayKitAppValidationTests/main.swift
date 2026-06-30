@@ -60,6 +60,12 @@ try expectValid(validConfig)
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }
+if RelayKitPaths.providerConfigPath(bundle: Bundle(for: BundleSentinel.self)) != "../examples/providers.example.json" {
+    fatalError("non-app bundle should fall back to development provider config path")
+}
+if RelayKitPaths.codexConfigSourcePath(bundle: Bundle(for: BundleSentinel.self)) != "../examples/codex.config.example.toml" {
+    fatalError("non-app bundle should fall back to development Codex config source path")
+}
 expectInvalid(try json("https://user:pass@example.test/v1"), name: "url userinfo")
 expectInvalid(try json("https://example.test/v1?sig=abc"), name: "url query")
 expectInvalid(try json("https://example.test/v1?access_token=abc"), name: "url query access_token")

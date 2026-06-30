@@ -12,6 +12,7 @@ DIST_DIR="${ROOT_DIR}/dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 APP_CONTENTS="${APP_BUNDLE}/Contents"
 APP_MACOS="${APP_CONTENTS}/MacOS"
+APP_RESOURCES="${APP_CONTENTS}/Resources"
 APP_BINARY="${APP_MACOS}/${APP_NAME}"
 APP_REAL_BINARY="${APP_MACOS}/${APP_NAME}.bin"
 BUNDLED_GATEWAY="${APP_MACOS}/relay"
@@ -31,13 +32,14 @@ build_bundle() {
   build_binary="$(swift build --show-bin-path)/${APP_NAME}"
 
   rm -rf "${APP_BUNDLE}"
-  mkdir -p "${APP_MACOS}"
+  mkdir -p "${APP_MACOS}" "${APP_RESOURCES}"
   cp "${build_binary}" "${APP_REAL_BINARY}"
   cp "${ROOT_DIR}/gateway/bin/relay" "${BUNDLED_GATEWAY}"
+  cp "${ROOT_DIR}/examples/providers.example.json" "${APP_RESOURCES}/providers.example.json"
+  cp "${ROOT_DIR}/examples/codex.config.example.toml" "${APP_RESOURCES}/codex.config.example.toml"
   cat >"${APP_BINARY}" <<APP_WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
-cd "${ROOT_DIR}/app"
 exec "\$(dirname "\$0")/${APP_NAME}.bin" "\$@"
 APP_WRAPPER
   chmod +x "${APP_BINARY}"
@@ -102,16 +104,8 @@ case "${MODE}" in
       echo "${APP_NAME} did not launch" >&2
       exit 1
     fi
-    if command -v lsof >/dev/null 2>&1; then
-      app_cwd="$(lsof -a -p "${app_pid}" -d cwd -Fn | sed -n 's/^n//p')"
-      if [[ "${app_cwd}" != "${ROOT_DIR}/app" ]]; then
-        echo "${APP_NAME} launched with unexpected cwd: ${app_cwd}" >&2
-        stop_app
-        exit 1
-      fi
-    fi
     stop_app
-    "${APP_BINARY}" --verify-bundled-gateway --provider-config "${ROOT_DIR}/examples/providers.example.json"
+    "${APP_BINARY}" --verify-bundled-gateway
     ;;
   *)
     usage

@@ -19,7 +19,8 @@ Phase 3 Anthropic Messages MVP implemented at `docs/spec/gateway-phase3-anthropi
 Phase 4 Codex local integration is documented at `docs/spec/codex-local-integration.md` and `examples/codex.config.example.toml`.
 Safe Codex config activation now has a minimal gateway primitive in `gateway/internal/codexconfig` and an explicit CLI caller, `gateway activate-codex-config -source <path> -target <path>`; it only writes an explicitly supplied target path, backs up existing files first, and has no default `~/.codex` target.
 Mac MVP app shell exists in `app/` as a SwiftPM SwiftUI app. It can start/stop an explicitly configured gateway binary, check `/healthz`, read `/v1/models`, and call the explicit Codex config activation CLI.
-The app can be launched from the repository root with `./script/build_and_run.sh`; the script builds `gateway/bin/relay`, bundles it into `dist/RelayKitApp.app/Contents/MacOS/relay`, and opens the app as a foreground macOS app. Codex Desktop also has a checked-in Run action at `.codex/environments/environment.toml` pointing to that script.
+The app can be launched from the repository root with `./script/build_and_run.sh`; the script builds `gateway/bin/relay`, bundles it into `dist/RelayKitApp.app/Contents/MacOS/relay`, bundles the public demo provider config into `Contents/Resources/providers.example.json`, bundles the public Codex config example into `Contents/Resources/codex.config.example.toml`, and opens the app as a foreground macOS app. Codex Desktop also has a checked-in Run action at `.codex/environments/environment.toml` pointing to that script.
+Local release packaging is covered by `./script/package_release.sh --verify`; it creates `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, verifies the extracted app contains `Contents/MacOS/relay` plus both bundled public demo config examples, opens the extracted app, and checks the extracted bundled gateway through `/healthz` and `/v1/models`. The artifact is unsigned and not notarized.
 Local alpha smoke is covered by `scripts/local-alpha-smoke.sh`; it builds the gateway binary, checks foreground `/healthz` and `/v1/models`, exercises explicit Codex config activation, checks local usage summary, temporarily installs/uninstalls the LaunchAgent helper, builds the app, verifies the bundled app gateway, and runs app validation tests.
 Durable local helper lifecycle is covered by `scripts/relaykit-helper.sh`, which installs/uninstalls only `~/Library/LaunchAgents/dev.relaykit.gateway.plist` and requires an explicit provider config path.
 Local helper log tail is available through `scripts/relaykit-helper.sh logs`; it reads only `/tmp/relay.{out,err}.log` and does not collect or upload usage events.
@@ -33,6 +34,7 @@ Integrated SwiftUI Mac alpha checklist status:
 - Gateway binary builds as `gateway/bin/relay`: satisfied by `./scripts/local-alpha-smoke.sh`.
 - User can launch the app with one command from the repository root: satisfied by `./script/build_and_run.sh`.
 - SwiftUI app can start/stop the bundled gateway binary without `go run`: satisfied by app helper lifecycle wiring and `./script/build_and_run.sh --verify`.
+- Local unsigned release zip can be built and verified: satisfied by `./script/package_release.sh --verify`.
 - App uses an explicit provider config path and stores no credential values: satisfied for the current public config editor slice.
 - App can call `/healthz` and `/v1/models`, and displays model IDs: satisfied by app client/UI wiring and smoke coverage for the endpoints.
 - App can run explicit Codex config activation through the gateway CLI with source/target paths: satisfied by app wiring and smoke coverage.
@@ -46,7 +48,7 @@ Local no-secret demo path:
 
 1. From the repository root, run `./script/build_and_run.sh`.
 2. In the app, leave the default gateway binary path as the bundled `relay` helper.
-3. Leave the default provider config path as `../examples/providers.example.json`.
+3. Leave the default provider config path as the bundled public demo config.
 4. Click Start, then Health, then Refresh Models.
 5. Use Load Config to inspect the public provider JSON, Refresh Usage for local usage summaries, and Codex Config Activation only with an explicit temporary target path.
 

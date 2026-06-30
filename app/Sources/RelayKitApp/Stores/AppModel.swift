@@ -10,7 +10,7 @@ final class AppModel: ObservableObject {
     }
     @Published var gatewayBinaryPath = RelayKitPaths.gatewayBinaryPath()
     @Published var usageLogPath = AppModel.defaultUsageLogPath()
-    @Published var codexSourcePath = "../examples/codex.config.example.toml"
+    @Published var codexSourcePath = RelayKitPaths.codexConfigSourcePath()
     @Published var codexTargetPath = ""
     @Published var gatewayStatus = "stopped"
     @Published var models: [RelayModel] = []
@@ -22,7 +22,8 @@ final class AppModel: ObservableObject {
     private let client = GatewayClient()
 
     init() {
-        providerConfigPath = UserDefaults.standard.string(forKey: "providerConfigPath") ?? "../examples/providers.example.json"
+        let savedPath = UserDefaults.standard.string(forKey: "providerConfigPath")
+        providerConfigPath = savedPath == "../examples/providers.example.json" ? RelayKitPaths.providerConfigPath() : savedPath ?? RelayKitPaths.providerConfigPath()
     }
 
     func startGateway() {

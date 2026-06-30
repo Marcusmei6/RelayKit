@@ -4,7 +4,7 @@ import RelayKitCore
 enum BundledGatewayVerifier {
     static func run(arguments: [String]) -> Int32 {
         let gateway = GatewayProcess()
-        let configPath = value(after: "--provider-config", in: arguments) ?? "../examples/providers.example.json"
+        let configPath = value(after: "--provider-config", in: arguments) ?? RelayKitPaths.providerConfigPath()
         do {
             try gateway.start(binaryPath: RelayKitPaths.gatewayBinaryPath(), configPath: configPath)
             defer { gateway.stop() }

@@ -174,6 +174,7 @@ Minimal streaming tool-use contract:
 Status: README refreshed and agent model routes scrubbed to public defaults.
 
 - Made README install/run commands match the current local alpha.
+- Added unsigned local zip packaging with extraction and bundled-gateway verification.
 - Run `docs/public-boundary-checklist.md`.
 - Scrubbed `.codex/agents/*.toml` to public model defaults.
 - Keep signing, notarization, publishing, and GitHub push out of scope until explicitly requested.

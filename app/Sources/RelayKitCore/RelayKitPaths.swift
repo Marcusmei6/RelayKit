@@ -10,4 +10,24 @@ public enum RelayKitPaths {
         }
         return "../gateway/bin/relay"
     }
+
+    public static func providerConfigPath(bundle: Bundle = .main) -> String {
+        let bundled = bundle.bundleURL
+            .appendingPathComponent("Contents/Resources/providers.example.json")
+            .path
+        if FileManager.default.fileExists(atPath: bundled) {
+            return bundled
+        }
+        return "../examples/providers.example.json"
+    }
+
+    public static func codexConfigSourcePath(bundle: Bundle = .main) -> String {
+        let bundled = bundle.bundleURL
+            .appendingPathComponent("Contents/Resources/codex.config.example.toml")
+            .path
+        if FileManager.default.fileExists(atPath: bundled) {
+            return bundled
+        }
+        return "../examples/codex.config.example.toml"
+    }
 }
