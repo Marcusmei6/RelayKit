@@ -1,6 +1,6 @@
 name = "relaykit_worker"
 description = "RelayKit bounded implementation worker for docs, examples, and small cross-cutting project tasks."
-model = "traex/doubao-seed-2.1-pro"
+model = "gpt-5.4"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 nickname_candidates = ["RelayKit Worker"]

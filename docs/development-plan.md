@@ -168,11 +168,11 @@ Minimal streaming tool-use contract:
 
 ## Phase 6: Local Release Readiness
 
-Status: README and public-scrub notes refreshed.
+Status: README refreshed and agent model routes scrubbed to public defaults.
 
 - Made README install/run commands match the current local alpha.
 - Run `docs/public-boundary-checklist.md`.
-- Prepared public-scrub notes for `.codex/agents/*.toml`.
+- Scrubbed `.codex/agents/*.toml` to public model defaults.
 - Keep signing, notarization, publishing, and GitHub push out of scope until explicitly requested.
 
 ## Task Ownership

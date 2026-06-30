@@ -57,7 +57,7 @@ Current verification on this machine:
   - Public-boundary scan had only documented checklist regex hits and standard auth header assembly.
 - Phase 4 Codex local integration docs/examples slice committed as `b4501f2 docs: add codex local integration spec`.
 - Final `relaykit_test` validation passed Phase 3 and Phase 4 checks.
-- Final `relaykit_cr` dispatch was attempted for Phase 3/4 and did not return after a five-minute wait plus a one-minute retry; treat as a workflow/provider availability blocker, not a code failure. Follow-up fix changed `relaykit_cr` to a stable local route and documented root read-only review as the fallback when CR provider availability fails.
+- Final `relaykit_cr` dispatch was attempted for Phase 3/4 and did not return after a five-minute wait plus a one-minute retry; treat as a workflow/provider availability blocker, not a code failure. Follow-up fix changed `relaykit_cr` to a stable checked-in public default route and documented root read-only review as the fallback when CR provider availability fails.
 - Codex config activation primitive validation passed:
   - `cd gateway && go test ./... -count=1` passed.
   - `cd gateway && go vet ./...` passed.
@@ -115,7 +115,7 @@ Current verification on this machine:
   - incomplete streaming tool arguments emit `response.error`.
 - Phase 6 local release readiness:
   - root README and gateway README now match the current local alpha commands;
-  - public release remains blocked on `docs/public-boundary-checklist.md`, especially scrubbing `.codex/agents/*.toml` local model routes.
+  - `.codex/agents/*.toml` now uses public model defaults; keep private/local routing in untracked machine-local overrides only.
 
 ## Important Decisions
 
@@ -126,7 +126,7 @@ Current verification on this machine:
 - Gateway direction: Go helper, not Swift.
 - Open-source boundary: no private adapters, internal model IDs, internal URLs, tokens, or copied local gateway implementation.
 - Workflow direction: use project-scoped RelayKit agents in `.codex/agents/`, with `relaykit_planner` as controller and parent-mediated dispatch when a child planner cannot spawn specialists.
-- Local execution routing: project agents currently mirror a private local runtime split. Exact local model IDs are intentionally omitted from publishable docs; inspect `.codex/agents/*.toml` only on this private checkout.
+- Local execution routing: checked-in project agents use public model defaults. Private runtime splits belong outside the repository.
 
 ## Next Workstream
 
@@ -167,7 +167,7 @@ Start a new development session in this repository and launch `relaykit_planner`
 Recommended initial prompt:
 
 ```text
-WORKTREE: /Users/marcusmacmini/workplace/RelayKit
+WORKTREE: /path/to/RelayKit
 BRANCH: main
 PLAN: RelayKit local alpha hardening backlog, with planner continuation/spec-gap/backlog gates
 OWNED PATHS: gateway/, app/, scripts/, docs/handoff.md, docs/development-plan.md, docs/agents/README.md

@@ -4,19 +4,19 @@ This file defines RelayKit's project-scoped agent workflow. It is a routing map,
 
 Project agents live in `.codex/agents/` and are registered by `.codex/config.toml`. Keep these agents project-scoped so the public repository carries its own development workflow without depending on a user's global setup.
 
-This checkout is configured for local Mac mini execution and intentionally mirrors private local model routing. Before publishing RelayKit to a public GitHub repository, scrub `.codex/agents/*.toml` back to public model names and keep this table free of private route values.
+The checked-in agent configs use public model names. Keep private/local model routing out of the repository; use local untracked overrides if a machine needs them.
 
 ## Agents
 
 | Agent | Model | Role | Writes? | Use when | Must not do |
 | --- | --- | --- | --- | --- | --- |
-| `relaykit_planner` | local private route / `xhigh` | Controller | Narrow docs/workflow only | Split work, assign lanes, enforce gates, maintain handoff | Implement product code, claim dispatch without evidence, handle secrets |
-| `relaykit_worker` | local private route / `high` | General worker | Yes | Bounded docs/examples/small cross-cutting tasks | Broaden scope, merge/push, edit private data |
-| `relaykit_gateway` | local private route / `high` | Go gateway worker | Yes | Server, adapters, config, catalog, usage events | Edit app UI, copy private gateway behavior |
-| `relaykit_app` | local private route / `xhigh` | Apple app worker | Yes | SwiftUI/AppKit shell, Keychain, helper lifecycle, config activation | Implement protocol adapters or SSE parsing in Swift |
-| `relaykit_test` | local private route / `xhigh` | Validator | Ignored artifacts only | Focused validation, command evidence, tier adequacy | Fix code, add tests, bless unverified claims |
-| `relaykit_cr` | stable local route / `xhigh` | Reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files |
-| `relaykit_release` | local private route / `high` | Release validator | Ignored artifacts only | Packaging, signing readiness, public repo hygiene | Sign/notarize/publish without explicit user request |
+| `relaykit_planner` | `gpt-5.5` / `xhigh` | Controller | Narrow docs/workflow only | Split work, assign lanes, enforce gates, maintain handoff | Implement product code, claim dispatch without evidence, handle secrets |
+| `relaykit_worker` | `gpt-5.4` / `high` | General worker | Yes | Bounded docs/examples/small cross-cutting tasks | Broaden scope, merge/push, edit private data |
+| `relaykit_gateway` | `gpt-5.4` / `high` | Go gateway worker | Yes | Server, adapters, config, catalog, usage events | Edit app UI, copy private gateway behavior |
+| `relaykit_app` | `gpt-5.5` / `xhigh` | Apple app worker | Yes | SwiftUI/AppKit shell, Keychain, helper lifecycle, config activation | Implement protocol adapters or SSE parsing in Swift |
+| `relaykit_test` | `gpt-5.3-codex-spark` / `xhigh` | Validator | Ignored artifacts only | Focused validation, command evidence, tier adequacy | Fix code, add tests, bless unverified claims |
+| `relaykit_cr` | `gpt-5.5` / `xhigh` | Reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files |
+| `relaykit_release` | `gpt-5.4` / `high` | Release validator | Ignored artifacts only | Packaging, signing readiness, public repo hygiene | Sign/notarize/publish without explicit user request |
 
 ## Default Flow
 
@@ -95,13 +95,13 @@ Every lane must preserve the open-source boundary:
 
 Use public fixtures and fake values only.
 
-The `.codex/agents/*.toml` model routes are a local-development exception while this repository remains private on this Mac mini. They are not release-safe.
+Private model routes are not release-safe and must stay out of checked-in agent configs.
 
 ## Current Milestone Handoff
 
-New implementation sessions should start with `relaykit_planner`, run the smoke baseline, then continue from `docs/development-plan.md` rather than a single-feature prompt. The current safe next milestone is Phase 5 local usage JSONL:
+New implementation sessions should start with `relaykit_planner`, run the smoke baseline, then continue from `docs/development-plan.md` rather than a single-feature prompt. Current completed local-alpha lanes include helper lifecycle, local observability, provider config editing, Anthropic tool-use hardening, and public agent-route scrub.
 
 1. Use the current milestone backlog in `docs/development-plan.md`.
-2. Prefer provider config editing without secrets, app usage polish, or Anthropic tool-use hardening.
+2. Choose Keychain/credential storage, signing/publishing readiness, or public push/release validation only after explicit selection.
 3. Do not record or store credentials, request bodies, response bodies, prompts, headers, cookies, API keys, private domains, or raw credential-bearing URLs.
 4. Continue to README/handoff closeout and the next safe hardening item if validation passes.

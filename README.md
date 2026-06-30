@@ -91,4 +91,4 @@ The helper script affects only `~/Library/LaunchAgents/dev.relaykit.gateway.plis
 
 ## Public Release Readiness
 
-Before any public push or release, run `docs/public-boundary-checklist.md`. `.codex/agents/*.toml` currently contains local development model routes and must be scrubbed to public defaults before publishing.
+Before any public push or release, run `docs/public-boundary-checklist.md`. Checked-in `.codex/agents/*.toml` files use public model defaults; keep private/local routing in untracked machine-local overrides only.

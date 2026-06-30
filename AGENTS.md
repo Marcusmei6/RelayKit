@@ -5,7 +5,7 @@ RelayKit is intended to become a public open-source project. Keep the repository
 ## Non-Negotiable Boundary
 
 - Do not commit private provider names, internal domains, JWTs, API keys, cookies, local auth files, private launch agents, or copied user logs.
-- Local development agent routing may mirror the private Iris model split in `.codex/agents/` while this repository is private on this machine. Before publishing or pushing to a public GitHub repository, replace those model IDs with public defaults and record the scrub in `docs/handoff.md`.
+- Checked-in `.codex/agents/` model IDs must stay public-safe. Private/local routing belongs only in untracked machine-local overrides.
 - Do not copy code from the local private gateway binary or private configuration. Rebuild public behavior from the public contract and tests.
 - Keep provider integrations public by default. Private adapters belong outside this repository.
 - Prefer small, boring changes. Do not add framework scaffolding for features not in the current milestone.
