@@ -19,6 +19,7 @@ Phase 3 Anthropic Messages MVP implemented at `docs/spec/gateway-phase3-anthropi
 Phase 4 Codex local integration is documented at `docs/spec/codex-local-integration.md` and `examples/codex.config.example.toml`.
 Safe Codex config activation now has a minimal gateway primitive in `gateway/internal/codexconfig` and an explicit CLI caller, `gateway activate-codex-config -source <path> -target <path>`; it only writes an explicitly supplied target path, backs up existing files first, and has no default `~/.codex` target.
 Mac MVP app shell exists in `app/` as a SwiftPM SwiftUI app. It can start/stop an explicitly configured gateway binary, check `/healthz`, read `/v1/models`, and call the explicit Codex config activation CLI.
+The app can be launched from the repository root with `./script/build_and_run.sh`; the script builds `gateway/bin/relay`, stages `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. Codex Desktop also has a checked-in Run action at `.codex/environments/environment.toml` pointing to that script.
 Local alpha smoke is covered by `scripts/local-alpha-smoke.sh`; it builds the gateway binary, checks foreground `/healthz` and `/v1/models`, exercises explicit Codex config activation, checks local usage summary, temporarily installs/uninstalls the LaunchAgent helper, builds the app, and runs app validation tests.
 Durable local helper lifecycle is covered by `scripts/relaykit-helper.sh`, which installs/uninstalls only `~/Library/LaunchAgents/dev.relaykit.gateway.plist` and requires an explicit provider config path.
 Local helper log tail is available through `scripts/relaykit-helper.sh logs`; it reads only `/tmp/relay.{out,err}.log` and does not collect or upload usage events.
@@ -30,6 +31,7 @@ Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
 Integrated SwiftUI Mac alpha checklist status:
 
 - Gateway binary builds as `gateway/bin/relay`: satisfied by `./scripts/local-alpha-smoke.sh`.
+- User can launch the app with one command from the repository root: satisfied by `./script/build_and_run.sh`.
 - SwiftUI app can start/stop the built gateway binary without `go run`: satisfied by app helper lifecycle wiring.
 - App uses an explicit provider config path and stores no credential values: satisfied for the current public config editor slice.
 - App can call `/healthz` and `/v1/models`, and displays model IDs: satisfied by app client/UI wiring and smoke coverage for the endpoints.
@@ -39,6 +41,14 @@ Integrated SwiftUI Mac alpha checklist status:
 - Local helper/LaunchAgent flow is documented and smoke-tested, but not permanently installed: satisfied by `scripts/relaykit-helper.sh` and smoke cleanup.
 - Local alpha smoke proves gateway plus app validation pass: satisfied on this machine.
 - Handoff documents what a user can run today: satisfied by README, app/gateway/script README files, and this checklist.
+
+Local no-secret demo path:
+
+1. From the repository root, run `./script/build_and_run.sh`.
+2. In the app, leave the default gateway binary path as `../gateway/bin/relay`.
+3. Leave the default provider config path as `../examples/providers.example.json`.
+4. Click Start, then Health, then Refresh Models.
+5. Use Load Config to inspect the public provider JSON, Refresh Usage for local usage summaries, and Codex Config Activation only with an explicit temporary target path.
 
 Latest committed baseline before Phase 1 implementation:
 

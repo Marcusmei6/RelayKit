@@ -94,11 +94,13 @@ Status: complete for Messages MVP.
 Status: local usable alpha complete.
 
 - Created SwiftUI app shell.
+- Added a repository-local `./script/build_and_run.sh` entrypoint that builds the gateway binary, stages a SwiftPM macOS app bundle, and opens the app.
 - Added development gateway helper lifecycle.
 - Showed gateway status.
 - Read `/healthz` and `/v1/models`.
 - Activated Codex config with explicit source/target paths and backup/rollback output.
 - Added local alpha smoke script.
+- Kept the default provider config pointed at the public no-secret demo file, `examples/providers.example.json`.
 - Keychain credential storage remains deferred until explicitly selected.
 
 ## Phase 4.5: Helper Lifecycle Hardening

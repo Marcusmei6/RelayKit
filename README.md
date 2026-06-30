@@ -68,8 +68,17 @@ curl http://127.0.0.1:19777/v1/models
 ## Mac App
 
 ```bash
-cd app
-swift build
+./script/build_and_run.sh
+```
+
+The run script builds `gateway/bin/relay`, stages a local `dist/RelayKitApp.app` bundle, and opens the app as a foreground macOS app. The app defaults to the public no-secret demo config at `examples/providers.example.json`.
+
+For a lower-level SwiftPM run:
+
+```bash
+cd gateway
+go build -o bin/relay ./cmd/gateway
+cd ../app
 swift run RelayKitApp
 ```
 

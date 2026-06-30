@@ -13,6 +13,16 @@ swift build
 
 ## Run
 
+From the repository root:
+
+```bash
+./script/build_and_run.sh
+```
+
+This builds `gateway/bin/relay`, stages `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app starts with `../examples/providers.example.json`, which is the public no-secret demo provider config.
+
+For a direct SwiftPM run:
+
 ```bash
 cd app
 swift run RelayKitApp
