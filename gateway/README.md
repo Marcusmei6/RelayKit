@@ -19,14 +19,14 @@ Current local alpha:
 go test ./...
 go vet ./...
 test -z "$(gofmt -l .)"
-go build -o bin/relaykit-gateway ./cmd/gateway
-./bin/relaykit-gateway -listen 127.0.0.1:19777 -config ../examples/providers.example.json
+go build -o bin/relay ./cmd/gateway
+./bin/relay -listen 127.0.0.1:19777 -config ../examples/providers.example.json
 ```
 
 ## Local Usage Summary
 
 ```bash
-./bin/relaykit-gateway summarize-usage -path "$HOME/Library/Application Support/RelayKit/usage.jsonl"
+./bin/relay summarize-usage -path "$HOME/Library/Application Support/RelayKit/usage.jsonl"
 ```
 
 The summary command reads local JSONL only and emits day/provider/model aggregates.

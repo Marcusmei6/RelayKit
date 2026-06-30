@@ -21,7 +21,7 @@ Safe Codex config activation now has a minimal gateway primitive in `gateway/int
 Mac MVP app shell exists in `app/` as a SwiftPM SwiftUI app. It can start/stop an explicitly configured gateway binary, check `/healthz`, read `/v1/models`, and call the explicit Codex config activation CLI.
 Local alpha smoke is covered by `scripts/local-alpha-smoke.sh`.
 Durable local helper lifecycle is covered by `scripts/relaykit-helper.sh`, which installs/uninstalls only `~/Library/LaunchAgents/dev.relaykit.gateway.plist` and requires an explicit provider config path.
-Local helper log tail is available through `scripts/relaykit-helper.sh logs`; it reads only `/tmp/relaykit-gateway.{out,err}.log` and does not collect or upload usage events.
+Local helper log tail is available through `scripts/relaykit-helper.sh logs`; it reads only `/tmp/relay.{out,err}.log` and does not collect or upload usage events.
 Local usage JSONL is written by the gateway to `~/Library/Application Support/RelayKit/usage.jsonl` by default, with tests injecting a temp path. It records only allowed metadata fields and token counts; it does not record request/response bodies, prompts, headers, cookies, auth values, API keys, private domains, or raw upstream URLs.
 The Mac app has a Usage section that calls the gateway binary's local `summarize-usage` command for an explicit usage JSONL path.
 The Mac app has a minimal Provider Config editor for explicit JSON files. It validates public provider fields, rejects credential-looking keys/values and base URLs with userinfo, query strings, or fragments, and backs up existing files before saving.
@@ -73,7 +73,7 @@ Current verification on this machine:
 - Mac MVP app shell validation passed:
   - `cd app && swift build` passed.
   - `cd app && swift run RelayKitApp` launched and was stopped manually after startup.
-  - `cd gateway && go build -o bin/relaykit-gateway ./cmd/gateway` produced the dev helper binary used by the app.
+  - `cd gateway && go build -o bin/relay ./cmd/gateway` produced the dev helper binary used by the app.
   - A built gateway binary smoke returned `{"status":"ok"}` from `/healthz` and model IDs from `/v1/models`.
   - The app uses the configured gateway binary for both server start and Codex config activation.
   - `relaykit_test` passed Mac MVP shell validation.
@@ -86,10 +86,10 @@ Current verification on this machine:
   - missing `--config` fails with `--config is required`;
   - missing provider config path fails before writing a LaunchAgent;
   - `scripts/relaykit-helper.sh uninstall` affects only the RelayKit-owned LaunchAgent label;
-  - `scripts/relaykit-helper.sh install --config examples/providers.example.json --binary gateway/bin/relaykit-gateway` installed `dev.relaykit.gateway` and normalized both paths to absolute plist arguments;
+  - `scripts/relaykit-helper.sh install --config examples/providers.example.json --binary gateway/bin/relay` installed `dev.relaykit.gateway` and normalized both paths to absolute plist arguments;
   - `/healthz` and `/v1/models` worked through the LaunchAgent-started helper;
   - `scripts/relaykit-helper.sh uninstall` removed the LaunchAgent and stopped the helper.
-  - deliberate Phase 4.5 simplifications: `127.0.0.1:19777` is hardcoded, and helper stdout/stderr go to `/tmp/relaykit-gateway.{out,err}.log`.
+  - deliberate Phase 4.5 simplifications: `127.0.0.1:19777` is hardcoded, and helper stdout/stderr go to `/tmp/relay.{out,err}.log`.
 - Phase 5 local log-tail start:
   - `scripts/relaykit-helper.sh logs --lines 5` reads existing helper stdout/stderr logs when present;
   - `scripts/relaykit-helper.sh logs --lines nope` exits with an explicit `--lines requires a non-negative integer` error;
@@ -111,7 +111,7 @@ Current verification on this machine:
   - `swift run RelayKitAppValidationTests` covers valid config plus userinfo, query, fragment, and credential-key rejection.
 - Phase 3.5 Anthropic tool-use hardening:
   - non-streaming Anthropic `tool_use` blocks map to Responses `function_call` output items with fake upstream coverage;
-  - streaming tool-use remains deferred.
+  - streaming tool-use is the next safe gateway lane under the Phase 3.6 contract.
 - Phase 6 local release readiness:
   - root README and gateway README now match the current local alpha commands;
   - public release remains blocked on `docs/public-boundary-checklist.md`, especially scrubbing `.codex/agents/*.toml` local model routes.
@@ -132,7 +132,7 @@ Current verification on this machine:
 Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, Phase 5 usage JSONL writer, app usage view, provider config editor, non-streaming Anthropic tool-use mapping, and local release readiness docs:
 
 1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
-2. Choose the next safe item from `docs/development-plan.md`: streaming tool-use hardening only after a focused contract is added, or Keychain/signing/publishing only after explicit selection.
+2. Choose the next safe item from `docs/development-plan.md`: streaming tool-use hardening now has a focused local contract and is safe to implement with fake upstream tests.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/credential storage only after the gateway and app shell review gates stay green.
@@ -153,6 +153,7 @@ Plan id: `relaykit-local-alpha-to-helper-lifecycle`
 | `relaykit_app` | Add minimal app usage view backed by local summary CLI. | `app/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local app view |
 | `relaykit_app` | Add provider config editing without secrets. | `app/`, `docs/handoff.md`, `docs/development-plan.md` | Done for minimal JSON editor |
 | `relaykit_gateway` | Harden Anthropic tool-use mapping with fake upstream tests. | `gateway/`, `docs/handoff.md` | Done for non-streaming tool_use |
+| `relaykit_gateway` | Add Anthropic streaming tool-use mapping using the Phase 3.6 contract. | `gateway/`, `docs/spec/gateway-phase3-anthropic.md`, `docs/handoff.md` | Next safe lane |
 | `relaykit_worker` | Refresh README/local release readiness and public scrub notes. | `README.md`, `app/README.md`, `gateway/README.md`, `docs/public-boundary-checklist.md`, `docs/handoff.md` | Done for README/scrub notes |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |
@@ -175,7 +176,7 @@ Validation Tier: Tier 2
 CR Tier: Tier 2
 STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing/notarization, or unclear public boundary
 
-Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then implement provider config editing without secrets or the next safe lane from docs/development-plan.md. After each passing commit, apply docs/agents/README.md Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate, then continue to the next safe item. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
+Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then implement Anthropic streaming tool-use mapping or the next safe lane from docs/development-plan.md. After each passing commit, apply docs/agents/README.md Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate, then continue to the next safe item. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
 ```
 
 Acceptance:

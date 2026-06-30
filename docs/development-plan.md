@@ -109,14 +109,14 @@ Status: local LaunchAgent flow complete.
 - Kept explicit provider config paths.
 - Did not add credentials, signing, notarization, or publishing.
 - Kept uninstall/stop behavior scoped to RelayKit-owned helper state.
-- Kept the listen address fixed at `127.0.0.1:19777` and helper stdout/stderr at `/tmp/relaykit-gateway.{out,err}.log` for this local alpha slice.
+- Kept the listen address fixed at `127.0.0.1:19777` and helper stdout/stderr at `/tmp/relay.{out,err}.log` for this local alpha slice.
 - Preserve `./scripts/local-alpha-smoke.sh` as the baseline.
 
 ## Phase 5: Local Observability
 
 Status: local usage view implemented.
 
-- Added a local helper log tail command for `/tmp/relaykit-gateway.{out,err}.log`.
+- Added a local helper log tail command for `/tmp/relay.{out,err}.log`.
 - Added local usage JSONL writes with the conservative contract below.
 - Added local usage summary by day/provider/model.
 - Added app usage view backed by the local summary CLI, including request, token, and duration aggregates.
@@ -154,7 +154,17 @@ Status: non-streaming tool-use mapping implemented.
 - Mapped minimal Anthropic `tool_use` blocks to Responses `function_call` output items using fake upstream tests.
 - Preserve unsupported cases as explicit errors or documented omissions.
 - Did not add real provider calls or private provider behavior.
-- Keep streaming tool-use support separate unless the non-streaming contract is already tested.
+- Streaming tool-use is the next safe gateway lane. Planner owns the focused contract through the Spec Gap Repair Gate; do not stop only because the contract needs tightening.
+
+Minimal streaming tool-use contract:
+
+- Fake upstream tests only; no real providers.
+- Map `content_block_start` tool-use metadata to a Responses `function_call` item start when enough name/id data is present.
+- Accumulate `input_json_delta` fragments into the function call arguments string without parsing or executing it.
+- Emit a final function call output item before `response.completed`.
+- If a stream ends with incomplete tool arguments, emit `response.error` and do not invent valid JSON.
+- Keep text delta streaming behavior unchanged.
+- Do not execute tools or record tool arguments in usage JSONL.
 
 ## Phase 6: Local Release Readiness
 

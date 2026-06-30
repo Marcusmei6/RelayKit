@@ -6,7 +6,7 @@ The Mac app is a SwiftUI shell around the gateway helper.
 
 ```bash
 cd gateway
-go build -o bin/relaykit-gateway ./cmd/gateway
+go build -o bin/relay ./cmd/gateway
 cd ../app
 swift build
 ```
@@ -18,10 +18,10 @@ cd app
 swift run RelayKitApp
 ```
 
-The development app expects a gateway binary at `../gateway/bin/relaykit-gateway` and starts it with:
+The development app expects a gateway binary at `../gateway/bin/relay` and starts it with:
 
 ```bash
-../gateway/bin/relaykit-gateway -listen 127.0.0.1:19777 -config <provider-config-path>
+../gateway/bin/relay -listen 127.0.0.1:19777 -config <provider-config-path>
 ```
 
 ## Current MVP
@@ -51,7 +51,7 @@ The app Start/Stop buttons control the foreground helper process launched by the
 
 ```bash
 cd gateway
-go build -o bin/relaykit-gateway ./cmd/gateway
+go build -o bin/relay ./cmd/gateway
 cd ..
 ./scripts/relaykit-helper.sh install --config "$PWD/examples/providers.example.json"
 ./scripts/relaykit-helper.sh status
@@ -59,7 +59,7 @@ cd ..
 ./scripts/relaykit-helper.sh uninstall
 ```
 
-The script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requires an explicit provider config path, and stores absolute binary/config paths in the plist. Phase 4.5 keeps the listen address fixed at `127.0.0.1:19777` and writes helper stdout/stderr to `/tmp/relaykit-gateway.{out,err}.log`.
+The script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requires an explicit provider config path, and stores absolute binary/config paths in the plist. Phase 4.5 keeps the listen address fixed at `127.0.0.1:19777` and writes helper stdout/stderr to `/tmp/relay.{out,err}.log`.
 `logs` reads those local helper stdout/stderr files only; it does not upload, redact, or collect usage events.
 
 ## Not In This Slice

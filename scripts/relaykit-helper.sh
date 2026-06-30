@@ -4,15 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="dev.relaykit.gateway"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
-BINARY="${ROOT}/gateway/bin/relaykit-gateway"
+BINARY="${ROOT}/gateway/bin/relay"
 LISTEN="127.0.0.1:19777"
-OUT_LOG="/tmp/relaykit-gateway.out.log"
-ERR_LOG="/tmp/relaykit-gateway.err.log"
+OUT_LOG="/tmp/relay.out.log"
+ERR_LOG="/tmp/relay.err.log"
 
 usage() {
   cat <<EOF
 Usage:
-  $0 install --config /path/to/providers.json [--binary /path/to/relaykit-gateway]
+  $0 install --config /path/to/providers.json [--binary /path/to/relay]
   $0 uninstall
   $0 status
   $0 logs [--lines 80] [--follow]

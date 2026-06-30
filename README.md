@@ -54,8 +54,8 @@ The smoke builds the gateway and app, runs gateway tests/vet/format checks, veri
 ```bash
 cd gateway
 go test ./...
-go build -o bin/relaykit-gateway ./cmd/gateway
-./bin/relaykit-gateway -listen 127.0.0.1:19777 -config ../examples/providers.example.json
+go build -o bin/relay ./cmd/gateway
+./bin/relay -listen 127.0.0.1:19777 -config ../examples/providers.example.json
 ```
 
 Then in another terminal:
@@ -73,13 +73,13 @@ swift build
 swift run RelayKitApp
 ```
 
-The development app expects the gateway binary at `../gateway/bin/relaykit-gateway`.
+The development app expects the gateway binary at `../gateway/bin/relay`.
 
 ## Durable Local Helper
 
 ```bash
 cd gateway
-go build -o bin/relaykit-gateway ./cmd/gateway
+go build -o bin/relay ./cmd/gateway
 cd ..
 ./scripts/relaykit-helper.sh install --config "$PWD/examples/providers.example.json"
 ./scripts/relaykit-helper.sh status

@@ -8,7 +8,7 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(providerConfigPath, forKey: "providerConfigPath")
         }
     }
-    @Published var gatewayBinaryPath = "../gateway/bin/relaykit-gateway"
+    @Published var gatewayBinaryPath = "../gateway/bin/relay"
     @Published var usageLogPath = AppModel.defaultUsageLogPath()
     @Published var codexSourcePath = "../examples/codex.config.example.toml"
     @Published var codexTargetPath = ""

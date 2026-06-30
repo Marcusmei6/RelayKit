@@ -15,9 +15,9 @@ cd "${ROOT}/gateway"
 go test ./... -count=1
 go vet ./...
 test -z "$(gofmt -l .)"
-go build -o bin/relaykit-gateway ./cmd/gateway
+go build -o bin/relay ./cmd/gateway
 
-./bin/relaykit-gateway -listen 127.0.0.1:19777 -config ../examples/providers.example.json >/tmp/relaykit-alpha-gateway.log 2>&1 &
+./bin/relay -listen 127.0.0.1:19777 -config ../examples/providers.example.json >/tmp/relaykit-alpha-gateway.log 2>&1 &
 GATEWAY_PID="$!"
 sleep 2
 if ! kill -0 "${GATEWAY_PID}" 2>/dev/null; then

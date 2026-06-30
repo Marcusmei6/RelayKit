@@ -24,7 +24,7 @@ Phase 3 MVP sends `model`, `messages`, `max_tokens`, and `stream` when requested
 | `tool_use` | tool call | `output[]` `function_call` item |
 | `usage` | token usage | `usage` |
 
-Phase 3.5 maps non-streaming tool-use blocks to Responses `function_call` output items. Streaming tool-use remains deferred.
+Phase 3.5 maps non-streaming tool-use blocks to Responses `function_call` output items. Phase 3.6 covers streaming tool-use with fake upstream tests only.
 
 ## Tool Use And Stop Reasons
 
@@ -43,11 +43,21 @@ Phase 3.5 maps non-streaming tool-use blocks to Responses `function_call` output
 | --- | --- |
 | `message_start` | `response.created` |
 | `content_block_delta` text | `response.output_text.delta` |
-| `content_block_delta` tool data | deferred |
+| `content_block_start` tool_use | start Responses `function_call` item |
+| `content_block_delta` tool input_json_delta | append function call arguments |
 | `message_delta` stop/usage | final metadata |
 | `message_stop` | `response.completed` |
 
 Phase 3 MVP streams text deltas, final stop reason, and usage when present.
+
+Phase 3.6 streaming tool-use contract:
+
+- fake upstream tests only;
+- map tool-use id/name to Responses `function_call`;
+- concatenate `input_json_delta` fragments as arguments text;
+- emit `response.error` on incomplete tool arguments at stream end;
+- do not execute tools;
+- do not write tool arguments to usage JSONL.
 
 ## Unsupported Fields
 
