@@ -19,7 +19,7 @@ From the repository root:
 ./script/build_and_run.sh
 ```
 
-This builds `gateway/bin/relay`, stages `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app starts with `../examples/providers.example.json`, which is the public no-secret demo provider config.
+This builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app starts with the bundled gateway and `../examples/providers.example.json`, which is the public no-secret demo provider config.
 
 For a direct SwiftPM run:
 
@@ -28,7 +28,7 @@ cd app
 swift run RelayKitApp
 ```
 
-The development app expects a gateway binary at `../gateway/bin/relay` and starts it with:
+The bundled app starts its bundled `relay` helper. A direct SwiftPM run falls back to `../gateway/bin/relay` and starts it with:
 
 ```bash
 ../gateway/bin/relay -listen 127.0.0.1:19777 -config <provider-config-path>
@@ -53,7 +53,7 @@ From the repository root:
 ./scripts/local-alpha-smoke.sh
 ```
 
-The smoke also checks explicit Codex config activation, local usage summary, temporary LaunchAgent install/status/health/logs/uninstall, and `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
+The smoke also checks explicit Codex config activation, local usage summary, temporary LaunchAgent install/status/health/logs/uninstall, bundled app gateway startup, and `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
 
 ## Durable Local Helper
 

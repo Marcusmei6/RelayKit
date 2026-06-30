@@ -14,6 +14,7 @@ APP_CONTENTS="${APP_BUNDLE}/Contents"
 APP_MACOS="${APP_CONTENTS}/MacOS"
 APP_BINARY="${APP_MACOS}/${APP_NAME}"
 APP_REAL_BINARY="${APP_MACOS}/${APP_NAME}.bin"
+BUNDLED_GATEWAY="${APP_MACOS}/relay"
 INFO_PLIST="${APP_CONTENTS}/Info.plist"
 
 usage() {
@@ -32,6 +33,7 @@ build_bundle() {
   rm -rf "${APP_BUNDLE}"
   mkdir -p "${APP_MACOS}"
   cp "${build_binary}" "${APP_REAL_BINARY}"
+  cp "${ROOT_DIR}/gateway/bin/relay" "${BUNDLED_GATEWAY}"
   cat >"${APP_BINARY}" <<APP_WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
@@ -40,6 +42,7 @@ exec "\$(dirname "\$0")/${APP_NAME}.bin" "\$@"
 APP_WRAPPER
   chmod +x "${APP_BINARY}"
   chmod +x "${APP_REAL_BINARY}"
+  chmod +x "${BUNDLED_GATEWAY}"
 
   cat >"${INFO_PLIST}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -108,6 +111,7 @@ case "${MODE}" in
       fi
     fi
     stop_app
+    "${APP_BINARY}" --verify-bundled-gateway --provider-config "${ROOT_DIR}/examples/providers.example.json"
     ;;
   *)
     usage

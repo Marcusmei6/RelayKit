@@ -67,4 +67,7 @@ cd "${ROOT}/app"
 swift build
 swift run RelayKitAppValidationTests
 
+cd "${ROOT}"
+./script/build_and_run.sh --verify
+
 echo "RelayKit local alpha smoke passed"

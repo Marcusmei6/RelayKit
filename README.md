@@ -47,7 +47,7 @@ From the repository root:
 ./scripts/local-alpha-smoke.sh
 ```
 
-The smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, checks explicit Codex config activation, checks local usage summary, temporarily exercises the LaunchAgent helper flow, and runs the app-side provider config validation executable.
+The smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, checks explicit Codex config activation, checks local usage summary, temporarily exercises the LaunchAgent helper flow, verifies the bundled app gateway, and runs the app-side provider config validation executable.
 
 ## Gateway Development
 
@@ -71,7 +71,7 @@ curl http://127.0.0.1:19777/v1/models
 ./script/build_and_run.sh
 ```
 
-The run script builds `gateway/bin/relay`, stages a local `dist/RelayKitApp.app` bundle, and opens the app as a foreground macOS app. The app defaults to the public no-secret demo config at `examples/providers.example.json`.
+The run script builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app defaults to the bundled gateway and the public no-secret demo config at `examples/providers.example.json`.
 
 For a lower-level SwiftPM run:
 
@@ -82,7 +82,7 @@ cd ../app
 swift run RelayKitApp
 ```
 
-The development app expects the gateway binary at `../gateway/bin/relay`.
+The bundled app uses its bundled `relay` helper. A direct SwiftPM run falls back to `../gateway/bin/relay`.
 
 ## Durable Local Helper
 

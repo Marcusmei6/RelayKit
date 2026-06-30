@@ -57,6 +57,9 @@ func expectInvalid(_ value: Any, name: String) {
 }
 
 try expectValid(validConfig)
+if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
+    fatalError("non-app bundle should fall back to development gateway path")
+}
 expectInvalid(try json("https://user:pass@example.test/v1"), name: "url userinfo")
 expectInvalid(try json("https://example.test/v1?sig=abc"), name: "url query")
 expectInvalid(try json("https://example.test/v1?access_token=abc"), name: "url query access_token")
@@ -67,3 +70,5 @@ expectInvalid(try json("https://example.test/v1", extraProviderField: #", "crede
 expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credentials": "abc""#), name: "credential key plural")
 
 print("RelayKitAppValidationTests passed")
+
+private final class BundleSentinel {}

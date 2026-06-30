@@ -94,7 +94,7 @@ Status: complete for Messages MVP.
 Status: local usable alpha complete.
 
 - Created SwiftUI app shell.
-- Added a repository-local `./script/build_and_run.sh` entrypoint that builds the gateway binary, stages a SwiftPM macOS app bundle, and opens the app.
+- Added a repository-local `./script/build_and_run.sh` entrypoint that builds the gateway binary, bundles it inside a SwiftPM macOS app bundle, and opens the app.
 - Added development gateway helper lifecycle.
 - Showed gateway status.
 - Read `/healthz` and `/v1/models`.

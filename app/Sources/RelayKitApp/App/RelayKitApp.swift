@@ -1,8 +1,15 @@
+import Foundation
 import SwiftUI
 
 @main
 struct RelayKitApp: App {
     @StateObject private var model = AppModel()
+
+    init() {
+        if CommandLine.arguments.contains("--verify-bundled-gateway") {
+            exit(BundledGatewayVerifier.run(arguments: CommandLine.arguments))
+        }
+    }
 
     var body: some Scene {
         WindowGroup("RelayKit") {
