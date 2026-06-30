@@ -177,7 +177,7 @@ Validation Tier: Tier 2
 CR Tier: Tier 2
 STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing/notarization, or unclear public boundary
 
-Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then implement Anthropic streaming tool-use mapping or the next safe lane from docs/development-plan.md. After each passing commit, apply docs/agents/README.md Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate, then continue to the next safe item. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
+Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then choose the next explicit lane from docs/development-plan.md. Current remaining candidates require explicit selection: Keychain/credential storage, signing/publishing readiness, or public scrub before push. After each passing commit, apply docs/agents/README.md Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate, then continue to the next safe item. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
 ```
 
 Acceptance:
