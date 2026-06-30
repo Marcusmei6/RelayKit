@@ -147,14 +147,14 @@ Status: minimal provider config editor implemented.
 - Reject credential-looking keys/values and base URLs with userinfo, query strings, or fragments before writing.
 - Cover the credential-boundary validator through the SwiftPM `RelayKitAppValidationTests` executable run by local smoke.
 
-## Phase 3.5: Anthropic Tool-Use Hardening
+## Phase 3.5/3.6: Anthropic Tool-Use Hardening
 
-Status: non-streaming tool-use mapping implemented.
+Status: tool-use mapping implemented for non-streaming and streaming fake upstreams.
 
 - Mapped minimal Anthropic `tool_use` blocks to Responses `function_call` output items using fake upstream tests.
 - Preserve unsupported cases as explicit errors or documented omissions.
 - Did not add real provider calls or private provider behavior.
-- Streaming tool-use is the next safe gateway lane. Planner owns the focused contract through the Spec Gap Repair Gate; do not stop only because the contract needs tightening.
+- Streaming tool-use mapping is implemented for fake upstream streams.
 
 Minimal streaming tool-use contract:
 

@@ -111,7 +111,8 @@ Current verification on this machine:
   - `swift run RelayKitAppValidationTests` covers valid config plus userinfo, query, fragment, and credential-key rejection.
 - Phase 3.5 Anthropic tool-use hardening:
   - non-streaming Anthropic `tool_use` blocks map to Responses `function_call` output items with fake upstream coverage;
-  - streaming tool-use is the next safe gateway lane under the Phase 3.6 contract.
+  - streaming Anthropic `tool_use` blocks map to Responses `function_call` output items before completion with fake upstream coverage;
+  - incomplete streaming tool arguments emit `response.error`.
 - Phase 6 local release readiness:
   - root README and gateway README now match the current local alpha commands;
   - public release remains blocked on `docs/public-boundary-checklist.md`, especially scrubbing `.codex/agents/*.toml` local model routes.
@@ -129,10 +130,10 @@ Current verification on this machine:
 
 ## Next Workstream
 
-Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, Phase 5 usage JSONL writer, app usage view, provider config editor, non-streaming Anthropic tool-use mapping, and local release readiness docs:
+Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, Phase 5 usage JSONL writer, app usage view, provider config editor, Anthropic tool-use mapping, and local release readiness docs:
 
 1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
-2. Choose the next safe item from `docs/development-plan.md`: streaming tool-use hardening now has a focused local contract and is safe to implement with fake upstream tests.
+2. Choose the next safe item from `docs/development-plan.md`: Keychain/credential storage, signing, publishing, or public scrub only after explicit selection.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/credential storage only after the gateway and app shell review gates stay green.
@@ -153,7 +154,7 @@ Plan id: `relaykit-local-alpha-to-helper-lifecycle`
 | `relaykit_app` | Add minimal app usage view backed by local summary CLI. | `app/`, `docs/handoff.md`, `docs/development-plan.md` | Done for local app view |
 | `relaykit_app` | Add provider config editing without secrets. | `app/`, `docs/handoff.md`, `docs/development-plan.md` | Done for minimal JSON editor |
 | `relaykit_gateway` | Harden Anthropic tool-use mapping with fake upstream tests. | `gateway/`, `docs/handoff.md` | Done for non-streaming tool_use |
-| `relaykit_gateway` | Add Anthropic streaming tool-use mapping using the Phase 3.6 contract. | `gateway/`, `docs/spec/gateway-phase3-anthropic.md`, `docs/handoff.md` | Next safe lane |
+| `relaykit_gateway` | Add Anthropic streaming tool-use mapping using the Phase 3.6 contract. | `gateway/`, `docs/spec/gateway-phase3-anthropic.md`, `docs/handoff.md` | Done for streaming tool_use |
 | `relaykit_worker` | Refresh README/local release readiness and public scrub notes. | `README.md`, `app/README.md`, `gateway/README.md`, `docs/public-boundary-checklist.md`, `docs/handoff.md` | Done for README/scrub notes |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |

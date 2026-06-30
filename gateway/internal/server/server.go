@@ -286,14 +286,17 @@ type anthropicBlock struct {
 }
 
 type anthropicStreamEvent struct {
-	Message *struct {
+	Index        int             `json:"index,omitempty"`
+	ContentBlock *anthropicBlock `json:"content_block,omitempty"`
+	Message      *struct {
 		ID    string `json:"id"`
 		Model string `json:"model"`
 	} `json:"message,omitempty"`
 	Delta *struct {
-		Type       string `json:"type,omitempty"`
-		Text       string `json:"text,omitempty"`
-		StopReason string `json:"stop_reason,omitempty"`
+		Type        string `json:"type,omitempty"`
+		Text        string `json:"text,omitempty"`
+		PartialJSON string `json:"partial_json,omitempty"`
+		StopReason  string `json:"stop_reason,omitempty"`
 	} `json:"delta,omitempty"`
 	Usage map[string]any `json:"usage,omitempty"`
 }
@@ -405,6 +408,8 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 	finishReason := ""
 	id := ""
 	var usage map[string]any
+	tools := map[int]*streamToolCall{}
+	var toolOrder []int
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") {
@@ -437,11 +442,28 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 			if !writeSSE(w, "response.created", map[string]any{"type": "response.created", "id": responseID(id), "model": model, "status": "in_progress"}) {
 				return streamResult{}
 			}
+		case "content_block_start":
+			if payload.ContentBlock != nil && payload.ContentBlock.Type == "tool_use" && payload.ContentBlock.ID != "" && payload.ContentBlock.Name != "" {
+				tools[payload.Index] = &streamToolCall{ID: payload.ContentBlock.ID, Name: payload.ContentBlock.Name}
+				toolOrder = append(toolOrder, payload.Index)
+				if !writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "item": map[string]any{"type": "function_call", "call_id": payload.ContentBlock.ID, "name": payload.ContentBlock.Name, "arguments": ""}}) {
+					return streamResult{}
+				}
+			}
 		case "content_block_delta":
 			if payload.Delta != nil && payload.Delta.Text != "" {
 				if !writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "delta": payload.Delta.Text}) {
 					return streamResult{}
 				}
+			}
+			if payload.Delta != nil && payload.Delta.PartialJSON != "" {
+				if tool := tools[payload.Index]; tool != nil {
+					tool.Arguments += payload.Delta.PartialJSON
+				}
+			}
+		case "content_block_stop":
+			if tool := tools[payload.Index]; tool != nil {
+				tool.Done = true
 			}
 		case "message_delta":
 			if payload.Delta != nil {
@@ -451,6 +473,18 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 				usage = payload.Usage
 			}
 		case "message_stop":
+			for _, index := range toolOrder {
+				tool := tools[index]
+				if !tool.Done {
+					if !writeSSE(w, "response.error", map[string]any{"type": "response.error", "message": "incomplete tool arguments"}) {
+						return streamResult{}
+					}
+					return streamResult{}
+				}
+				if !writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "item": map[string]any{"type": "function_call", "call_id": tool.ID, "name": tool.Name, "arguments": tool.Arguments}}) {
+					return streamResult{}
+				}
+			}
 			if !writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "status": statusFromFinish(finishReason), "finish_reason": finishReason, "usage": usage}) {
 				return streamResult{}
 			}
@@ -467,6 +501,13 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 		return streamResult{}
 	}
 	return streamResult{}
+}
+
+type streamToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+	Done      bool
 }
 
 func responsesFromChat(chat chatResponse, requestedModel string) map[string]any {

@@ -576,6 +576,108 @@ func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamsAnthropicToolUse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunks := []string{
+			`event: message_start` + "\n" + `data: {"message":{"id":"msg-stream-tool","model":"claude-example"}}`,
+			`event: content_block_start` + "\n" + `data: {"index":0,"content_block":{"type":"tool_use","id":"toolu_123","name":"lookup","input":{}}}`,
+			`event: content_block_delta` + "\n" + `data: {"index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\""}}`,
+			`event: content_block_delta` + "\n" + `data: {"index":0,"delta":{"type":"input_json_delta","partial_json":"needle-tool-argument-9381\"}"}}`,
+			`event: content_block_stop` + "\n" + `data: {"index":0}`,
+			`event: content_block_start` + "\n" + `data: {"index":1,"content_block":{"type":"tool_use","id":"toolu_456","name":"summarize","input":{}}}`,
+			`event: content_block_delta` + "\n" + `data: {"index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+			`event: content_block_stop` + "\n" + `data: {"index":1}`,
+			`event: message_delta` + "\n" + `data: {"delta":{"stop_reason":"tool_use"}}`,
+			`event: message_stop` + "\n" + `data: {}`,
+		}
+		for _, chunk := range chunks {
+			if _, err := w.Write([]byte(chunk + "\n\n")); err != nil {
+				t.Fatalf("write upstream chunk err = %v", err)
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	usageLog := filepath.Join(t.TempDir(), "usage.jsonl")
+	h, err := NewWithUsageLog(writeTestProviderConfig(t, upstream.URL, "anthropic_messages", "claude-example"), usageLog)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"claude-example","input":"Search","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := rec.Body.String()
+	for _, want := range []string{
+		"event: response.output_item.added",
+		"event: response.output_item.done",
+		`"type":"function_call"`,
+		`"call_id":"toolu_123"`,
+		`"name":"lookup"`,
+		`"arguments":"{\"query\":\"needle-tool-argument-9381\"}"`,
+		`"call_id":"toolu_456"`,
+		`"name":"summarize"`,
+		`"arguments":"{}"`,
+		`"finish_reason":"tool_use"`,
+		`"status":"completed"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stream missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, `"call_id":"toolu_123"`) > strings.Index(got, `"call_id":"toolu_456"`) {
+		t.Fatalf("function calls emitted out of order:\n%s", got)
+	}
+	if strings.Index(got, "event: response.output_item.added") > strings.Index(got, "event: response.output_item.done") {
+		t.Fatalf("function call start emitted after done:\n%s", got)
+	}
+	usage, err := os.ReadFile(usageLog)
+	if err != nil {
+		t.Fatalf("read usage log err = %v", err)
+	}
+	if strings.Contains(string(usage), "needle-tool-argument-9381") {
+		t.Fatalf("usage log contains tool arguments: %s", usage)
+	}
+}
+
+func TestResponsesStreamsAnthropicToolUseIncompleteArguments(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunks := []string{
+			`event: message_start` + "\n" + `data: {"message":{"id":"msg-stream-tool","model":"claude-example"}}`,
+			`event: content_block_start` + "\n" + `data: {"index":0,"content_block":{"type":"tool_use","id":"toolu_123","name":"lookup","input":{}}}`,
+			`event: content_block_delta` + "\n" + `data: {"index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"relaykit"}}`,
+			`event: message_stop` + "\n" + `data: {}`,
+		}
+		for _, chunk := range chunks {
+			if _, err := w.Write([]byte(chunk + "\n\n")); err != nil {
+				t.Fatalf("write upstream chunk err = %v", err)
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeTestProviderConfig(t, upstream.URL, "anthropic_messages", "claude-example"))
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"claude-example","input":"Search","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := rec.Body.String()
+	if !strings.Contains(got, "event: response.error") || !strings.Contains(got, "incomplete tool arguments") {
+		t.Fatalf("stream did not emit incomplete tool error:\n%s", got)
+	}
+}
+
 func writeTestProviderConfig(t *testing.T, baseURL, apiFormat, model string) string {
 	t.Helper()
 	dir := t.TempDir()
