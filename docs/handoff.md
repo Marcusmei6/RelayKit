@@ -133,7 +133,7 @@ Current verification on this machine:
 Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usable Mac alpha, Phase 4.5 helper lifecycle, Phase 5 log-tail utility, Phase 5 usage JSONL writer, app usage view, provider config editor, Anthropic tool-use mapping, and local release readiness docs:
 
 1. Re-run `./scripts/local-alpha-smoke.sh` before further alpha edits.
-2. Choose the next safe item from `docs/development-plan.md`: Keychain/credential storage, signing, publishing, or public scrub only after explicit selection.
+2. Choose the next safe item from `docs/development-plan.md`: Keychain/credential storage, signing, publishing, or public push/release validation only after explicit selection.
 3. Keep the documented root read-only review fallback for future CR provider failures.
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/credential storage only after the gateway and app shell review gates stay green.
@@ -158,7 +158,7 @@ Plan id: `relaykit-local-alpha-to-helper-lifecycle`
 | `relaykit_worker` | Refresh README/local release readiness and public scrub notes. | `README.md`, `app/README.md`, `gateway/README.md`, `docs/public-boundary-checklist.md`, `docs/handoff.md` | Done for README/scrub notes |
 | `relaykit_worker` | Keep public docs/examples aligned with ProviderProfile and Codex local integration contracts. | `docs/handoff.md`, `docs/spec/`, `examples/` | Done for current slice |
 | `relaykit_test` | Run `go test ./...`, Swift build, missing-config check, streaming/activation acceptance, and private-string scan after implementation. | ignored validation artifacts only | Passed for Mac MVP shell |
-| `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Stable route configured; fallback is root read-only review after one failed retry |
+| `relaykit_cr` | Review simplicity, public boundary, Anthropic/Codex integration correctness, and credential handling before any publish/push. | read-only | Public default route configured; fallback is root read-only review after one failed retry |
 
 ## Suggested First Agent Assignment
 
@@ -177,7 +177,7 @@ Validation Tier: Tier 2
 CR Tier: Tier 2
 STOP CONDITIONS: need real provider credentials, private provider details, destructive git operations, publishing/signing/notarization, or unclear public boundary
 
-Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then choose the next explicit lane from docs/development-plan.md. Current remaining candidates require explicit selection: Keychain/credential storage, signing/publishing readiness, or public scrub before push. After each passing commit, apply docs/agents/README.md Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate, then continue to the next safe item. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
+Use relaykit_planner as controller. Run ./scripts/local-alpha-smoke.sh, then choose the next explicit lane from docs/development-plan.md. Current remaining candidates require explicit selection: Keychain/credential storage, signing/publishing readiness, or public push/release validation. After each passing commit, apply docs/agents/README.md Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate, then continue to the next safe item. Do not push, publish, sign, notarize, upload telemetry, or add real credentials.
 ```
 
 Acceptance:
