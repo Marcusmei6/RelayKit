@@ -99,7 +99,7 @@ Status: local usable alpha complete.
 - Read `/healthz` and `/v1/models`.
 - Activated Codex config with explicit source/target paths and backup/rollback output.
 - Added local alpha smoke script.
-- Defer Keychain, provider CRUD, LaunchAgent install, and log tail until the visible shell is reviewed.
+- Keychain credential storage remains deferred until explicitly selected.
 
 ## Phase 4.5: Helper Lifecycle Hardening
 
@@ -110,7 +110,7 @@ Status: local LaunchAgent flow complete.
 - Did not add credentials, signing, notarization, or publishing.
 - Kept uninstall/stop behavior scoped to RelayKit-owned helper state.
 - Kept the listen address fixed at `127.0.0.1:19777` and helper stdout/stderr at `/tmp/relay.{out,err}.log` for this local alpha slice.
-- Preserve `./scripts/local-alpha-smoke.sh` as the baseline.
+- Preserve `./scripts/local-alpha-smoke.sh` as the baseline, including temporary LaunchAgent install/status/health/logs/uninstall coverage.
 
 ## Phase 5: Local Observability
 
@@ -120,6 +120,7 @@ Status: local usage view implemented.
 - Added local usage JSONL writes with the conservative contract below.
 - Added local usage summary by day/provider/model.
 - Added app usage view backed by the local summary CLI, including request, token, and duration aggregates.
+- Covered local usage summary in the alpha smoke.
 - Keep cloud upload out of scope.
 
 Minimal usage JSONL contract:

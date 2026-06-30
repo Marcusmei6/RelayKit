@@ -47,7 +47,7 @@ From the repository root:
 ./scripts/local-alpha-smoke.sh
 ```
 
-The smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, and runs the app-side provider config validation executable.
+The smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, checks explicit Codex config activation, checks local usage summary, temporarily exercises the LaunchAgent helper flow, and runs the app-side provider config validation executable.
 
 ## Gateway Development
 

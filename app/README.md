@@ -43,7 +43,7 @@ From the repository root:
 ./scripts/local-alpha-smoke.sh
 ```
 
-The smoke also runs `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
+The smoke also checks explicit Codex config activation, local usage summary, temporary LaunchAgent install/status/health/logs/uninstall, and `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
 
 ## Durable Local Helper
 

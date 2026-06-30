@@ -19,13 +19,26 @@ Phase 3 Anthropic Messages MVP implemented at `docs/spec/gateway-phase3-anthropi
 Phase 4 Codex local integration is documented at `docs/spec/codex-local-integration.md` and `examples/codex.config.example.toml`.
 Safe Codex config activation now has a minimal gateway primitive in `gateway/internal/codexconfig` and an explicit CLI caller, `gateway activate-codex-config -source <path> -target <path>`; it only writes an explicitly supplied target path, backs up existing files first, and has no default `~/.codex` target.
 Mac MVP app shell exists in `app/` as a SwiftPM SwiftUI app. It can start/stop an explicitly configured gateway binary, check `/healthz`, read `/v1/models`, and call the explicit Codex config activation CLI.
-Local alpha smoke is covered by `scripts/local-alpha-smoke.sh`.
+Local alpha smoke is covered by `scripts/local-alpha-smoke.sh`; it builds the gateway binary, checks foreground `/healthz` and `/v1/models`, exercises explicit Codex config activation, checks local usage summary, temporarily installs/uninstalls the LaunchAgent helper, builds the app, and runs app validation tests.
 Durable local helper lifecycle is covered by `scripts/relaykit-helper.sh`, which installs/uninstalls only `~/Library/LaunchAgents/dev.relaykit.gateway.plist` and requires an explicit provider config path.
 Local helper log tail is available through `scripts/relaykit-helper.sh logs`; it reads only `/tmp/relay.{out,err}.log` and does not collect or upload usage events.
 Local usage JSONL is written by the gateway to `~/Library/Application Support/RelayKit/usage.jsonl` by default, with tests injecting a temp path. It records only allowed metadata fields and token counts; it does not record request/response bodies, prompts, headers, cookies, auth values, API keys, private domains, or raw upstream URLs.
 The Mac app has a Usage section that calls the gateway binary's local `summarize-usage` command for an explicit usage JSONL path.
 The Mac app has a minimal Provider Config editor for explicit JSON files. It validates public provider fields, rejects credential-looking keys/values and base URLs with userinfo, query strings, or fragments, and backs up existing files before saving.
 Public pre-publish checklist drafted at `docs/public-boundary-checklist.md`.
+
+Integrated SwiftUI Mac alpha checklist status:
+
+- Gateway binary builds as `gateway/bin/relay`: satisfied by `./scripts/local-alpha-smoke.sh`.
+- SwiftUI app can start/stop the built gateway binary without `go run`: satisfied by app helper lifecycle wiring.
+- App uses an explicit provider config path and stores no credential values: satisfied for the current public config editor slice.
+- App can call `/healthz` and `/v1/models`, and displays model IDs: satisfied by app client/UI wiring and smoke coverage for the endpoints.
+- App can run explicit Codex config activation through the gateway CLI with source/target paths: satisfied by app wiring and smoke coverage.
+- App can load/save public provider config JSON without credential fields: satisfied by app validation tests.
+- App can show local usage summary from an explicit usage JSONL path: satisfied by app wiring and smoke coverage for the summary CLI.
+- Local helper/LaunchAgent flow is documented and smoke-tested, but not permanently installed: satisfied by `scripts/relaykit-helper.sh` and smoke cleanup.
+- Local alpha smoke proves gateway plus app validation pass: satisfied on this machine.
+- Handoff documents what a user can run today: satisfied by README, app/gateway/script README files, and this checklist.
 
 Latest committed baseline before Phase 1 implementation:
 
@@ -81,7 +94,7 @@ Current verification on this machine:
 - Local usable alpha hardening:
   - provider config path is persisted with `UserDefaults`;
   - gateway startup reports immediate helper exit as an error instead of showing a false running state;
-  - `scripts/local-alpha-smoke.sh` builds the gateway, runs gateway tests/vet/gofmt, checks `/healthz` and `/v1/models`, and builds the app.
+  - `scripts/local-alpha-smoke.sh` builds the gateway, runs gateway tests/vet/gofmt, checks `/healthz` and `/v1/models`, checks activation and usage summary CLI paths, temporarily exercises the LaunchAgent helper flow, and builds the app.
 - Phase 4.5 helper lifecycle validation passed:
   - missing `--config` fails with `--config is required`;
   - missing provider config path fails before writing a LaunchAgent;
@@ -138,6 +151,8 @@ Continue from the completed Phase 3 adapter, Phase 4 activation CLI, local usabl
 4. Run `docs/public-boundary-checklist.md` before any public push or release.
 5. Add Keychain/credential storage only after the gateway and app shell review gates stay green.
 6. Use the planner Continuation Gate, Spec Gap Repair Gate, and Backlog Expansion Gate in `docs/agents/README.md`; do not stop after one commit if the next safe item is available, and do not treat small missing local contracts as human blockers.
+
+Backlog expansion result: after re-reading the plan, handoff, README files, and public-boundary checklist, fewer than two safe implementation lanes remain. The remaining candidates are Keychain credential storage, signing/publishing readiness, and public push/release validation; each requires explicit selection or crosses current stop conditions.
 
 ## Dispatch Board
 
