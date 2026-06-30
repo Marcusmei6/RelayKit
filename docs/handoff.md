@@ -139,7 +139,8 @@ Current verification on this machine:
   - streaming Anthropic `tool_use` blocks map to Responses `function_call` output items before completion with fake upstream coverage;
   - incomplete streaming tool arguments emit `response.error`.
 - Phase 6 local release readiness:
-  - root README and gateway README now match the current local alpha commands;
+  - root README, app README, and script docs now match the current local alpha and local package commands;
+  - `./script/package_release.sh --verify` builds `dist/RelayKitApp-local.zip`, extracts it, opens the extracted app, and verifies the extracted bundled gateway through `/healthz` and `/v1/models`;
   - `.codex/agents/*.toml` now uses public model defaults; keep private/local routing in untracked machine-local overrides only.
 
 ## Important Decisions

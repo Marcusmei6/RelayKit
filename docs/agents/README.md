@@ -99,7 +99,7 @@ Private model routes are not release-safe and must stay out of checked-in agent 
 
 ## Current Milestone Handoff
 
-New implementation sessions should start with `relaykit_planner`, run the smoke baseline, then continue from `docs/development-plan.md` rather than a single-feature prompt. Current completed local-alpha lanes include helper lifecycle, local observability, provider config editing, Anthropic tool-use hardening, and public agent-route scrub.
+New implementation sessions should start with `relaykit_planner`, run the smoke baseline, then continue from `docs/development-plan.md` rather than a single-feature prompt. Current completed local-alpha lanes include helper lifecycle, local observability, provider config editing, Anthropic tool-use hardening, local unsigned release packaging, and public agent-route scrub.
 
 1. Use the current milestone backlog in `docs/development-plan.md`.
 2. Choose Keychain/credential storage, signing/publishing readiness, or public push/release validation only after explicit selection.
