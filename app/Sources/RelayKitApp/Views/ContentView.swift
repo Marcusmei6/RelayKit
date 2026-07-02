@@ -5,6 +5,11 @@ struct ContentView: View {
     @State private var tab = Tab.connect
     @State private var showingProviderForm = false
 
+    init(initialTab: Tab = .connect, showProviderForm: Bool = false) {
+        _tab = State(initialValue: initialTab)
+        _showingProviderForm = State(initialValue: showProviderForm)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -241,7 +246,7 @@ struct ContentView: View {
     }
 }
 
-private enum Tab: String, CaseIterable, Identifiable {
+enum Tab: String, CaseIterable, Identifiable {
     case connect
     case usage
     case settings
@@ -286,7 +291,7 @@ private struct ProviderFormView: View {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                 row("Provider ID", $providerId, "local-openai-compatible")
                 row("Source", $source, "official / custom")
-                row("Model ID", $modelId, "relay/coder-fast")
+                row("Model ID", $modelId, "local/coder-fast")
                 row("Upstream model", $upstreamModel, "qwen3-coder")
                 row("API format", $apiFormat, "openai_chat")
                 row("Base URL", $baseURL, "http://127.0.0.1:11434/v1")
