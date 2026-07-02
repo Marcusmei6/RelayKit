@@ -181,7 +181,7 @@ Status: README refreshed and agent model routes scrubbed to public defaults.
 
 ## Phase 7: P0 Menu-Bar Control Center
 
-Status: in progress; menu-bar shell, screenshot smoke, reference coverage smoke, and temporary Codex E2E smoke are implemented.
+Status: local P0 regression complete; remaining items require future schema, credentials, or distribution decisions.
 
 - Primary surface is a menu-bar resident control-center, not a dashboard window.
 - Main tabs are `接入`, `Usage`, and `设置`.
@@ -193,6 +193,7 @@ Status: in progress; menu-bar shell, screenshot smoke, reference coverage smoke,
 - Credentials are references only: env var, Keychain item name, or key-file reference. Never store or display credential values.
 - P0 regression includes screenshot evidence under `dist/ui-smoke/`, redacted reference model coverage under `dist/reference-model-coverage.json`, and a temporary Codex E2E smoke under `dist/codex-e2e/` that never writes real `~/.codex/config.toml`.
 - Gateway OpenAI Chat streaming Responses events must stay compatible with Codex CLI: accept Responses input message parts, emit output item/content part lifecycle events before text deltas, and include Responses-shaped usage totals in `response.completed`.
+- Remaining non-P0 work: Claude Code adaptation, advanced provider capability schema/import, Keychain/key-file credential storage, signing/notarization/publishing, and real public provider presets.
 
 ## Task Ownership
 
