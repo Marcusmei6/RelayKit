@@ -8,10 +8,16 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(providerConfigPath, forKey: "providerConfigPath")
         }
     }
+    @Published var codexTargetPath: String {
+        didSet {
+            UserDefaults.standard.set(codexTargetPath, forKey: "codexTargetPath")
+            refreshCodexConnectionStatus()
+        }
+    }
     @Published var gatewayBinaryPath = RelayKitPaths.gatewayBinaryPath()
     @Published var usageLogPath = AppModel.defaultUsageLogPath()
     @Published var codexSourcePath = RelayKitPaths.codexConfigSourcePath()
-    @Published var codexTargetPath = ""
+    @Published var codexConnectionStatus = "target not set"
     @Published var gatewayStatus = "stopped"
     @Published var models: [RelayModel] = []
     @Published var usageSummaries: [UsageSummary] = []
@@ -24,6 +30,8 @@ final class AppModel: ObservableObject {
     init() {
         let savedPath = UserDefaults.standard.string(forKey: "providerConfigPath")
         providerConfigPath = savedPath == "../examples/providers.example.json" ? RelayKitPaths.providerConfigPath() : savedPath ?? RelayKitPaths.providerConfigPath()
+        codexTargetPath = UserDefaults.standard.string(forKey: "codexTargetPath") ?? ""
+        refreshCodexConnectionStatus()
     }
 
     func startGateway() {
@@ -116,7 +124,7 @@ final class AppModel: ObservableObject {
             let pretty = try ProviderConfigDraftWriter.addProvider(draft, to: existing)
             var backupPath: String?
             if FileManager.default.fileExists(atPath: providerConfigPath) {
-                let backup = providerConfigPath + ".bak." + String(Int(Date().timeIntervalSince1970))
+                let backup = providerConfigPath + ".bak." + UUID().uuidString
                 try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
                 backupPath = backup
             }
@@ -156,8 +164,31 @@ final class AppModel: ObservableObject {
                 target: codexTargetPath
             )
             message = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            refreshCodexConnectionStatus()
         } catch {
             message = error.localizedDescription
+        }
+    }
+
+    var codexConnectionIsConfigured: Bool {
+        codexConnectionStatus == "configured"
+    }
+
+    func refreshCodexConnectionStatus() {
+        let path = codexTargetPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            codexConnectionStatus = "target not set"
+            return
+        }
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+            codexConnectionStatus = "target missing"
+            return
+        }
+        if text.contains("base_url = \"http://127.0.0.1:19777/v1\"") &&
+            text.contains("wire_api = \"responses\"") {
+            codexConnectionStatus = "configured"
+        } else {
+            codexConnectionStatus = "not RelayKit"
         }
     }
 

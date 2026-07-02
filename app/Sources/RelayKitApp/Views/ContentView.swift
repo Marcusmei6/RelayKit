@@ -92,7 +92,7 @@ struct ContentView: View {
                 Text("本机 CLI")
                     .font(.headline)
                 HStack(spacing: 8) {
-                    cliCard(title: "Codex", subtitle: "P0 active target", active: true)
+                    cliCard(title: "Codex", subtitle: model.codexConnectionStatus, active: model.codexConnectionIsConfigured)
                     cliCard(title: "Claude Code", subtitle: "Later", active: false)
                         .disabled(true)
                 }
@@ -239,6 +239,7 @@ struct ContentView: View {
                 Button("Activate Codex Config") {
                     Task { await model.activateCodexConfig() }
                 }
+                Button("Refresh Codex State") { model.refreshCodexConnectionStatus() }
                 Button("Load Provider JSON") { model.loadProviderConfig() }
             }
             Text("No fake toggles. Launch-at-login, theme, Git usage, and Claude Code are deferred.")

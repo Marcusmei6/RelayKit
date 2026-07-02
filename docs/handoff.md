@@ -38,6 +38,7 @@ Integrated SwiftUI Mac alpha checklist status:
 - Local unsigned release zip can be built and verified: satisfied by `./script/package_release.sh --verify`.
 - Menu-bar resident control-center shell: in progress; current shell uses AppKit `NSStatusItem` plus `NSPopover` and keeps real gateway controls.
 - Temporary Codex E2E through RelayKit: satisfied by `./scripts/codex-e2e-smoke.sh`, which does not write real `~/.codex/config.toml`.
+- Codex connection state reads only the explicit target path entered in the app and reports whether it points at RelayKit loopback; it does not default to or inspect real `~/.codex/config.toml`.
 - App uses an explicit provider config path and stores no credential values: satisfied for the current public config editor slice.
 - Provider add sheet writes public provider metadata through `ProviderConfigDraftWriter`; advanced capability metadata remains future schema work.
 - App can call `/healthz` and `/v1/models`, and displays model IDs: satisfied by app client/UI wiring and smoke coverage for the endpoints.
