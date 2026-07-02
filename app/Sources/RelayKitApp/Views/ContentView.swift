@@ -1,3 +1,4 @@
+import RelayKitCore
 import SwiftUI
 
 struct ContentView: View {
@@ -48,6 +49,7 @@ struct ContentView: View {
         .background(.regularMaterial)
         .sheet(isPresented: $showingProviderForm) {
             ProviderFormView()
+                .environmentObject(model)
         }
     }
 
@@ -264,21 +266,15 @@ enum Tab: String, CaseIterable, Identifiable {
 
 private struct ProviderFormView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var model: AppModel
     @State private var providerId = ""
-    @State private var source = "official"
+    @State private var providerName = ""
     @State private var modelId = ""
-    @State private var upstreamModel = ""
+    @State private var modelDisplayName = ""
     @State private var apiFormat = "openai_chat"
     @State private var baseURL = ""
     @State private var contextWindow = "128000"
     @State private var authReference = ""
-    @State private var reasoning = false
-    @State private var streaming = true
-    @State private var tools = false
-    @State private var usage = true
-    @State private var visible = true
-    @State private var priority = "100"
-    @State private var status = "enabled"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -290,36 +286,32 @@ private struct ProviderFormView: View {
 
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                 row("Provider ID", $providerId, "local-openai-compatible")
-                row("Source", $source, "official / custom")
+                row("Provider name", $providerName, "Local OpenAI Compatible")
                 row("Model ID", $modelId, "local/coder-fast")
-                row("Upstream model", $upstreamModel, "qwen3-coder")
+                row("Display name", $modelDisplayName, "Coder Fast")
                 row("API format", $apiFormat, "openai_chat")
                 row("Base URL", $baseURL, "http://127.0.0.1:11434/v1")
                 row("Context window", $contextWindow, "128000")
-                row("Credential ref", $authReference, "RELAYKIT_EXAMPLE_API_KEY")
-                row("Priority", $priority, "100")
-                row("Status", $status, "enabled")
+                row("Auth env ref", $authReference, "RELAYKIT_EXAMPLE_API_KEY")
             }
 
-            HStack {
-                Toggle("Reasoning", isOn: $reasoning)
-                Toggle("Streaming", isOn: $streaming)
-                Toggle("Tools", isOn: $tools)
-                Toggle("Usage", isOn: $usage)
-                Toggle("Visible", isOn: $visible)
-            }
-            .toggleStyle(.checkbox)
+            Text("Streaming, tools, reasoning, priority, and health metadata are gateway-discovered later; this writer only saves the current public provider schema.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Text(validationMessage)
                 .font(.caption)
-                .foregroundStyle(validationMessage == "Ready to save after provider writer lands." ? Color.secondary : Color.red)
+                .foregroundStyle(canSave ? Color.secondary : Color.red)
 
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }
-                Button("保存接入") {}
-                    .disabled(true)
-                    .help("Provider writer is deferred; this P0 slice only replaces the JSON editor primary path.")
+                Button("保存接入") {
+                    if model.addProvider(draft) {
+                        dismiss()
+                    }
+                }
+                .disabled(!canSave)
             }
         }
         .padding(20)
@@ -339,9 +331,36 @@ private struct ProviderFormView: View {
         if providerId.isEmpty || modelId.isEmpty || apiFormat.isEmpty || baseURL.isEmpty {
             return "Provider ID, model ID, API format, and base URL are required."
         }
-        if authReference.lowercased().contains("sk-") || authReference.lowercased().contains("bearer ") {
-            return "Credential values are not allowed; use env, Keychain item, or key-file reference."
+        if !contextWindow.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Int(contextWindow) == nil {
+            return "Context window must be a number."
         }
-        return "Ready to save after provider writer lands."
+        let lowerAuth = authReference.lowercased()
+        let credentialMarkers = ["bearer ", "sk-", "api_key=", "token=", "access_token=", "refresh_token=", "password=", "secret=", "authorization="]
+        if credentialMarkers.contains(where: lowerAuth.contains) {
+            return "Credential values are not allowed; use an environment variable name."
+        }
+        do {
+            _ = try ProviderConfigDraftWriter.addProvider(draft, to: Data(#"{"providers":[]}"#.utf8))
+        } catch {
+            return error.localizedDescription
+        }
+        return "Ready to save provider metadata."
+    }
+
+    private var canSave: Bool {
+        validationMessage == "Ready to save provider metadata."
+    }
+
+    private var draft: ProviderConfigDraft {
+        ProviderConfigDraft(
+            providerId: providerId,
+            providerName: providerName.isEmpty ? providerId : providerName,
+            baseURL: baseURL,
+            apiFormat: apiFormat,
+            authEnv: authReference,
+            modelId: modelId,
+            modelDisplayName: modelDisplayName,
+            contextWindow: Int(contextWindow)
+        )
     }
 }

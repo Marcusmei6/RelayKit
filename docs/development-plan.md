@@ -188,7 +188,8 @@ Status: in progress; menu-bar shell, screenshot smoke, reference coverage smoke,
 - `接入` owns real bundled gateway start/stop/restart, health, model refresh, Codex active target state, and a disabled Claude Code placeholder.
 - `Usage` reads real local usage summaries only; empty state is allowed, mock cards are not.
 - `设置` may show only settings wired to real state; unfinished settings stay hidden or disabled.
-- Provider/model add uses a form sheet for public-safe routing metadata. JSON editing is not the primary P0 path.
+- Provider/model add uses a form sheet that writes the current public provider schema. JSON editing remains a fallback, not the primary P0 path.
+- Provider form P0 persists provider id/name, base URL, API format, auth env reference, model id/display name, and context window. Streaming/tools/reasoning/priority/health metadata remain gateway-discovered or future schema work.
 - Credentials are references only: env var, Keychain item name, or key-file reference. Never store or display credential values.
 - P0 regression includes screenshot evidence under `dist/ui-smoke/`, redacted reference model coverage under `dist/reference-model-coverage.json`, and a temporary Codex E2E smoke under `dist/codex-e2e/` that never writes real `~/.codex/config.toml`.
 - Gateway OpenAI Chat streaming Responses events must stay compatible with Codex CLI: accept Responses input message parts, emit output item/content part lifecycle events before text deltas, and include Responses-shaped usage totals in `response.completed`.

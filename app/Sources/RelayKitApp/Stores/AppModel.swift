@@ -87,7 +87,7 @@ final class AppModel: ObservableObject {
             let pretty = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
             var backupPath: String?
             if FileManager.default.fileExists(atPath: providerConfigPath) {
-                let backup = providerConfigPath + ".bak." + String(Int(Date().timeIntervalSince1970))
+                let backup = providerConfigPath + ".bak." + UUID().uuidString
                 try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
                 backupPath = backup
             }
@@ -100,6 +100,37 @@ final class AppModel: ObservableObject {
             }
         } catch {
             message = error.localizedDescription
+        }
+    }
+
+    func addProvider(_ draft: ProviderConfigDraft) -> Bool {
+        do {
+            let existing: Data
+            if FileManager.default.fileExists(atPath: providerConfigPath) {
+                existing = try Data(contentsOf: URL(fileURLWithPath: providerConfigPath))
+            } else if providerConfigText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                existing = Data(#"{"providers":[]}"#.utf8)
+            } else {
+                existing = Data(providerConfigText.utf8)
+            }
+            let pretty = try ProviderConfigDraftWriter.addProvider(draft, to: existing)
+            var backupPath: String?
+            if FileManager.default.fileExists(atPath: providerConfigPath) {
+                let backup = providerConfigPath + ".bak." + String(Int(Date().timeIntervalSince1970))
+                try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
+                backupPath = backup
+            }
+            try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
+            providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
+            if let backupPath {
+                message = "Added provider; backup: \(backupPath)"
+            } else {
+                message = "Added provider"
+            }
+            return true
+        } catch {
+            message = error.localizedDescription
+            return false
         }
     }
 

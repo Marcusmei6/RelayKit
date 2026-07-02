@@ -34,6 +34,11 @@ public enum ProviderConfigValidator {
                parts.user != nil || parts.password != nil || parts.query != nil || parts.fragment != nil {
                 throw ProviderConfigError.invalid("base_url must not contain credentials or query values")
             }
+            if let authEnv = provider["auth_env"] as? String,
+               !authEnv.isEmpty,
+               !isEnvironmentVariableName(authEnv) {
+                throw ProviderConfigError.invalid("auth_env must be an environment variable name")
+            }
             guard let models = provider["models"] as? [[String: Any]], !models.isEmpty else {
                 throw ProviderConfigError.invalid("models array is required for provider \(id)")
             }
@@ -43,6 +48,18 @@ public enum ProviderConfigValidator {
                 }
             }
         }
+    }
+
+    private static func isEnvironmentVariableName(_ value: String) -> Bool {
+        guard let first = value.unicodeScalars.first,
+              first == "_" || CharacterSet.uppercaseLetters.contains(first) || CharacterSet.lowercaseLetters.contains(first) else {
+            return false
+        }
+        let allowed = CharacterSet.uppercaseLetters
+            .union(.lowercaseLetters)
+            .union(.decimalDigits)
+            .union(CharacterSet(charactersIn: "_"))
+        return value.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
     private static func rejectCredentials(in value: Any) throws {
