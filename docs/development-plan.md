@@ -179,6 +179,19 @@ Status: README refreshed and agent model routes scrubbed to public defaults.
 - Scrubbed `.codex/agents/*.toml` to public model defaults.
 - Keep signing, notarization, publishing, and GitHub push out of scope until explicitly requested.
 
+## Phase 7: P0 Menu-Bar Control Center
+
+Status: in progress for menu-bar shell.
+
+- Primary surface is a menu-bar resident control-center, not a dashboard window.
+- Main tabs are `接入`, `Usage`, and `设置`.
+- `接入` owns real bundled gateway start/stop/restart, health, model refresh, Codex active target state, and a disabled Claude Code placeholder.
+- `Usage` reads real local usage summaries only; empty state is allowed, mock cards are not.
+- `设置` may show only settings wired to real state; unfinished settings stay hidden or disabled.
+- Provider/model add uses a form sheet for public-safe routing metadata. JSON editing is not the primary P0 path.
+- Credentials are references only: env var, Keychain item name, or key-file reference. Never store or display credential values.
+- P0 regression must include screenshot evidence and a temporary Codex E2E that never writes real `~/.codex/config.toml`.
+
 ## Task Ownership
 
 - `relaykit_planner` owns roadmap, dispatch, review/validation gates, release gates, and public boundary.

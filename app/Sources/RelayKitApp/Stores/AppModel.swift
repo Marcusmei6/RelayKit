@@ -43,6 +43,11 @@ final class AppModel: ObservableObject {
         message = "Gateway stopped"
     }
 
+    func restartGateway() {
+        stopGateway()
+        startGateway()
+    }
+
     func refreshHealth() async {
         do {
             gatewayStatus = try await client.health()

@@ -12,11 +12,12 @@ struct RelayKitApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("RelayKit") {
+        MenuBarExtra("RelayKit", systemImage: "bolt.horizontal.circle") {
             ContentView()
                 .environmentObject(model)
-                .frame(minWidth: 760, minHeight: 520)
+                .frame(width: 460, height: 620)
         }
+        .menuBarExtraStyle(.window)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
