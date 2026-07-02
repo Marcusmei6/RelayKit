@@ -46,9 +46,10 @@ From the repository root:
 ```bash
 ./scripts/local-alpha-smoke.sh
 ./scripts/menu-bar-e2e-smoke.sh
+./scripts/codex-e2e-smoke.sh
 ```
 
-The alpha smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, checks explicit Codex config activation, checks local usage summary, temporarily exercises the LaunchAgent helper flow, verifies the bundled app gateway, and runs the app-side provider config validation executable. The menu-bar smoke saves control-center screenshots under `dist/ui-smoke/`.
+The alpha smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, checks explicit Codex config activation, checks local usage summary, temporarily exercises the LaunchAgent helper flow, verifies the bundled app gateway, and runs the app-side provider config validation executable. The menu-bar smoke saves control-center screenshots under `dist/ui-smoke/`. The Codex E2E smoke uses a temporary `CODEX_HOME` and fake local upstream, routes `codex exec` through RelayKit, and writes redacted evidence under `dist/codex-e2e/`.
 
 ## Gateway Development
 

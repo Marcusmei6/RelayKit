@@ -52,10 +52,12 @@ From the repository root:
 ```bash
 ./scripts/local-alpha-smoke.sh
 ./scripts/menu-bar-e2e-smoke.sh
+./scripts/codex-e2e-smoke.sh
 ```
 
 The smoke also checks explicit Codex config activation, local usage summary, temporary LaunchAgent install/status/health/logs/uninstall, bundled app gateway startup, and `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
 The menu-bar smoke launches the packaged app in UI-smoke mode and captures `接入`, `Usage`, `设置`, and provider sheet screenshots under `dist/ui-smoke/`.
+The Codex E2E smoke uses only temporary `CODEX_HOME` and `HOME` directories, points Codex at the RelayKit loopback gateway, and writes redacted evidence under `dist/codex-e2e/`.
 
 ## Local Release Package
 

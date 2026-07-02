@@ -183,6 +183,56 @@ func TestResponsesProxiesToFakeOpenAIChat(t *testing.T) {
 	}
 }
 
+func TestResponsesAcceptsCodexInputMessageParts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream err = %v", err)
+		}
+		if len(req.Messages) != 1 || req.Messages[0].Role != "user" || req.Messages[0].Content != "Reply exactly OK." {
+			t.Fatalf("messages = %+v", req.Messages)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id": "chatcmpl-codex-input",
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "OK"},
+				"finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"qwen3-coder","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply exactly OK."}]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestUsageJSONLOmitsBodiesHeadersAndURLs(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -326,16 +376,27 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 	for _, want := range []string{
 		"event: response.created",
 		`"type":"response.created"`,
+		"event: response.output_item.added",
+		"event: response.content_part.added",
 		"event: response.output_text.delta",
 		`"delta":"he"`,
 		`"delta":"llo"`,
+		"event: response.content_part.done",
+		"event: response.output_item.done",
 		"event: response.completed",
 		`"finish_reason":"stop"`,
 		`"total_tokens":5`,
+		`"input_tokens"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stream missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Index(got, "event: response.output_item.added") > strings.Index(got, "event: response.output_text.delta") {
+		t.Fatalf("output item must be added before text delta:\n%s", got)
+	}
+	if strings.Index(got, "event: response.content_part.added") > strings.Index(got, "event: response.output_text.delta") {
+		t.Fatalf("content part must be added before text delta:\n%s", got)
 	}
 }
 

@@ -234,15 +234,77 @@ func chatMessages(input json.RawMessage) ([]chatMessage, error) {
 	}
 
 	var messages []chatMessage
-	if err := json.Unmarshal(input, &messages); err != nil {
-		return nil, fmt.Errorf("input must be a string or message array")
-	}
-	for i := range messages {
-		if messages[i].Role == "" {
-			messages[i].Role = "user"
+	if err := json.Unmarshal(input, &messages); err == nil {
+		validMessages := len(messages) > 0
+		for i := range messages {
+			if messages[i].Role == "" {
+				messages[i].Role = "user"
+			}
+			if messages[i].Content == "" {
+				validMessages = false
+			}
+		}
+		if validMessages {
+			return messages, nil
 		}
 	}
+
+	var items []responsesInputItem
+	if err := json.Unmarshal(input, &items); err != nil {
+		return nil, fmt.Errorf("input must be a string, message array, or Responses input items")
+	}
+	messages = nil
+	for _, item := range items {
+		message, ok := item.chatMessage()
+		if ok {
+			messages = append(messages, message)
+		}
+	}
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("input must include at least one text message")
+	}
 	return messages, nil
+}
+
+type responsesInputItem struct {
+	Type    string          `json:"type"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+func (i responsesInputItem) chatMessage() (chatMessage, bool) {
+	if i.Type != "" && i.Type != "message" {
+		return chatMessage{}, false
+	}
+	role := i.Role
+	if role == "" {
+		role = "user"
+	}
+
+	var text string
+	if err := json.Unmarshal(i.Content, &text); err == nil {
+		return chatMessage{Role: role, Content: text}, text != ""
+	}
+
+	var parts []responsesInputContentPart
+	if err := json.Unmarshal(i.Content, &parts); err != nil {
+		return chatMessage{}, false
+	}
+	var texts []string
+	for _, part := range parts {
+		if part.Text != "" && (part.Type == "" || part.Type == "input_text" || part.Type == "text") {
+			texts = append(texts, part.Text)
+		}
+	}
+	if len(texts) == 0 {
+		return chatMessage{}, false
+	}
+	return chatMessage{Role: role, Content: strings.Join(texts, "\n")}, true
+}
+
+type responsesInputContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 type chatResponse struct {
@@ -316,6 +378,8 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 	created := false
 	finishReason := ""
 	id := ""
+	itemStarted := false
+	outputText := ""
 	var usage map[string]any
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -327,15 +391,67 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
+			status := statusFromFinish(finishReason)
+			responseUsage := responsesUsage(usage)
+			response := map[string]any{
+				"id":     responseID(id),
+				"object": "response",
+				"status": status,
+				"model":  requestedModel,
+				"output": []map[string]any{},
+				"usage":  responseUsage,
+			}
+			if itemStarted {
+				itemID := messageItemID(id)
+				response["output"] = []map[string]any{{
+					"id":     itemID,
+					"type":   "message",
+					"status": status,
+					"role":   "assistant",
+					"content": []map[string]string{{
+						"type": "output_text",
+						"text": outputText,
+					}},
+				}}
+				if !writeSSE(w, "response.content_part.done", map[string]any{
+					"type":          "response.content_part.done",
+					"item_id":       itemID,
+					"output_index":  0,
+					"content_index": 0,
+					"part": map[string]any{
+						"type": "output_text",
+						"text": outputText,
+					},
+				}) {
+					return streamResult{}
+				}
+				if !writeSSE(w, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item": map[string]any{
+						"id":     itemID,
+						"type":   "message",
+						"status": status,
+						"role":   "assistant",
+						"content": []map[string]string{{
+							"type": "output_text",
+							"text": outputText,
+						}},
+					},
+				}) {
+					return streamResult{}
+				}
+			}
 			if !writeSSE(w, "response.completed", map[string]any{
 				"type":          "response.completed",
-				"status":        statusFromFinish(finishReason),
+				"response":      response,
+				"status":        status,
 				"finish_reason": finishReason,
-				"usage":         usage,
+				"usage":         responseUsage,
 			}) {
 				return streamResult{}
 			}
-			return streamResult{ID: responseID(id), Status: statusFromFinish(finishReason), Usage: usage}
+			return streamResult{ID: responseID(id), Status: status, Usage: usage}
 		}
 
 		var chunk chatStreamChunk
@@ -354,7 +470,14 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 				chunk.Model = requestedModel
 			}
 			if !writeSSE(w, "response.created", map[string]any{
-				"type":   "response.created",
+				"type": "response.created",
+				"response": map[string]any{
+					"id":     responseID(chunk.ID),
+					"object": "response",
+					"model":  chunk.Model,
+					"status": "in_progress",
+					"output": []map[string]any{},
+				},
 				"id":     responseID(chunk.ID),
 				"model":  chunk.Model,
 				"status": "in_progress",
@@ -371,9 +494,42 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 				finishReason = choice.FinishReason
 			}
 			if choice.Delta.Content != "" {
+				if !itemStarted {
+					itemID := messageItemID(id)
+					if !writeSSE(w, "response.output_item.added", map[string]any{
+						"type":         "response.output_item.added",
+						"output_index": 0,
+						"item": map[string]any{
+							"id":      itemID,
+							"type":    "message",
+							"status":  "in_progress",
+							"role":    "assistant",
+							"content": []map[string]any{},
+						},
+					}) {
+						return streamResult{}
+					}
+					if !writeSSE(w, "response.content_part.added", map[string]any{
+						"type":          "response.content_part.added",
+						"item_id":       itemID,
+						"output_index":  0,
+						"content_index": 0,
+						"part": map[string]any{
+							"type": "output_text",
+							"text": "",
+						},
+					}) {
+						return streamResult{}
+					}
+					itemStarted = true
+				}
+				outputText += choice.Delta.Content
 				if !writeSSE(w, "response.output_text.delta", map[string]any{
-					"type":  "response.output_text.delta",
-					"delta": choice.Delta.Content,
+					"type":          "response.output_text.delta",
+					"item_id":       messageItemID(id),
+					"output_index":  0,
+					"content_index": 0,
+					"delta":         choice.Delta.Content,
 				}) {
 					return streamResult{}
 				}
@@ -541,7 +697,7 @@ func responsesFromChat(chat chatResponse, requestedModel string) map[string]any 
 				},
 			},
 		},
-		"usage": chat.Usage,
+		"usage": responsesUsage(chat.Usage),
 	}
 }
 
@@ -603,6 +759,10 @@ func responseID(id string) string {
 	return "resp_" + id
 }
 
+func messageItemID(id string) string {
+	return strings.Replace(responseID(id), "resp_", "msg_", 1)
+}
+
 func statusFromFinish(finishReason string) string {
 	if finishReason == "stop" || finishReason == "end_turn" || finishReason == "stop_sequence" || finishReason == "tool_use" {
 		return "completed"
@@ -615,6 +775,23 @@ func chatStatus(chat chatResponse) string {
 		return statusFromFinish(chat.Choices[0].FinishReason)
 	}
 	return "incomplete"
+}
+
+func responsesUsage(usage map[string]any) map[string]any {
+	if usage == nil {
+		return nil
+	}
+	input := tokenCount(usage, "input_tokens", "prompt_tokens")
+	output := tokenCount(usage, "output_tokens", "completion_tokens")
+	total := tokenCount(usage, "total_tokens")
+	if total == 0 {
+		total = input + output
+	}
+	return map[string]any{
+		"input_tokens":  input,
+		"output_tokens": output,
+		"total_tokens":  total,
+	}
 }
 
 type usageEvent struct {
