@@ -192,6 +192,8 @@ Status: local P0 regression complete; remaining items require future schema, cre
 - Provider form P0 persists provider id/name, base URL, API format, auth env reference, model id/display name, and context window. Streaming/tools/reasoning/priority/health metadata remain gateway-discovered or future schema work.
 - Credentials are references only: env var, Keychain item name, or key-file reference. Never store or display credential values.
 - P0 regression includes screenshot evidence under `dist/ui-smoke/`, redacted reference model coverage under `dist/reference-model-coverage.json`, and a temporary Codex E2E smoke under `dist/codex-e2e/` that never writes real `~/.codex/config.toml`.
+- Replay/Kaboo-style UI conformance repair keeps the status item compact and visible, opens an anchored popover, moves global gateway/Codex state into the header across tabs, makes `Usage` KPI/card-first with real local data or a real empty state, and presents `设置` as real action cards with raw paths behind Advanced controls.
+- Menu-bar UI smoke now writes screenshot plus evidence JSON under `dist/ui-smoke/` and verifies compact status-item visibility, anchored popover state, semantic tab sections, provider modal capture, and stale RelayKit-owned process cleanup.
 - Gateway OpenAI Chat streaming Responses events must stay compatible with Codex CLI: accept Responses input message parts, emit output item/content part lifecycle events before text deltas, and include Responses-shaped usage totals in `response.completed`.
 - Remaining non-P0 work: Claude Code adaptation, advanced provider capability schema/import, Keychain/key-file credential storage, signing/notarization/publishing, and real public provider presets.
 
