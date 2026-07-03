@@ -63,15 +63,22 @@ capture() {
     ($doc.settings.launch_at_login_requested | type == "boolean") and
     ($doc.settings.launch_at_login_status | type == "string") and
     ($doc.connect.model_ids_redacted == true) and
+    ($doc.connect.source_names_redacted == true) and
     ($doc.connect.demo_model_rows_present == false) and
     ($doc.surface.sections | index("global-status")) and
     (all($required[]; . as $section | ($doc.surface.sections | index($section))))
   ' "${evidence}" >/dev/null
   if [[ "${name}" == "connect" ]]; then
     jq -e '
-      .connect.catalog_model_count > 0 and
-      .connect.catalog_source_group_count > 0 and
-      (.connect.auth_state | test("auth required|credential reference needed"))
+      . as $doc |
+      $doc.connect.catalog_model_count > 0 and
+      $doc.connect.catalog_source_group_count > 0 and
+      $doc.connect.display_mode == "local-catalog-source-groups" and
+      ($doc.connect.displayed_row_labels | length) == $doc.connect.catalog_source_group_count and
+      (all($doc.connect.displayed_row_labels[]; test("^source-[0-9]+$"))) and
+      ($doc.connect.displayed_row_labels | index("qwen3-coder") | not) and
+      ($doc.connect.displayed_row_labels | index("claude-example") | not) and
+      ($doc.connect.auth_state | test("auth required|credential reference needed"))
     ' "${evidence}" >/dev/null
   fi
   /usr/sbin/screencapture -x "${OUT}/${name}.png"

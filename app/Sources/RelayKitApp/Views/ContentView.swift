@@ -232,22 +232,6 @@ struct ContentView: View {
         }
     }
 
-    private var gatewayControls: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            HStack(spacing: 8) {
-                Button("Start") { model.startGateway() }
-                Button("Stop") { model.stopGateway() }
-                Button("Restart") { model.restartGateway() }
-            }
-            .buttonStyle(ControlButtonStyle())
-            HStack(spacing: 8) {
-                Button("Health") { Task { await model.refreshHealth() } }
-                Button("Models") { Task { await model.refreshModels() } }
-            }
-            .buttonStyle(ControlButtonStyle())
-        }
-    }
-
     private func cliCard(title: String, subtitle: String, active: Bool, icon: String) -> some View {
         cliCard(title: title, subtitle: subtitle, state: active ? .active : .future, icon: icon)
     }

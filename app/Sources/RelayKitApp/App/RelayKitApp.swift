@@ -82,6 +82,10 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         let buttonFrame = statusItem?.button?.window?.frame ?? .zero
         let activeTab = smokeShowsProvider ? "provider" : smokeTab.rawValue
         let contentWindow = popover.contentViewController?.view.window
+        let displayedCatalogLabels = model.localCatalog?.sourceGroups.map(\.publicLabel) ?? []
+        let demoModelRowsPresent = displayedCatalogLabels.contains { label in
+            label == "qwen3-coder" || label == "claude-example"
+        }
         let evidence: [String: Any] = [
             "status_item": [
                 "visible": buttonFrame.width > 0 && buttonFrame.height > 0,
@@ -109,12 +113,15 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
                 "launch_at_login_status": model.launchAtLoginStatus,
             ],
             "connect": [
+                "display_mode": "local-catalog-source-groups",
+                "displayed_row_labels": displayedCatalogLabels,
                 "catalog_model_count": model.localCatalog?.modelCount ?? 0,
                 "catalog_source_group_count": model.localCatalog?.sourceGroups.count ?? 0,
                 "catalog_status": model.localCatalogStatus,
                 "auth_state": model.localCatalogAuthState,
                 "model_ids_redacted": true,
-                "demo_model_rows_present": false,
+                "source_names_redacted": true,
+                "demo_model_rows_present": demoModelRowsPresent,
             ],
         ]
         do {
