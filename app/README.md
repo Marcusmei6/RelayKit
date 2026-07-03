@@ -1,6 +1,6 @@
 # RelayKit Mac App
 
-The Mac app is a SwiftUI shell around the gateway helper.
+The Mac app is a menu-bar resident SwiftUI/AppKit control center around the gateway helper.
 
 ## Build
 
@@ -19,7 +19,7 @@ From the repository root:
 ./script/build_and_run.sh
 ```
 
-This builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app starts with the bundled gateway and bundled public no-secret demo provider config.
+This builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the menu-bar app. The app starts with the bundled gateway and bundled public no-secret demo provider config.
 
 For a direct SwiftPM run:
 
@@ -37,11 +37,13 @@ The bundled app starts its bundled `relay` helper. A direct SwiftPM run falls ba
 ## Current MVP
 
 - start and stop the gateway process launched by this app;
+- live in the menu bar and open a compact popover/control-center;
 - show gateway status;
 - call `/healthz`;
 - call `/v1/models` and list model IDs;
 - activate Codex config through the gateway CLI with explicit `-source` and `-target` paths.
 - remember the last provider config path locally with `UserDefaults`.
+- persist Appearance (`System`, `Light`, `Dark`) and refresh Launch at login from macOS `SMAppService` status.
 - show local usage summaries from an explicit JSONL path.
 - load and save explicit provider config JSON after local validation and backup.
 
@@ -56,7 +58,7 @@ From the repository root:
 ```
 
 The smoke also checks explicit Codex config activation, local usage summary, temporary LaunchAgent install/status/health/logs/uninstall, bundled app gateway startup, and `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
-The menu-bar smoke launches the packaged app in UI-smoke mode and captures `接入`, `Usage`, `设置`, and provider sheet screenshots under `dist/ui-smoke/`.
+The menu-bar smoke launches the packaged app through LaunchServices in UI-smoke mode and captures `接入`, `Usage`, `设置`, Light Settings, and provider sheet screenshots under `dist/ui-smoke/`.
 The Codex E2E smoke uses only temporary `CODEX_HOME` and `HOME` directories, points Codex at the RelayKit loopback gateway, and writes redacted evidence under `dist/codex-e2e/`.
 
 ## Local Release Package

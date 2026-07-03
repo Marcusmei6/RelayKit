@@ -19,7 +19,7 @@ RelayKit combines:
 - Generated model catalog for clients that support external catalogs.
 - Local-only usage event log.
 - Local LaunchAgent helper lifecycle for this checkout.
-- Minimal SwiftUI app for gateway control, usage summaries, and provider config JSON editing without secrets.
+- Menu-bar resident SwiftUI/AppKit control-center app for gateway control, usage summaries, provider config editing without secrets, and real local settings.
 
 ## Out Of Scope For The First Release
 
@@ -49,7 +49,7 @@ From the repository root:
 ./scripts/codex-e2e-smoke.sh
 ```
 
-The alpha smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, checks explicit Codex config activation, checks local usage summary, temporarily exercises the LaunchAgent helper flow, verifies the bundled app gateway, and runs the app-side provider config validation executable. The menu-bar smoke saves control-center screenshots under `dist/ui-smoke/`. The Codex E2E smoke uses a temporary `CODEX_HOME` and fake local upstream, routes `codex exec` through RelayKit, and writes redacted evidence under `dist/codex-e2e/`.
+The alpha smoke builds the gateway and app, runs gateway tests/vet/format checks, verifies `/healthz` and `/v1/models`, checks explicit Codex config activation, checks local usage summary, temporarily exercises the LaunchAgent helper flow, verifies the bundled app gateway, and runs the app-side provider config validation executable. The menu-bar smoke launches the packaged app through LaunchServices, saves control-center screenshots under `dist/ui-smoke/`, and checks the menu-bar popover, Settings state, Light appearance persistence, and provider modal. The Codex E2E smoke uses a temporary `CODEX_HOME` and fake local upstream, routes `codex exec` through RelayKit, and writes redacted evidence under `dist/codex-e2e/`.
 
 ## Gateway Development
 
@@ -73,7 +73,7 @@ curl http://127.0.0.1:19777/v1/models
 ./script/build_and_run.sh
 ```
 
-The run script builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the app as a foreground macOS app. The app defaults to the bundled gateway and bundled public no-secret demo config.
+The run script builds `gateway/bin/relay`, bundles it inside `dist/RelayKitApp.app`, and opens the menu-bar app. The app defaults to the bundled gateway and bundled public no-secret demo config.
 
 For a lower-level SwiftPM run:
 

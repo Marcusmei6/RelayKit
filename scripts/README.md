@@ -33,3 +33,11 @@ The helper script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist
 ```
 
 The package script builds the local app bundle, writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, and verifies the extracted bundled gateway plus public demo provider and Codex config examples. It does not sign, notarize, publish, or upload anything.
+
+## Menu-Bar UI Smoke
+
+```bash
+./scripts/menu-bar-e2e-smoke.sh
+```
+
+The UI smoke launches `dist/RelayKitApp.app` through LaunchServices, captures the menu-bar popover and provider sheet under `dist/ui-smoke/`, verifies Settings state including Light appearance persistence, and cleans up RelayKit-owned app/helper processes.
