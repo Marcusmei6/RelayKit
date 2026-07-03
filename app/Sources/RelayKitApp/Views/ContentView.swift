@@ -205,6 +205,10 @@ struct ContentView: View {
             .smokeSection("tab-connect", recorder: smokeSectionRecorder)
             .smokeSection("cli-route", recorder: smokeSectionRecorder)
             .smokeSection("local-cli-scan", recorder: smokeSectionRecorder)
+            .smokeSection("codex-target-state", recorder: smokeSectionRecorder)
+            .smokeSection("claude-disabled-placeholder", recorder: smokeSectionRecorder)
+
+            gatewayControlPanel
 
             SectionCard {
                 HStack(alignment: .firstTextBaseline) {
@@ -230,6 +234,41 @@ struct ContentView: View {
             .smokeSection("local-catalog", recorder: smokeSectionRecorder)
             .smokeSection("auth-blocked-state", recorder: smokeSectionRecorder)
         }
+    }
+
+    private var gatewayControlPanel: some View {
+        SectionCard {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    sectionEyebrow("GATEWAY")
+                    Text("本机网关")
+                        .font(.headline)
+                    Text("127.0.0.1:19777 · \(model.gatewayStatus)")
+                        .font(.caption)
+                        .foregroundStyle(secondaryText)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text("\(model.models.count) gateway model(s)")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(mutedText)
+                    HStack(spacing: 6) {
+                        Button("Start") { model.startGateway() }
+                        Button("Stop") { model.stopGateway() }
+                        Button("Restart") { model.restartGateway() }
+                    }
+                    .buttonStyle(ControlButtonStyle())
+                    HStack(spacing: 6) {
+                        Button("Health") { Task { await model.refreshHealth() } }
+                        Button("Refresh Models") { Task { await model.refreshModels() } }
+                    }
+                    .buttonStyle(ControlButtonStyle())
+                }
+            }
+        }
+        .smokeSection("gateway-controls", recorder: smokeSectionRecorder)
+        .smokeSection("gateway-start-stop-restart", recorder: smokeSectionRecorder)
+        .smokeSection("gateway-health-refresh", recorder: smokeSectionRecorder)
     }
 
     private func cliCard(title: String, subtitle: String, active: Bool, icon: String) -> some View {

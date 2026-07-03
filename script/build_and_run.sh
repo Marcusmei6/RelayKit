@@ -115,8 +115,15 @@ case "${MODE}" in
   --verify|verify)
     verify_bundle_launch_contract
     open_app
-    sleep 2
-    app_pid="$(pgrep -x "${APP_PROCESS_NAME}" | head -1)"
+    app_pid=""
+    for _ in 1 2 3 4 5 6 7 8; do
+      app_pids="$(pgrep -x "${APP_PROCESS_NAME}" || true)"
+      app_pid="$(printf '%s\n' "${app_pids}" | sed -n '1p')"
+      if [[ -n "${app_pid}" ]]; then
+        break
+      fi
+      sleep 1
+    done
     if [[ -z "${app_pid}" ]]; then
       echo "${APP_NAME} did not launch" >&2
       exit 1

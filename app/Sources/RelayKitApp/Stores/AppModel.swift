@@ -210,6 +210,14 @@ final class AppModel: ObservableObject {
         codexConnectionStatus == "configured"
     }
 
+    var gatewayIsRunning: Bool {
+        gateway.isRunning
+    }
+
+    var gatewayProcessIdentifier: Int32? {
+        gateway.processIdentifier
+    }
+
     func refreshCodexConnectionStatus() {
         let path = codexTargetPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty else {

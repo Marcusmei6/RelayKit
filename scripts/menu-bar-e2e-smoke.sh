@@ -46,7 +46,7 @@ capture() {
   fi
   test -s "${evidence}"
   case "${name}" in
-    connect) required='["tab-connect","cli-route","local-cli-scan","model-list","local-catalog","auth-blocked-state"]' ;;
+    connect) required='["tab-connect","cli-route","local-cli-scan","gateway-controls","gateway-start-stop-restart","gateway-health-refresh","codex-target-state","claude-disabled-placeholder","model-list","local-catalog","auth-blocked-state"]' ;;
     usage) required='["tab-usage","usage-kpis","usage-rows"]' ;;
     settings|settings-light) required='["tab-settings","appearance-control","launch-login-control","settings-actions","advanced-paths"]' ;;
     provider) required='["tab-provider","provider-modal","credential-reference-form","provider-source-field","provider-prefix-field","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
@@ -78,7 +78,17 @@ capture() {
       (all($doc.connect.displayed_row_labels[]; test("^source-[0-9]+$"))) and
       ($doc.connect.displayed_row_labels | index("qwen3-coder") | not) and
       ($doc.connect.displayed_row_labels | index("claude-example") | not) and
-      ($doc.connect.auth_state | test("auth required|credential reference needed"))
+      ($doc.connect.auth_state | test("auth required|credential reference needed")) and
+      $doc.connect.gateway_control_exercise.start_invoked == true and
+      $doc.connect.gateway_control_exercise.start_process_id > 0 and
+      $doc.connect.gateway_control_exercise.start_process_running == true and
+      $doc.connect.gateway_control_exercise.health_status == "ok" and
+      $doc.connect.gateway_control_exercise.gateway_model_count > 0 and
+      $doc.connect.gateway_control_exercise.restart_process_id > 0 and
+      $doc.connect.gateway_control_exercise.restart_process_running == true and
+      $doc.connect.gateway_control_exercise.restart_health_status == "ok" and
+      $doc.connect.gateway_control_exercise.stop_status == "stopped" and
+      $doc.connect.gateway_control_exercise.post_stop_health_status == "stopped"
     ' "${evidence}" >/dev/null
   fi
   /usr/sbin/screencapture -x "${OUT}/${name}.png"

@@ -7,6 +7,13 @@ final class GatewayProcess {
         process?.isRunning == true
     }
 
+    var processIdentifier: Int32? {
+        guard let process, process.isRunning else {
+            return nil
+        }
+        return process.processIdentifier
+    }
+
     func start(binaryPath: String, configPath: String) throws {
         if isRunning {
             return
