@@ -23,15 +23,31 @@ final class AppModel: ObservableObject {
     @Published var usageSummaries: [UsageSummary] = []
     @Published var providerConfigText = ""
     @Published var message = ""
+    @Published var appearanceMode: AppAppearanceMode {
+        didSet {
+            settingsStore.appearanceMode = appearanceMode
+        }
+    }
+    @Published var launchAtLoginRequested: Bool {
+        didSet {
+            settingsStore.launchAtLoginRequested = launchAtLoginRequested
+        }
+    }
+    @Published var launchAtLoginStatus = "not registered"
 
     private let gateway = GatewayProcess()
     private let client = GatewayClient()
+    private let settingsStore = AppSettingsStore()
+    private let loginItemService = LoginItemService()
 
     init() {
         let savedPath = UserDefaults.standard.string(forKey: "providerConfigPath")
         providerConfigPath = savedPath == "../examples/providers.example.json" ? RelayKitPaths.providerConfigPath() : savedPath ?? RelayKitPaths.providerConfigPath()
         codexTargetPath = UserDefaults.standard.string(forKey: "codexTargetPath") ?? ""
+        appearanceMode = settingsStore.appearanceMode
+        launchAtLoginRequested = settingsStore.launchAtLoginRequested
         refreshCodexConnectionStatus()
+        refreshLaunchAtLoginStatus()
     }
 
     func startGateway() {
@@ -189,6 +205,28 @@ final class AppModel: ObservableObject {
             codexConnectionStatus = "configured"
         } else {
             codexConnectionStatus = "not RelayKit"
+        }
+    }
+
+    func setAppearanceMode(_ mode: AppAppearanceMode) {
+        appearanceMode = mode
+        message = "Appearance set to \(mode.rawValue)"
+    }
+
+    func refreshLaunchAtLoginStatus() {
+        let status = loginItemService.status
+        launchAtLoginStatus = status.rawValue
+        launchAtLoginRequested = status.isRequested
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try loginItemService.setEnabled(enabled)
+            refreshLaunchAtLoginStatus()
+            message = enabled ? "Launch at login requested" : "Launch at login disabled"
+        } catch {
+            refreshLaunchAtLoginStatus()
+            message = "Launch at login failed: \(error.localizedDescription)"
         }
     }
 

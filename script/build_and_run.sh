@@ -52,7 +52,7 @@ APP_WRAPPER
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>${APP_NAME}</string>
+  <string>${APP_NAME}.bin</string>
   <key>CFBundleIdentifier</key>
   <string>${BUNDLE_ID}</string>
   <key>CFBundleName</key>
@@ -78,6 +78,20 @@ stop_app() {
   pkill -x "${APP_NAME}" >/dev/null 2>&1 || true
   pkill -x "${APP_PROCESS_NAME}" >/dev/null 2>&1 || true
   pkill -f "${APP_REAL_BINARY}" >/dev/null 2>&1 || true
+  pkill -f "${BUNDLED_GATEWAY}" >/dev/null 2>&1 || true
+}
+
+verify_bundle_launch_contract() {
+  local executable
+  executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${INFO_PLIST}")"
+  if [[ "${executable}" != "${APP_NAME}.bin" ]]; then
+    echo "CFBundleExecutable must point at the real Mach-O binary, got: ${executable}" >&2
+    exit 1
+  fi
+  if ! /usr/bin/file "${APP_REAL_BINARY}" | grep -q 'Mach-O'; then
+    echo "Real app executable is not a Mach-O binary: ${APP_REAL_BINARY}" >&2
+    exit 1
+  fi
 }
 
 stop_app
@@ -92,13 +106,14 @@ case "${MODE}" in
     ;;
   --logs|logs)
     open_app
-    /usr/bin/log stream --info --style compact --predicate "process == \"${APP_NAME}\""
+    /usr/bin/log stream --info --style compact --predicate "process == \"${APP_PROCESS_NAME}\""
     ;;
   --telemetry|telemetry)
     open_app
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"${BUNDLE_ID}\""
     ;;
   --verify|verify)
+    verify_bundle_launch_contract
     open_app
     sleep 2
     app_pid="$(pgrep -x "${APP_PROCESS_NAME}" | head -1)"

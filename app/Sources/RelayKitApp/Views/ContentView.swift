@@ -2,6 +2,7 @@ import RelayKitCore
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.colorScheme) private var systemColorScheme
     @EnvironmentObject private var model: AppModel
     @State private var tab = Tab.connect
     @State private var showingProviderForm = false
@@ -18,7 +19,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [Color(hex: 0x111827), Color(hex: 0x0A0D14)],
+                colors: backgroundGradient,
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -58,7 +59,8 @@ struct ContentView: View {
                 .padding(18)
             }
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(primaryText)
+        .preferredColorScheme(preferredColorScheme)
     }
 
     private var header: some View {
@@ -67,7 +69,7 @@ struct ContentView: View {
                 RoundedRectangle(cornerRadius: 14)
                     .fill(
                         LinearGradient(
-                            colors: [Color(hex: 0x1A3147), Color(hex: 0x101722)],
+                            colors: logoGradient,
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -84,7 +86,7 @@ struct ContentView: View {
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
                 Text("本地模型网关 · \(codexHeaderStatus)")
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.58))
+                    .foregroundStyle(secondaryText)
             }
 
             Spacer(minLength: 10)
@@ -103,7 +105,7 @@ struct ContentView: View {
         .smokeSection("global-status", recorder: smokeSectionRecorder)
         .background(
             LinearGradient(
-                colors: [Color.white.opacity(0.075), Color.white.opacity(0.025)],
+                colors: headerGradient,
                 startPoint: .leading,
                 endPoint: .trailing
             )
@@ -125,10 +127,10 @@ struct ContentView: View {
         VStack(spacing: 2) {
             Text(label.uppercased())
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.38))
+                .foregroundStyle(mutedText)
             Text(value)
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.82))
+                .foregroundStyle(primaryText.opacity(0.82))
                 .lineLimit(1)
         }
         .frame(minWidth: 48)
@@ -145,13 +147,13 @@ struct ContentView: View {
                             .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         Text(item.subtitle)
                             .font(.system(size: 10))
-                            .foregroundStyle(tab == item ? .white.opacity(0.64) : .white.opacity(0.34))
+                            .foregroundStyle(tab == item ? secondaryText : mutedText)
                     }
                     .frame(maxWidth: .infinity, minHeight: 52)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(tab == item ? .white : .white.opacity(0.48))
+                .foregroundStyle(tab == item ? primaryText : mutedText)
                 .overlay(alignment: .bottom) {
                     Capsule()
                         .fill(tab == item ? LinearGradient(colors: [Color(hex: 0x78D8FF), Color(hex: 0xFFD685)], startPoint: .leading, endPoint: .trailing) : LinearGradient(colors: [.clear], startPoint: .leading, endPoint: .trailing))
@@ -160,7 +162,7 @@ struct ContentView: View {
                 }
             }
         }
-        .background(Color.white.opacity(0.045))
+        .background(railBackground)
         .overlay(alignment: .bottom) { Divider().overlay(borderColor) }
     }
 
@@ -174,7 +176,7 @@ struct ContentView: View {
                             .font(.headline)
                         Text("Codex 是当前 P0 真实目标；Claude Code 保持未来占位。")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.56))
+                            .foregroundStyle(secondaryText)
                     }
                     Spacer()
                     gatewayControls
@@ -248,7 +250,7 @@ struct ContentView: View {
                 .font(.headline)
             Text(subtitle)
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.56))
+                .foregroundStyle(secondaryText)
                 .lineLimit(1)
         }
         .padding(14)
@@ -277,16 +279,16 @@ struct ContentView: View {
                                 .lineLimit(1)
                             Text(item.ownedBy)
                                 .font(.caption)
-                                .foregroundStyle(.white.opacity(0.5))
+                                .foregroundStyle(secondaryText)
                                 .lineLimit(1)
                         }
                         Spacer()
                         Text("LOCAL")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.52))
+                            .foregroundStyle(secondaryText)
                     }
                     .padding(12)
-                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                    .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(borderColor))
                 }
             }
@@ -303,7 +305,7 @@ struct ContentView: View {
                             .font(.headline)
                         Text("只读取本机 usage JSONL summary；没有 mock rows。")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.56))
+                            .foregroundStyle(secondaryText)
                     }
                     Spacer()
                     Button("Refresh") {
@@ -353,17 +355,17 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(secondaryText)
             Text(value)
                 .font(.system(size: 21, weight: .semibold, design: .rounded))
                 .lineLimit(1)
             Text(note)
                 .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.38))
+                .foregroundStyle(mutedText)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+        .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(borderColor))
     }
 
@@ -385,11 +387,11 @@ struct ContentView: View {
                             Spacer()
                             Text(item.day)
                                 .font(.caption.monospacedDigit())
-                                .foregroundStyle(.white.opacity(0.45))
+                                .foregroundStyle(mutedText)
                         }
                         Text(item.model)
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.58))
+                            .foregroundStyle(secondaryText)
                             .lineLimit(1)
                         HStack {
                             usageChip("\(item.requests) req")
@@ -398,7 +400,7 @@ struct ContentView: View {
                         }
                     }
                     .padding(12)
-                    .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                    .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 14))
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(borderColor))
                 }
             }
@@ -410,8 +412,8 @@ struct ContentView: View {
             .font(.system(size: 10, weight: .medium, design: .monospaced))
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(Color.white.opacity(0.08), in: Capsule())
-            .foregroundStyle(.white.opacity(0.72))
+            .background(chipBackground, in: Capsule())
+            .foregroundStyle(primaryText.opacity(0.72))
     }
 
     private var settingsTab: some View {
@@ -424,7 +426,7 @@ struct ContentView: View {
                             .font(.headline)
                         Text("只展示真实可执行的本地动作；未来能力保持禁用。")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.56))
+                            .foregroundStyle(secondaryText)
                     }
                     Spacer()
                     Button("Refresh") { model.refreshCodexConnectionStatus() }
@@ -432,6 +434,57 @@ struct ContentView: View {
                 }
             }
             .smokeSection("tab-settings", recorder: smokeSectionRecorder)
+
+            SectionCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Appearance")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Persists across launches and changes this popover theme.")
+                                .font(.caption)
+                                .foregroundStyle(secondaryText)
+                        }
+                        Spacer()
+                    }
+                    Picker("Appearance", selection: Binding(
+                        get: { model.appearanceMode },
+                        set: { model.setAppearanceMode($0) }
+                    )) {
+                        Text("System").tag(AppAppearanceMode.system)
+                        Text("Light").tag(AppAppearanceMode.light)
+                        Text("Dark").tag(AppAppearanceMode.dark)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+            }
+            .smokeSection("appearance-control", recorder: smokeSectionRecorder)
+
+            SectionCard {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Launch at login")
+                            .font(.subheadline.weight(.semibold))
+                        Text("macOS login item status: \(model.launchAtLoginStatus)")
+                            .font(.caption)
+                            .foregroundStyle(secondaryText)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { model.launchAtLoginRequested },
+                        set: { model.setLaunchAtLogin($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    Button("Refresh") {
+                        model.refreshLaunchAtLoginStatus()
+                    }
+                    .buttonStyle(ControlButtonStyle())
+                }
+            }
+            .smokeSection("launch-login-control", recorder: smokeSectionRecorder)
 
             SectionCard {
                 settingsRow(title: "Gateway helper", subtitle: "Bundled relay on 127.0.0.1:19777", action: "Start") {
@@ -454,7 +507,7 @@ struct ContentView: View {
                             .font(.subheadline.weight(.semibold))
                         Text("Explicit paths only; RelayKit never writes real ~/.codex/config.toml by default.")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.52))
+                            .foregroundStyle(secondaryText)
                     }
                     Spacer()
                     Button(showingAdvancedSettings ? "Hide" : "Show") {
@@ -482,7 +535,7 @@ struct ContentView: View {
                     .font(.subheadline.weight(.semibold))
                 Text(subtitle)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.52))
+                    .foregroundStyle(secondaryText)
                     .lineLimit(1)
             }
             Spacer()
@@ -491,7 +544,7 @@ struct ContentView: View {
                 .disabled(disabled)
         }
         .padding(12)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+        .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(borderColor))
     }
 
@@ -499,7 +552,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(label)
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.52))
+                .foregroundStyle(secondaryText)
             TextField(label, text: text)
                 .textFieldStyle(ProductTextFieldStyle())
         }
@@ -508,12 +561,12 @@ struct ContentView: View {
     private var footer: some View {
         Text(model.message.isEmpty ? "Ready" : model.message)
             .font(.caption)
-            .foregroundStyle(.white.opacity(0.52))
+            .foregroundStyle(secondaryText)
             .lineLimit(2)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
-            .background(Color.white.opacity(0.035))
+            .background(surfaceChrome)
             .overlay(alignment: .top) { Divider().overlay(borderColor) }
     }
 
@@ -524,11 +577,77 @@ struct ContentView: View {
     }
 
     private var statusColor: Color {
-        model.gatewayStatus == "ok" || model.gatewayStatus == "running" ? Color(hex: 0x9AF2D0) : .white.opacity(0.56)
+        model.gatewayStatus == "ok" || model.gatewayStatus == "running" ? Color(hex: 0x0F766E) : secondaryText
     }
 
     private var codexHeaderStatus: String {
         model.codexConnectionIsConfigured ? "Codex active" : "Codex setup"
+    }
+
+    private var resolvedScheme: ColorScheme {
+        switch model.appearanceMode {
+        case .system:
+            return systemColorScheme
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        }
+    }
+
+    private var preferredColorScheme: ColorScheme? {
+        switch model.appearanceMode {
+        case .system:
+            return nil
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        }
+    }
+
+    private var isLightTheme: Bool {
+        resolvedScheme == .light
+    }
+
+    private var backgroundGradient: [Color] {
+        isLightTheme ? [Color(hex: 0xF5F8FC), Color(hex: 0xE8EEF7)] : [Color(hex: 0x111827), Color(hex: 0x0A0D14)]
+    }
+
+    private var logoGradient: [Color] {
+        isLightTheme ? [Color(hex: 0xDDEEFF), Color(hex: 0xF8FBFF)] : [Color(hex: 0x1A3147), Color(hex: 0x101722)]
+    }
+
+    private var headerGradient: [Color] {
+        isLightTheme ? [Color.white.opacity(0.86), Color(hex: 0xE7F0FA).opacity(0.72)] : [Color.white.opacity(0.075), Color.white.opacity(0.025)]
+    }
+
+    private var railBackground: Color {
+        isLightTheme ? Color.black.opacity(0.045) : Color.white.opacity(0.045)
+    }
+
+    private var surfaceChrome: Color {
+        isLightTheme ? Color.black.opacity(0.035) : Color.white.opacity(0.035)
+    }
+
+    private var surfaceSubtle: Color {
+        isLightTheme ? Color.black.opacity(0.055) : Color.white.opacity(0.055)
+    }
+
+    private var chipBackground: Color {
+        isLightTheme ? Color.black.opacity(0.08) : Color.white.opacity(0.08)
+    }
+
+    private var primaryText: Color {
+        isLightTheme ? Color(hex: 0x111827) : .white
+    }
+
+    private var secondaryText: Color {
+        primaryText.opacity(0.58)
+    }
+
+    private var mutedText: Color {
+        primaryText.opacity(0.38)
     }
 }
 
@@ -549,7 +668,7 @@ private enum CLIState {
         switch self {
         case .active: Color(hex: 0xFFD685)
         case .setup: Color(hex: 0x78D8FF)
-        case .future: .white.opacity(0.36)
+        case .future: .primary.opacity(0.36)
         }
     }
 
@@ -557,7 +676,7 @@ private enum CLIState {
         switch self {
         case .active: Color(hex: 0xFFD685).opacity(0.13)
         case .setup: Color(hex: 0x78D8FF).opacity(0.11)
-        case .future: Color.white.opacity(0.055)
+        case .future: Color.primary.opacity(0.055)
         }
     }
 
@@ -662,6 +781,7 @@ private struct ProviderFormView: View {
         .background(Color(hex: 0x101722), in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
         .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
+        .preferredColorScheme(.dark)
     }
 
     private func field(_ label: String, _ value: Binding<String>, _ prompt: String) -> some View {
@@ -721,7 +841,7 @@ private struct SectionCard<Content: View>: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
+        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(borderColor))
     }
 }
@@ -735,12 +855,12 @@ private struct EmptyProductState: View {
         VStack(spacing: 10) {
             Image(systemName: icon)
                 .font(.system(size: 34, weight: .light))
-                .foregroundStyle(.white.opacity(0.32))
+                .foregroundStyle(.primary.opacity(0.32))
             Text(title)
                 .font(.title3.weight(.semibold))
             Text(message)
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.52))
+                .foregroundStyle(.primary.opacity(0.52))
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -756,8 +876,8 @@ private struct ControlButtonStyle: ButtonStyle {
             .lineLimit(1)
             .padding(.horizontal, 11)
             .padding(.vertical, 8)
-            .foregroundStyle(prominent ? Color(hex: 0x071018) : .white.opacity(configuration.isPressed ? 0.58 : 0.82))
-            .background(prominent ? Color(hex: 0x78D8FF).opacity(configuration.isPressed ? 0.7 : 1) : Color.white.opacity(configuration.isPressed ? 0.11 : 0.075), in: RoundedRectangle(cornerRadius: 10))
+            .foregroundStyle(prominent ? Color(hex: 0x071018) : .primary.opacity(configuration.isPressed ? 0.58 : 0.82))
+            .background(prominent ? Color(hex: 0x78D8FF).opacity(configuration.isPressed ? 0.7 : 1) : Color.primary.opacity(configuration.isPressed ? 0.11 : 0.075), in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(prominent ? Color.clear : borderColor))
     }
 }
@@ -769,9 +889,9 @@ private struct ProductTextFieldStyle: TextFieldStyle {
             .textFieldStyle(.plain)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 10))
+            .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(borderColor))
-            .foregroundStyle(.white)
+            .foregroundStyle(.primary)
     }
 }
 
@@ -788,7 +908,7 @@ private struct SmokeSectionModifier: ViewModifier {
     }
 }
 
-private let borderColor = Color.white.opacity(0.12)
+private let borderColor = Color.primary.opacity(0.12)
 
 private func shortPath(_ path: String) -> String {
     let home = FileManager.default.homeDirectoryForCurrentUser.path

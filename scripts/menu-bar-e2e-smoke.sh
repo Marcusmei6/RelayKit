@@ -2,11 +2,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_BUNDLE="${ROOT}/dist/RelayKitApp.app"
 APP="${ROOT}/dist/RelayKitApp.app/Contents/MacOS/RelayKitApp"
 APP_REAL="${ROOT}/dist/RelayKitApp.app/Contents/MacOS/RelayKitApp.bin"
 BUNDLED_RELAY="${ROOT}/dist/RelayKitApp.app/Contents/MacOS/relay"
+BUNDLE_ID="dev.relaykit.app"
+APPEARANCE_KEY="appearanceMode"
 OUT="${ROOT}/dist/ui-smoke"
 PID=""
+ORIGINAL_APPEARANCE=""
+HAD_ORIGINAL_APPEARANCE=0
 
 cleanup() {
   if [[ -n "${PID}" ]] && kill -0 "${PID}" 2>/dev/null; then
@@ -17,16 +22,25 @@ cleanup() {
   pkill -f "${APP_REAL}" >/dev/null 2>&1 || true
   pkill -f "${BUNDLED_RELAY}" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+
+restore_defaults() {
+  if [[ "${HAD_ORIGINAL_APPEARANCE}" == "1" ]]; then
+    /usr/bin/defaults write "${BUNDLE_ID}" "${APPEARANCE_KEY}" "${ORIGINAL_APPEARANCE}" >/dev/null 2>&1 || true
+  else
+    /usr/bin/defaults delete "${BUNDLE_ID}" "${APPEARANCE_KEY}" >/dev/null 2>&1 || true
+  fi
+}
+trap 'restore_defaults; cleanup' EXIT
 
 capture() {
   local name="$1"
   shift
   local evidence="${OUT}/${name}.json"
-  "${APP}" --ui-smoke --ui-smoke-evidence "${evidence}" "$@" >/tmp/relaykit-ui-smoke.log 2>&1 &
-  PID="$!"
-  sleep 2
-  if ! kill -0 "${PID}" 2>/dev/null; then
+  cleanup
+  /usr/bin/open -n "${APP_BUNDLE}" --args --ui-smoke --ui-smoke-evidence "${evidence}" "$@" >/tmp/relaykit-ui-smoke.log 2>&1
+  sleep 3
+  PID="$(pgrep -x RelayKitApp.bin | head -1 || true)"
+  if [[ -z "${PID}" ]] || ! kill -0 "${PID}" 2>/dev/null; then
     cat /tmp/relaykit-ui-smoke.log >&2
     exit 1
   fi
@@ -34,7 +48,7 @@ capture() {
   case "${name}" in
     connect) required='["tab-connect","cli-route","model-list"]' ;;
     usage) required='["tab-usage","usage-kpis","usage-rows"]' ;;
-    settings) required='["tab-settings","settings-actions","advanced-paths"]' ;;
+    settings|settings-light) required='["tab-settings","appearance-control","launch-login-control","settings-actions","advanced-paths"]' ;;
     provider) required='["tab-provider","provider-modal","credential-reference-form"]' ;;
     *) required='[]' ;;
   esac
@@ -45,6 +59,9 @@ capture() {
     $doc.popover.shown == true and
     $doc.popover.ordinary_window == false and
     $doc.surface.kind == "menu-bar-popover" and
+    ($doc.settings.appearance_mode | test("^(system|light|dark)$")) and
+    ($doc.settings.launch_at_login_requested | type == "boolean") and
+    ($doc.settings.launch_at_login_status | type == "string") and
     ($doc.surface.sections | index("global-status")) and
     (all($required[]; . as $section | ($doc.surface.sections | index($section))))
   ' "${evidence}" >/dev/null
@@ -61,9 +78,20 @@ cd "${ROOT}"
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
 
+if ORIGINAL_APPEARANCE="$(/usr/bin/defaults read "${BUNDLE_ID}" "${APPEARANCE_KEY}" 2>/dev/null)"; then
+  HAD_ORIGINAL_APPEARANCE=1
+else
+  ORIGINAL_APPEARANCE=""
+  HAD_ORIGINAL_APPEARANCE=0
+fi
+
 capture connect --ui-smoke-tab connect
 capture usage --ui-smoke-tab usage
 capture settings --ui-smoke-tab settings
+/usr/bin/defaults write "${BUNDLE_ID}" "${APPEARANCE_KEY}" light
+capture settings-light --ui-smoke-tab settings
+jq -e '.settings.appearance_mode == "light"' "${OUT}/settings-light.json" >/dev/null
+restore_defaults
 capture provider --ui-smoke-tab connect --ui-smoke-provider
 
 if pgrep -x RelayKitApp.bin >/dev/null || pgrep -f "${BUNDLED_RELAY}" >/dev/null; then

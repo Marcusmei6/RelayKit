@@ -165,11 +165,39 @@ func expectCapabilityContract() throws {
     expectInvalid(try json("https://example.test/v1", extraProviderField: #", "routing": {"status": "pretend"}"#), name: "routing unsupported status")
 }
 
+func expectAppSettingsPersistence() {
+    let suiteName = "RelayKitAppValidationTests-\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+        fatalError("could not create test defaults")
+    }
+    defer {
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    let store = AppSettingsStore(defaults: defaults)
+    if store.appearanceMode != .system {
+        fatalError("default appearance mode should be system")
+    }
+    store.appearanceMode = .light
+    if AppSettingsStore(defaults: defaults).appearanceMode != .light {
+        fatalError("appearance mode did not persist")
+    }
+    defaults.set("unsupported", forKey: AppSettingsStore.appearanceModeKey)
+    if AppSettingsStore(defaults: defaults).appearanceMode != .system {
+        fatalError("unsupported appearance mode should fall back to system")
+    }
+    store.launchAtLoginRequested = true
+    if AppSettingsStore(defaults: defaults).launchAtLoginRequested != true {
+        fatalError("launch at login requested state did not persist")
+    }
+}
+
 try expectValid(validConfig)
 try expectProviderDraftWriter()
 expectProviderDraftRejectsCredentialValue()
 try expectCredentialRefContract()
 try expectCapabilityContract()
+expectAppSettingsPersistence()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }

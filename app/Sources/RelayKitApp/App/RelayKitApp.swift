@@ -99,6 +99,11 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
                 "tab": activeTab,
                 "sections": Array(smokeSections).sorted(),
             ],
+            "settings": [
+                "appearance_mode": model.appearanceMode.rawValue,
+                "launch_at_login_requested": model.launchAtLoginRequested,
+                "launch_at_login_status": model.launchAtLoginStatus,
+            ],
         ]
         do {
             let data = try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys])

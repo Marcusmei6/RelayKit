@@ -27,7 +27,9 @@ The current product surface is intentionally menu-bar only:
 - `接入` focuses on CLI route selection, gateway actions, and provider/model list;
 - `Usage` presents real local summary KPIs first and keeps the usage JSONL path behind a secondary control;
 - `设置` presents real wired actions as cards and keeps raw paths behind an Advanced disclosure;
+- Settings now includes real persisted Appearance (`System` / `Light` / `Dark`) and a real macOS Launch at login status/action row backed by `SMAppService`; the switch is refreshed from macOS status, and if local unsigned registration fails, the app reports the macOS error/status instead of pretending success;
 - provider add remains a modal overlay inside the popover for complex configuration;
-- `scripts/menu-bar-e2e-smoke.sh` now writes evidence JSON for each captured state and fails if the popover is not anchored, the status item is not visible, expected semantic sections are missing, or RelayKit-owned smoke processes are left behind.
+- normal LaunchServices app launch is part of the regression gate: generated bundles set `CFBundleExecutable` to the real Mach-O `RelayKitApp.bin`, and `scripts/menu-bar-e2e-smoke.sh` opens `dist/RelayKitApp.app` with `open -n ... --args` before capturing evidence;
+- `scripts/menu-bar-e2e-smoke.sh` now writes evidence JSON for each captured state and fails if the popover is not anchored, the status item is not visible, expected semantic sections are missing, Settings state or Light appearance persistence is missing, or RelayKit-owned smoke processes are left behind.
 
 OpenDesign project `replay` was not available through the local OD tools during the repair pass, so the local `relaykit-gateway-popover.html` artifact was used as the visual reference. Do not commit that artifact or generated OD images unless a future task explicitly asks for a scrubbed design asset handoff.
