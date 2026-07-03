@@ -24,7 +24,7 @@ curl -fsS "${URL}" |
       model_count: (.value | length),
       representative_model_id: (if $keep_model_ids == "1" then .value[0].model_id else "<redacted>" end),
       model_id_redacted: ($keep_model_ids != "1"),
-      relaykit_representation: "provider id/name/base_url/api_format/auth_env/models",
+      relaykit_representation: "provider id/name/base_url/api_format/credential_ref/capabilities/routing/models",
       route_status: "not_routed",
       blocker: "requires explicit public provider config and credential reference before RelayKit can route this source"
     })' >"${OUT}"

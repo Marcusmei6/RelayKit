@@ -3,7 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
+	"unicode"
 )
 
 const (
@@ -13,6 +16,11 @@ const (
 	CodeUnsupportedFormat      = "unsupported_provider_format"
 	APIFormatOpenAIChat        = "openai_chat"
 	APIFormatAnthropicMessages = "anthropic_messages"
+	CredentialKindEnv          = "env"
+	CredentialKindKeychain     = "keychain"
+	CredentialKindKeyFile      = "key_file"
+	RoutingStatusEnabled       = "enabled"
+	RoutingStatusDisabled      = "disabled"
 )
 
 type Error struct {
@@ -36,17 +44,41 @@ type Config struct {
 }
 
 type ProviderProfile struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	BaseURL   string  `json:"base_url"`
-	APIFormat string  `json:"api_format"`
-	AuthEnv   string  `json:"auth_env,omitempty"`
-	Models    []Model `json:"models"`
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	BaseURL       string         `json:"base_url"`
+	APIFormat     string         `json:"api_format"`
+	AuthEnv       string         `json:"auth_env,omitempty"`
+	CredentialRef *CredentialRef `json:"credential_ref,omitempty"`
+	Capabilities  Capabilities   `json:"capabilities,omitempty"`
+	Routing       Routing        `json:"routing,omitempty"`
+	Models        []Model        `json:"models"`
+}
+
+type CredentialRef struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+type Capabilities struct {
+	Streaming bool `json:"streaming,omitempty"`
+	Tools     bool `json:"tools,omitempty"`
+	Usage     bool `json:"usage,omitempty"`
+	Reasoning bool `json:"reasoning,omitempty"`
+}
+
+type Routing struct {
+	Source      string `json:"source,omitempty"`
+	ModelPrefix string `json:"model_prefix,omitempty"`
+	Priority    int    `json:"priority,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Visible     bool   `json:"visible,omitempty"`
 }
 
 type Model struct {
 	ID            string `json:"id"`
 	DisplayName   string `json:"display_name,omitempty"`
+	UpstreamModel string `json:"upstream_model,omitempty"`
 	ContextWindow int    `json:"context_window,omitempty"`
 }
 
@@ -57,6 +89,16 @@ func Load(path string) (*Config, error) {
 	}
 
 	var cfg Config
+	var publicBoundary any
+	if err := json.Unmarshal(body, &publicBoundary); err != nil {
+		return nil, &Error{Code: CodeParseError, Err: err}
+	}
+	if err := rejectCredentialContent(publicBoundary); err != nil {
+		return nil, &Error{Code: CodeValidationError, Err: err}
+	}
+	if err := validateRawMetadata(publicBoundary); err != nil {
+		return nil, &Error{Code: CodeValidationError, Err: err}
+	}
 	if err := json.Unmarshal(body, &cfg); err != nil {
 		return nil, &Error{Code: CodeParseError, Err: err}
 	}
@@ -77,9 +119,207 @@ func validate(cfg Config) error {
 		if p.APIFormat != APIFormatOpenAIChat && p.APIFormat != APIFormatAnthropicMessages {
 			return &Error{Code: CodeUnsupportedFormat, Err: fmt.Errorf("unsupported api_format %q", p.APIFormat)}
 		}
+		if err := validateBaseURL(p.BaseURL); err != nil {
+			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid base_url for provider %q: %w", p.ID, err)}
+		}
+		if p.AuthEnv != "" && !isEnvName(p.AuthEnv) {
+			return &Error{Code: CodeValidationError, Err: fmt.Errorf("auth_env must be an environment variable name for provider %q", p.ID)}
+		}
+		if p.CredentialRef != nil {
+			if err := validateCredentialRef(*p.CredentialRef); err != nil {
+				return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid credential_ref for provider %q: %w", p.ID, err)}
+			}
+		}
+		if err := validateRouting(p.Routing); err != nil {
+			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid routing for provider %q: %w", p.ID, err)}
+		}
 		for _, m := range p.Models {
 			if m.ID == "" {
 				return &Error{Code: CodeValidationError, Err: fmt.Errorf("model id required for provider %q", p.ID)}
+			}
+			if containsCredentialMarker(m.UpstreamModel) {
+				return &Error{Code: CodeValidationError, Err: fmt.Errorf("upstream_model must not contain credential-looking values for provider %q", p.ID)}
+			}
+		}
+	}
+	return nil
+}
+
+func validateBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("must be an absolute URL")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("must not contain credentials, query, or fragment")
+	}
+	return nil
+}
+
+func validateCredentialRef(ref CredentialRef) error {
+	if containsCredentialMarker(ref.Value) {
+		return fmt.Errorf("must not contain credential-looking values")
+	}
+	switch ref.Kind {
+	case CredentialKindEnv:
+		if !isEnvName(ref.Value) {
+			return fmt.Errorf("env value must be an environment variable name")
+		}
+	case CredentialKindKeychain:
+		if !isSafeReferenceName(ref.Value) {
+			return fmt.Errorf("keychain value must be a local item reference")
+		}
+	case CredentialKindKeyFile:
+		if !strings.HasPrefix(ref.Value, "~/") && !strings.HasPrefix(ref.Value, "/") {
+			return fmt.Errorf("key_file value must be an absolute or home-relative path")
+		}
+		if strings.ContainsAny(ref.Value, "\n\r") {
+			return fmt.Errorf("key_file value must be a single path")
+		}
+	default:
+		return fmt.Errorf("unsupported kind %q", ref.Kind)
+	}
+	return nil
+}
+
+func validateRouting(r Routing) error {
+	if r.Source != "" && !isSafeSlug(r.Source) {
+		return fmt.Errorf("source must be a public-safe slug")
+	}
+	if r.ModelPrefix != "" {
+		prefix := strings.TrimSuffix(r.ModelPrefix, "/")
+		if !strings.HasSuffix(r.ModelPrefix, "/") || !isSafeSlug(prefix) {
+			return fmt.Errorf("model_prefix must be a public-safe slug ending in /")
+		}
+	}
+	if r.Priority < 0 {
+		return fmt.Errorf("priority must be non-negative")
+	}
+	if r.Status != "" && r.Status != RoutingStatusEnabled && r.Status != RoutingStatusDisabled {
+		return fmt.Errorf("unsupported status %q", r.Status)
+	}
+	return nil
+}
+
+func isEnvName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if i == 0 && !(c == '_' || isASCIILetter(c)) {
+			return false
+		}
+		if !(c == '_' || isASCIILetter(c) || isASCIIDigit(c)) {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeSlug(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if i == 0 && !(c >= 'a' && c <= 'z') {
+			return false
+		}
+		if !((c >= 'a' && c <= 'z') || isASCIIDigit(c) || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeReferenceName(value string) bool {
+	if value == "" || strings.ContainsAny(value, "\n\r") {
+		return false
+	}
+	for _, r := range value {
+		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("._:@/-", r)) {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+func isASCIIDigit(c byte) bool {
+	return c >= '0' && c <= '9'
+}
+
+func containsCredentialMarker(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"bearer ", "sk-", "api_key=", "token=", "access_token=", "refresh_token=", "password=", "secret=", "authorization="} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func rejectCredentialContent(value any) error {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if isForbiddenCredentialKey(key) {
+				return fmt.Errorf("credential field is not allowed: %s", key)
+			}
+			if err := rejectCredentialContent(child); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if err := rejectCredentialContent(child); err != nil {
+				return err
+			}
+		}
+	case string:
+		if containsCredentialMarker(v) {
+			return fmt.Errorf("credential-looking value is not allowed")
+		}
+	}
+	return nil
+}
+
+func isForbiddenCredentialKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "api_key", "apikey", "token", "secret", "credential", "credentials", "authorization", "cookie", "password", "bearer_token", "access_token", "refresh_token":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateRawMetadata(value any) error {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	providers, ok := root["providers"].([]any)
+	if !ok {
+		return nil
+	}
+	for _, item := range providers {
+		provider, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		capabilities, ok := provider["capabilities"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for key := range capabilities {
+			switch key {
+			case "streaming", "tools", "usage", "reasoning":
+			default:
+				return fmt.Errorf("unsupported capability: %s", key)
 			}
 		}
 	}

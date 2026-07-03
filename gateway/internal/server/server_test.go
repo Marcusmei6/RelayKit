@@ -65,6 +65,33 @@ func TestModels(t *testing.T) {
 	}
 }
 
+func TestModelsHidesDisabledProviders(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"disabled","name":"Disabled","base_url":"http://127.0.0.1:11434/v1","api_format":"openai_chat","routing":{"status":"disabled"},"models":[{"id":"hidden-model"}]},{"id":"enabled","name":"Enabled","base_url":"http://127.0.0.1:11434/v1","api_format":"openai_chat","models":[{"id":"visible-model"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	got := rec.Body.String()
+	if strings.Contains(got, "hidden-model") {
+		t.Fatalf("disabled model was listed: %s", got)
+	}
+	if !strings.Contains(got, "visible-model") {
+		t.Fatalf("enabled model missing: %s", got)
+	}
+}
+
 func TestResponsesRequiresContentType(t *testing.T) {
 	h, err := New(filepath.Join("..", "..", "..", "examples", "providers.example.json"))
 	if err != nil {
@@ -77,6 +104,75 @@ func TestResponsesRequiresContentType(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestResponsesUsesUpstreamModelMapping(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream request err = %v", err)
+		}
+		if req.Model != "upstream-coder" {
+			t.Fatalf("upstream model = %q, want upstream-coder", req.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":    "chatcmpl-upstream-map",
+			"model": req.Model,
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "OK"},
+				"finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","models":[{"id":"public/coder","upstream_model":"upstream-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	body := strings.NewReader(`{"model":"public/coder","input":"reply OK"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"model":"public/coder"`) {
+		t.Fatalf("RelayKit response did not preserve public model id: %s", rec.Body.String())
+	}
+}
+
+func TestResponsesRejectsDisabledProviderModel(t *testing.T) {
+	cfgPath := writeTestProviderConfigWithRouting(t, "http://127.0.0.1:11434", "openai_chat", "hidden-model", `"status":"disabled"`)
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	body := strings.NewReader(`{"model":"hidden-model","input":"reply OK"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "unknown model") {
+		t.Fatalf("body = %s", rec.Body.String())
 	}
 }
 
@@ -233,6 +329,71 @@ func TestResponsesAcceptsCodexInputMessageParts(t *testing.T) {
 	}
 }
 
+func TestResponsesDoesNotLeakUpstreamErrorBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream failed for upstream-coder api_key=secret", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","models":[{"id":"public/coder","upstream_model":"upstream-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	body := strings.NewReader(`{"model":"public/coder","input":"reply OK"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	for _, forbidden := range []string{"upstream-coder", "api_key", "secret"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("upstream error leaked %q in body: %s", forbidden, rec.Body.String())
+		}
+	}
+	if !strings.Contains(rec.Body.String(), "upstream returned non-success status") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestResponsesDoesNotLeakUpstreamTransportError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"http://sentinel-private-host.invalid/v1","api_format":"openai_chat","models":[{"id":"public/coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	body := strings.NewReader(`{"model":"public/coder","input":"reply OK"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	for _, forbidden := range []string{"sentinel-private-host", "invalid", "/v1", "chat/completions"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("transport error leaked %q in body: %s", forbidden, rec.Body.String())
+		}
+	}
+	if !strings.Contains(rec.Body.String(), "upstream request failed") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
 func TestUsageJSONLOmitsBodiesHeadersAndURLs(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -317,6 +478,48 @@ func TestUsageJSONLOmitsBodiesHeadersAndURLs(t *testing.T) {
 	}
 }
 
+func TestCredentialRefEnvSetsOpenAIChatAuthorization(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer fake-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":    "chatcmpl-credential-ref",
+			"model": "qwen3-coder",
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "OK"},
+				"finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_TEST_PROVIDER_TOKEN"},"models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAYKIT_TEST_PROVIDER_TOKEN", "fake-token")
+
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	body := strings.NewReader(`{"model":"qwen3-coder","input":"reply OK"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -330,14 +533,14 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode upstream err = %v", err)
 		}
-		if req.Model != "qwen3-coder" || !req.Stream {
+		if req.Model != "upstream-coder" || !req.Stream {
 			t.Fatalf("upstream request = %+v", req)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		chunks := []string{
-			`data: {"id":"chatcmpl-stream","model":"qwen3-coder","choices":[{"delta":{"role":"assistant"}}]}`,
-			`data: {"id":"chatcmpl-stream","model":"qwen3-coder","choices":[{"delta":{"content":"he"}}]}`,
-			`data: {"id":"chatcmpl-stream","model":"qwen3-coder","choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}],"usage":{"total_tokens":5}}`,
+			`data: {"id":"chatcmpl-stream","model":"upstream-coder","choices":[{"delta":{"role":"assistant"}}]}`,
+			`data: {"id":"chatcmpl-stream","model":"upstream-coder","choices":[{"delta":{"content":"he"}}]}`,
+			`data: {"id":"chatcmpl-stream","model":"upstream-coder","choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}],"usage":{"total_tokens":5}}`,
 			`data: [DONE]`,
 		}
 		for _, chunk := range chunks {
@@ -350,7 +553,7 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "providers.json")
-	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","models":[{"id":"qwen3-coder"}]}]}`
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","models":[{"id":"public/coder","upstream_model":"upstream-coder"}]}]}`
 	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +563,7 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 		t.Fatalf("New err = %v", err)
 	}
 
-	body := strings.NewReader(`{"model":"qwen3-coder","input":"Say hi","stream":true}`)
+	body := strings.NewReader(`{"model":"public/coder","input":"Say hi","stream":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -376,6 +579,7 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 	for _, want := range []string{
 		"event: response.created",
 		`"type":"response.created"`,
+		`"model":"public/coder"`,
 		"event: response.output_item.added",
 		"event: response.content_part.added",
 		"event: response.output_text.delta",
@@ -397,6 +601,9 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 	}
 	if strings.Index(got, "event: response.content_part.added") > strings.Index(got, "event: response.output_text.delta") {
 		t.Fatalf("content part must be added before text delta:\n%s", got)
+	}
+	if strings.Contains(got, "upstream-coder") {
+		t.Fatalf("stream leaked upstream model id:\n%s", got)
 	}
 }
 
@@ -524,6 +731,57 @@ func TestResponsesProxiesToFakeAnthropicMessages(t *testing.T) {
 	}
 }
 
+func TestResponsesAnthropicUsesUpstreamModelMapping(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream request err = %v", err)
+		}
+		if req.Model != "upstream-claude" {
+			t.Fatalf("upstream model = %q, want upstream-claude", req.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg-upstream-map",
+			"model":       req.Model,
+			"stop_reason": "end_turn",
+			"content":     []map[string]string{{"type": "text", "text": "hi"}},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"anthropic_messages","models":[{"id":"public/claude","upstream_model":"upstream-claude"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	body := strings.NewReader(`{"model":"public/claude","input":"Say hi"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"model":"public/claude"`) {
+		t.Fatalf("RelayKit response did not preserve public model id: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "upstream-claude") {
+		t.Fatalf("RelayKit response leaked upstream model id: %s", rec.Body.String())
+	}
+}
+
 func TestResponsesMapsAnthropicToolUse(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/messages" {
@@ -591,12 +849,12 @@ func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode upstream err = %v", err)
 		}
-		if req.Model != "claude-example" || !req.Stream {
+		if req.Model != "upstream-claude" || !req.Stream {
 			t.Fatalf("upstream request = %+v", req)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		chunks := []string{
-			`event: message_start` + "\n" + `data: {"message":{"id":"msg-stream","model":"claude-example"}}`,
+			`event: message_start` + "\n" + `data: {"message":{"id":"msg-stream","model":"upstream-claude"}}`,
 			`event: content_block_delta` + "\n" + `data: {"delta":{"type":"text_delta","text":"he"}}`,
 			`event: content_block_delta` + "\n" + `data: {"delta":{"type":"text_delta","text":"llo"}}`,
 			`event: message_delta` + "\n" + `data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
@@ -610,12 +868,18 @@ func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	h, err := New(writeTestProviderConfig(t, upstream.URL, "anthropic_messages", "claude-example"))
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"anthropic_messages","models":[{"id":"public/claude","upstream_model":"upstream-claude"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(cfgPath)
 	if err != nil {
 		t.Fatalf("New err = %v", err)
 	}
 
-	body := strings.NewReader(`{"model":"claude-example","input":"Say hi","stream":true}`)
+	body := strings.NewReader(`{"model":"public/claude","input":"Say hi","stream":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -624,7 +888,7 @@ func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
 	got := rec.Body.String()
 	for _, want := range []string{
 		"event: response.created",
-		`"model":"claude-example"`,
+		`"model":"public/claude"`,
 		`"delta":"he"`,
 		`"delta":"llo"`,
 		"event: response.completed",
@@ -634,6 +898,9 @@ func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stream missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "upstream-claude") {
+		t.Fatalf("stream leaked upstream model id:\n%s", got)
 	}
 }
 
@@ -744,6 +1011,17 @@ func writeTestProviderConfig(t *testing.T, baseURL, apiFormat, model string) str
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "providers.json")
 	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + baseURL + `","api_format":"` + apiFormat + `","models":[{"id":"` + model + `"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
+}
+
+func writeTestProviderConfigWithRouting(t *testing.T, baseURL, apiFormat, model, routing string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + baseURL + `","api_format":"` + apiFormat + `","routing":{` + routing + `},"models":[{"id":"` + model + `"}]}]}`
 	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
 		t.Fatal(err)
 	}

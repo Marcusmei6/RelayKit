@@ -65,6 +65,9 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) models(w http.ResponseWriter, _ *http.Request) {
 	var data []map[string]any
 	for _, p := range s.config.Providers {
+		if !providerEnabled(p) {
+			continue
+		}
 		for _, m := range p.Models {
 			data = append(data, map[string]any{
 				"id":       m.ID,
@@ -97,7 +100,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", err.Error()))
 		return
 	}
-	provider, ok := s.providerForModel(req.Model)
+	provider, model, ok := s.providerForModel(req.Model)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "unknown model"))
 		return
@@ -108,7 +111,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamReq := upstreamRequest(provider.APIFormat, req.Model, messages, req.Stream)
+	upstreamReq := upstreamRequest(provider.APIFormat, upstreamModelName(model), messages, req.Stream)
 	payload, err := json.Marshal(upstreamReq)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", err.Error()))
@@ -126,8 +129,8 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if provider.AuthEnv != "" {
-		if token := os.Getenv(provider.AuthEnv); token != "" {
+	if authEnv := providerAuthEnv(provider); authEnv != "" {
+		if token := os.Getenv(authEnv); token != "" {
 			if provider.APIFormat == config.APIFormatAnthropicMessages {
 				httpReq.Header.Set("x-api-key", token)
 			} else {
@@ -138,17 +141,12 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", err.Error()))
+		writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", "upstream request failed"))
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if readErr != nil {
-			writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", readErr.Error()))
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", string(body)))
+		writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", fmt.Sprintf("upstream returned non-success status %d", resp.StatusCode)))
 		return
 	}
 
@@ -205,15 +203,39 @@ func upstreamRequest(apiFormat, model string, messages []chatMessage, stream boo
 	}
 }
 
-func (s *Server) providerForModel(model string) (config.ProviderProfile, bool) {
+func providerAuthEnv(provider config.ProviderProfile) string {
+	if provider.AuthEnv != "" {
+		return provider.AuthEnv
+	}
+	if provider.CredentialRef != nil && provider.CredentialRef.Kind == config.CredentialKindEnv {
+		return provider.CredentialRef.Value
+	}
+	return ""
+}
+
+func (s *Server) providerForModel(model string) (config.ProviderProfile, config.Model, bool) {
 	for _, p := range s.config.Providers {
+		if !providerEnabled(p) {
+			continue
+		}
 		for _, m := range p.Models {
 			if m.ID == model {
-				return p, true
+				return p, m, true
 			}
 		}
 	}
-	return config.ProviderProfile{}, false
+	return config.ProviderProfile{}, config.Model{}, false
+}
+
+func providerEnabled(provider config.ProviderProfile) bool {
+	return provider.Routing.Status != config.RoutingStatusDisabled
+}
+
+func upstreamModelName(model config.Model) string {
+	if model.UpstreamModel != "" {
+		return model.UpstreamModel
+	}
+	return model.ID
 }
 
 type responsesRequest struct {
@@ -466,20 +488,21 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 		}
 		if !created {
 			id = chunk.ID
-			if chunk.Model == "" {
-				chunk.Model = requestedModel
+			model := requestedModel
+			if model == "" {
+				model = chunk.Model
 			}
 			if !writeSSE(w, "response.created", map[string]any{
 				"type": "response.created",
 				"response": map[string]any{
 					"id":     responseID(chunk.ID),
 					"object": "response",
-					"model":  chunk.Model,
+					"model":  model,
 					"status": "in_progress",
 					"output": []map[string]any{},
 				},
 				"id":     responseID(chunk.ID),
-				"model":  chunk.Model,
+				"model":  model,
 				"status": "in_progress",
 			}) {
 				return streamResult{}
@@ -590,7 +613,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 		case "message_start":
 			model := requestedModel
 			if payload.Message != nil {
-				if payload.Message.Model != "" {
+				if model == "" && payload.Message.Model != "" {
 					model = payload.Message.Model
 				}
 				id = payload.Message.ID
@@ -667,9 +690,9 @@ type streamToolCall struct {
 }
 
 func responsesFromChat(chat chatResponse, requestedModel string) map[string]any {
-	model := chat.Model
+	model := requestedModel
 	if model == "" {
-		model = requestedModel
+		model = chat.Model
 	}
 	text := ""
 	status := "incomplete"
@@ -702,9 +725,9 @@ func responsesFromChat(chat chatResponse, requestedModel string) map[string]any 
 }
 
 func responsesFromAnthropic(msg anthropicResponse, requestedModel string) map[string]any {
-	model := msg.Model
+	model := requestedModel
 	if model == "" {
-		model = requestedModel
+		model = msg.Model
 	}
 	text := ""
 	output := []map[string]any{}

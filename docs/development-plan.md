@@ -195,6 +195,16 @@ Status: local P0 regression complete; remaining items require future schema, cre
 - Gateway OpenAI Chat streaming Responses events must stay compatible with Codex CLI: accept Responses input message parts, emit output item/content part lifecycle events before text deltas, and include Responses-shaped usage totals in `response.completed`.
 - Remaining non-P0 work: Claude Code adaptation, advanced provider capability schema/import, Keychain/key-file credential storage, signing/notarization/publishing, and real public provider presets.
 
+## Phase 7.5: Provider Credential and Capability Contract
+
+Status: public-safe contract implemented for env references and metadata validation; Keychain/key-file resolution remains deferred.
+
+- `docs/spec/provider-profile-contract.md` defines `credential_ref`, `capabilities`, `routing`, and model `upstream_model`.
+- Gateway config loading validates public-safe credential references and metadata, rejects secret-looking values, and still routes by explicit model id.
+- Runtime auth supports `credential_ref.kind = "env"` and legacy `auth_env`; `keychain` and `key_file` are accepted as contract-only metadata but are not read or injected.
+- The app provider form writes env references through `credential_ref`; it does not expose fake Keychain/key-file controls or manual capability toggles.
+- Remaining work that requires explicit selection: real Keychain storage, key-file reading, credential migration UI, public provider presets, and richer capability discovery/import.
+
 ## Task Ownership
 
 - `relaykit_planner` owns roadmap, dispatch, review/validation gates, release gates, and public boundary.

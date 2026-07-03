@@ -33,4 +33,4 @@ The summary command reads local JSONL only and emits day/provider/model aggregat
 
 ## Public Boundary
 
-Example configs must stay fake and public-safe. Provider credentials are read from environment variables named by `auth_env`; config files must never contain credential values.
+Example configs must stay fake and public-safe. Provider credentials are references only: legacy configs may use `auth_env`, and new configs may use `credential_ref.kind = "env"`. Config files must never contain credential values. `keychain` and `key_file` references are validated metadata until the credential storage milestone is explicitly selected.

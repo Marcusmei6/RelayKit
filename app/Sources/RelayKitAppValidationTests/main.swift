@@ -75,6 +75,9 @@ func expectProviderDraftWriter() throws {
           providers.count == 2,
           let added = providers.last,
           added["id"] as? String == "local-new",
+          let credentialRef = added["credential_ref"] as? [String: Any],
+          credentialRef["kind"] as? String == "env",
+          credentialRef["value"] as? String == "RELAYKIT_NEW_API_KEY",
           let models = added["models"] as? [[String: Any]],
           models.first?["id"] as? String == "new-coder" else {
         fatalError("provider draft writer did not append expected provider: \(json)")
@@ -101,9 +104,72 @@ func expectProviderDraftRejectsCredentialValue() {
     }
 }
 
+func expectCredentialRefContract() throws {
+    try expectValid("""
+    {
+      "providers": [
+        {
+          "id": "p",
+          "name": "Provider",
+          "base_url": "https://example.test/v1",
+          "api_format": "openai_chat",
+          "credential_ref": {
+            "kind": "env",
+            "value": "RELAYKIT_PROVIDER_TOKEN"
+          },
+          "models": [
+            {"id": "m"}
+          ]
+        }
+      ]
+    }
+    """)
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "api_key", "value": "RELAYKIT_PROVIDER_TOKEN"}"#), name: "unsupported credential ref kind")
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "env", "value": "sk-secret-value"}"#), name: "credential ref secret-looking value")
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "key_file", "value": "relative.key"}"#), name: "key file ref relative path")
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "env", "value": "TOKEN_\u00E9"}"#), name: "credential ref unicode env")
+}
+
+func expectCapabilityContract() throws {
+    try expectValid("""
+    {
+      "providers": [
+        {
+          "id": "p",
+          "name": "Provider",
+          "base_url": "https://example.test/v1",
+          "api_format": "openai_chat",
+          "capabilities": {
+            "streaming": true,
+            "tools": false,
+            "usage": true,
+            "reasoning": false
+          },
+          "routing": {
+            "source": "custom",
+            "model_prefix": "custom/",
+            "priority": 100,
+            "status": "enabled",
+            "visible": true
+          },
+          "models": [
+            {"id": "m", "upstream_model": "upstream-m"}
+          ]
+        }
+      ]
+    }
+    """)
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "capabilities": {"streaming": "yes"}"#), name: "capability non-bool")
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "capabilities": {"batch": true}"#), name: "capability unknown")
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "routing": {"source": "Private Source"}"#), name: "routing source unsafe")
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "routing": {"status": "pretend"}"#), name: "routing unsupported status")
+}
+
 try expectValid(validConfig)
 try expectProviderDraftWriter()
 expectProviderDraftRejectsCredentialValue()
+try expectCredentialRefContract()
+try expectCapabilityContract()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }

@@ -55,7 +55,10 @@ public enum ProviderConfigDraftWriter {
             "models": [model],
         ]
         if !clean(draft.authEnv).isEmpty {
-            provider["auth_env"] = clean(draft.authEnv)
+            provider["credential_ref"] = [
+                "kind": "env",
+                "value": clean(draft.authEnv),
+            ]
         }
 
         providers.append(provider)

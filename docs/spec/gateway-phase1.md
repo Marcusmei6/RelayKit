@@ -33,6 +33,8 @@ Optional provider field: `auth_env`. It names an environment variable and must n
 
 Required model fields: `id`. Optional model fields: `display_name`, `context_window`.
 
+Post-P0 public metadata such as `credential_ref`, `capabilities`, `routing`, and `upstream_model` is specified in `docs/spec/provider-profile-contract.md`. `auth_env` remains supported for existing configs; new app-created provider entries prefer `credential_ref.kind = "env"`.
+
 Validation rules:
 
 - reject empty `providers`;

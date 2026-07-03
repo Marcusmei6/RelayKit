@@ -11,3 +11,8 @@ app/DerivedData/
 app/.build/
 gateway/bin/
 data/
+.od-skills/
+critique.json
+relaykit-gateway-popover.html
+relaykit-gateway-popover.html.artifact.json
+mr*-image.png

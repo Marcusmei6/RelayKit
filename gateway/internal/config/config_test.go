@@ -168,3 +168,62 @@ func TestValidationAcceptsAnthropicMessagesFormat(t *testing.T) {
 		t.Fatalf("api_format = %q", cfg.Providers[0].APIFormat)
 	}
 }
+
+func TestValidationAcceptsPublicCredentialRefAndMetadata(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	body := `{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_PROVIDER_TOKEN"},"capabilities":{"streaming":true,"tools":false,"usage":true,"reasoning":false},"routing":{"source":"custom","model_prefix":"custom/","priority":100,"status":"enabled","visible":true},"models":[{"id":"m","upstream_model":"upstream-m"}]}]}`
+	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if cfg.Providers[0].CredentialRef == nil || cfg.Providers[0].CredentialRef.Kind != CredentialKindEnv || cfg.Providers[0].CredentialRef.Value != "RELAYKIT_PROVIDER_TOKEN" {
+		t.Fatalf("credential_ref = %+v", cfg.Providers[0].CredentialRef)
+	}
+	if !cfg.Providers[0].Capabilities.Streaming || !cfg.Providers[0].Capabilities.Usage {
+		t.Fatalf("capabilities = %+v", cfg.Providers[0].Capabilities)
+	}
+	if cfg.Providers[0].Routing.Source != "custom" || cfg.Providers[0].Routing.Status != RoutingStatusEnabled {
+		t.Fatalf("routing = %+v", cfg.Providers[0].Routing)
+	}
+	if cfg.Providers[0].Models[0].UpstreamModel != "upstream-m" {
+		t.Fatalf("upstream_model = %q", cfg.Providers[0].Models[0].UpstreamModel)
+	}
+}
+
+func TestValidationRejectsUnsafeCredentialRefAndMetadata(t *testing.T) {
+	cases := map[string]struct {
+		body string
+		code string
+	}{
+		"unsupported credential kind": {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"api_key","value":"RELAYKIT_PROVIDER_TOKEN"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"secret looking env ref":      {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"sk-secret-value"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"relative key file":           {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"key_file","value":"relative.key"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"capability non bool":         {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"streaming":"yes"},"models":[{"id":"m"}]}]}`, CodeParseError},
+		"unknown capability":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"batch":true},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"unsafe source":               {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","routing":{"source":"Private Source"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"unsupported status":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","routing":{"status":"pretend"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"credential key":              {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","api_key":"abc","models":[{"id":"m"}]}]}`, CodeValidationError},
+		"credential marker value":     {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","models":[{"id":"m","display_name":"api_key=abc"}]}]}`, CodeValidationError},
+		"unicode env name":            {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"TOKEN_é"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := filepath.Join(dir, "c.json")
+			if err := os.WriteFile(p, []byte(tc.body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(p)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if ec := err.(*Error); ec.Code != tc.code {
+				t.Fatalf("code = %q, want %q", ec.Code, tc.code)
+			}
+		})
+	}
+}
