@@ -189,13 +189,14 @@ Status: local P0 regression complete; remaining items require future schema, cre
 - `Usage` reads real local usage summaries only; empty state is allowed, mock cards are not.
 - `设置` may show only settings wired to real state; unfinished settings stay hidden or disabled.
 - Provider/model add uses a form sheet that writes the current public provider schema. JSON editing remains a fallback, not the primary P0 path.
-- Provider form P0 persists provider id/name, base URL, API format, auth env reference, model id/display name, and context window. Streaming/tools/reasoning/priority/health metadata remain gateway-discovered or future schema work.
+- Provider form P0 persists provider id/name, source/prefix routing metadata, base/catalog URLs, API format, credential reference, model mapping, context window, and safe capability/priority metadata.
 - Credentials are references only: env var, Keychain item name, or key-file reference. Never store or display credential values.
 - P0 regression includes screenshot evidence under `dist/ui-smoke/`, redacted reference model coverage under `dist/reference-model-coverage.json`, and a temporary Codex E2E smoke under `dist/codex-e2e/` that never writes real `~/.codex/config.toml`.
 - Replay/Kaboo-style UI conformance repair keeps the status item compact and visible, opens an anchored popover, moves global gateway/Codex state into the header across tabs, makes `Usage` KPI/card-first with real local data or a real empty state, and presents `设置` as real action cards with raw paths behind Advanced controls.
 - Normal LaunchServices launch is covered by the local bundle contract: `CFBundleExecutable` points at the real Mach-O `RelayKitApp.bin`, while the shell wrapper remains only as a manual compatibility entry point.
 - `设置` includes real persisted Appearance (`System` / `Light` / `Dark`) and a real macOS Launch at login row backed by `SMAppService`; the switch is refreshed from macOS status, and local unsigned login-item failures are reported as macOS status/error instead of fake success.
 - Menu-bar UI smoke now writes screenshot plus evidence JSON under `dist/ui-smoke/` and verifies `open -n dist/RelayKitApp.app --args ...`, compact status-item visibility, anchored popover state, semantic tab sections, Settings state, Light appearance persistence, provider modal capture, and stale RelayKit-owned process cleanup.
+- Connect now treats the running local `agent-local-gateway` reference service as read-only catalog input, groups discovered models by public source/owner, records only redacted source/model counts in smoke evidence, and keeps execution auth state explicit instead of listing private model IDs as configured RelayKit routes.
 - Gateway OpenAI Chat streaming Responses events must stay compatible with Codex CLI: accept Responses input message parts, emit output item/content part lifecycle events before text deltas, and include Responses-shaped usage totals in `response.completed`.
 - Remaining non-P0 work: Claude Code adaptation, advanced provider capability schema/import, Keychain/key-file credential storage, signing/notarization/publishing, and real public provider presets.
 
@@ -203,10 +204,10 @@ Status: local P0 regression complete; remaining items require future schema, cre
 
 Status: public-safe contract implemented for env references and metadata validation; Keychain/key-file resolution remains deferred.
 
-- `docs/spec/provider-profile-contract.md` defines `credential_ref`, `capabilities`, `routing`, and model `upstream_model`.
-- Gateway config loading validates public-safe credential references and metadata, rejects secret-looking values, and still routes by explicit model id.
+- `docs/spec/provider-profile-contract.md` defines `credential_ref`, `capabilities`, `routing`, `catalog`, and model `upstream_model`.
+- Gateway config loading validates public-safe credential references and metadata, rejects secret-looking values, requires catalog model URLs to be http(s) URLs without credentials/query/fragment, and still routes by explicit model id.
 - Runtime auth supports `credential_ref.kind = "env"` and legacy `auth_env`; `keychain` and `key_file` are accepted as contract-only metadata but are not read or injected.
-- The app provider form writes env references through `credential_ref`; it does not expose fake Keychain/key-file controls or manual capability toggles.
+- The app provider form writes source/prefix/protocol/base/catalog/model-mapping metadata and credential references through `credential_ref`; Keychain/key-file references remain auth-blocked metadata until explicit credential storage is selected.
 - Remaining work that requires explicit selection: real Keychain storage, key-file reading, credential migration UI, public provider presets, and richer capability discovery/import.
 
 ## Task Ownership

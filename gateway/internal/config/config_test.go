@@ -172,7 +172,7 @@ func TestValidationAcceptsAnthropicMessagesFormat(t *testing.T) {
 func TestValidationAcceptsPublicCredentialRefAndMetadata(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
-	body := `{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_PROVIDER_TOKEN"},"capabilities":{"streaming":true,"tools":false,"usage":true,"reasoning":false},"routing":{"source":"custom","model_prefix":"custom/","priority":100,"status":"enabled","visible":true},"models":[{"id":"m","upstream_model":"upstream-m"}]}]}`
+	body := `{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_PROVIDER_TOKEN"},"capabilities":{"streaming":true,"tools":false,"usage":true,"reasoning":false},"routing":{"source":"custom","model_prefix":"custom/","priority":100,"status":"enabled","visible":true},"catalog":{"models_url":"https://example.test/v1/models","key_header":"Authorization"},"models":[{"id":"m","upstream_model":"upstream-m"}]}]}`
 	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +192,9 @@ func TestValidationAcceptsPublicCredentialRefAndMetadata(t *testing.T) {
 	if cfg.Providers[0].Models[0].UpstreamModel != "upstream-m" {
 		t.Fatalf("upstream_model = %q", cfg.Providers[0].Models[0].UpstreamModel)
 	}
+	if cfg.Providers[0].Catalog.ModelsURL != "https://example.test/v1/models" || cfg.Providers[0].Catalog.KeyHeader != "Authorization" {
+		t.Fatalf("catalog = %+v", cfg.Providers[0].Catalog)
+	}
 }
 
 func TestValidationRejectsUnsafeCredentialRefAndMetadata(t *testing.T) {
@@ -206,6 +209,8 @@ func TestValidationRejectsUnsafeCredentialRefAndMetadata(t *testing.T) {
 		"unknown capability":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"batch":true},"models":[{"id":"m"}]}]}`, CodeValidationError},
 		"unsafe source":               {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","routing":{"source":"Private Source"},"models":[{"id":"m"}]}]}`, CodeValidationError},
 		"unsupported status":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","routing":{"status":"pretend"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"catalog query":               {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","catalog":{"models_url":"https://example.test/v1/models?token=abc"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"catalog unsupported scheme":  {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","catalog":{"models_url":"ftp://example.test/models"},"models":[{"id":"m"}]}]}`, CodeValidationError},
 		"credential key":              {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","api_key":"abc","models":[{"id":"m"}]}]}`, CodeValidationError},
 		"credential marker value":     {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","models":[{"id":"m","display_name":"api_key=abc"}]}]}`, CodeValidationError},
 		"unicode env name":            {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"TOKEN_é"},"models":[{"id":"m"}]}]}`, CodeValidationError},

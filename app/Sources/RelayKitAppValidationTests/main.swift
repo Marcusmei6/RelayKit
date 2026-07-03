@@ -84,6 +84,55 @@ func expectProviderDraftWriter() throws {
     }
 }
 
+func expectProviderDraftWriterWithPrototypeMetadata() throws {
+    let draft = ProviderConfigDraft(
+        providerId: "local-bridge",
+        providerName: "Local Bridge",
+        baseURL: "http://127.0.0.1:18787/v1",
+        apiFormat: "openai_chat",
+        authEnv: "",
+        modelId: "bridge/coder",
+        modelDisplayName: "Bridge Coder",
+        contextWindow: 128000,
+        source: "local-bridge",
+        modelPrefix: "bridge/",
+        modelsURL: "http://127.0.0.1:18787/v1/models",
+        credentialKind: "key_file",
+        credentialReference: "~/Library/Application Support/RelayKit/bridge.key",
+        keyHeader: "Authorization",
+        upstreamModel: "upstream-coder",
+        streaming: true,
+        tools: false,
+        usage: true,
+        reasoning: true,
+        priority: 50,
+        visible: true
+    )
+    let data = try ProviderConfigDraftWriter.addProvider(draft, to: Data(validConfig.utf8))
+    let json = try JSONSerialization.jsonObject(with: data)
+    try ProviderConfigValidator.validate(json)
+    guard let root = json as? [String: Any],
+          let providers = root["providers"] as? [[String: Any]],
+          let added = providers.last,
+          let credentialRef = added["credential_ref"] as? [String: Any],
+          credentialRef["kind"] as? String == "key_file",
+          let metadata = added["catalog"] as? [String: Any],
+          metadata["models_url"] as? String == "http://127.0.0.1:18787/v1/models",
+          metadata["key_header"] as? String == "Authorization",
+          let capabilities = added["capabilities"] as? [String: Any],
+          capabilities["reasoning"] as? Bool == true,
+          let routing = added["routing"] as? [String: Any],
+          routing["source"] as? String == "local-bridge",
+          routing["model_prefix"] as? String == "bridge/",
+          routing["priority"] as? Int == 50,
+          routing["status"] as? String == "disabled",
+          routing["visible"] as? Bool == false,
+          let models = added["models"] as? [[String: Any]],
+          models.first?["upstream_model"] as? String == "upstream-coder" else {
+        fatalError("provider draft writer did not include prototype metadata: \(json)")
+    }
+}
+
 func expectProviderDraftRejectsCredentialValue() {
     let draft = ProviderConfigDraft(
         providerId: "local-new",
@@ -101,6 +150,31 @@ func expectProviderDraftRejectsCredentialValue() {
     } catch ProviderConfigError.invalid {
     } catch {
         fatalError("provider draft credential value failed with unexpected error: \(error)")
+    }
+}
+
+func expectLocalCatalogSummary() throws {
+    let body = """
+    {
+      "data": [
+        {"id": "private-a", "owned_by": "official", "context_window": 128000},
+        {"id": "private-b", "source": "official"},
+        {"id": "private-c", "owned_by": "neeko", "display_name": "Private C"}
+      ]
+    }
+    """
+    let summary = try LocalModelCatalog.decode(Data(body.utf8))
+    if summary.modelCount != 3 {
+        fatalError("catalog model count = \(summary.modelCount)")
+    }
+    if summary.sourceGroups.map(\.source) != ["neeko", "official"] {
+        fatalError("catalog groups = \(summary.sourceGroups)")
+    }
+    if summary.sourceGroups.map(\.publicLabel) != ["source-1", "source-2"] {
+        fatalError("catalog public labels must not expose source names: \(summary.sourceGroups)")
+    }
+    if summary.redactedEvidence["model_ids_redacted"] as? Bool != true {
+        fatalError("catalog evidence must redact model ids: \(summary.redactedEvidence)")
     }
 }
 
@@ -194,7 +268,9 @@ func expectAppSettingsPersistence() {
 
 try expectValid(validConfig)
 try expectProviderDraftWriter()
+try expectProviderDraftWriterWithPrototypeMetadata()
 expectProviderDraftRejectsCredentialValue()
+try expectLocalCatalogSummary()
 try expectCredentialRefContract()
 try expectCapabilityContract()
 expectAppSettingsPersistence()

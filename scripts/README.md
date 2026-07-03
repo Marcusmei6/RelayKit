@@ -40,4 +40,4 @@ The package script builds the local app bundle, writes `dist/RelayKitApp-local.z
 ./scripts/menu-bar-e2e-smoke.sh
 ```
 
-The UI smoke launches `dist/RelayKitApp.app` through LaunchServices, captures the menu-bar popover and provider sheet under `dist/ui-smoke/`, verifies Settings state including Light appearance persistence, and cleans up RelayKit-owned app/helper processes.
+The UI smoke launches `dist/RelayKitApp.app` through LaunchServices, captures the menu-bar popover and provider sheet under `dist/ui-smoke/`, verifies redacted local catalog/source grouping, Settings state including Light appearance persistence, provider modal fields, and cleans up RelayKit-owned app/helper processes.

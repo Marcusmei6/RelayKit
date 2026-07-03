@@ -40,12 +40,13 @@ The bundled app starts its bundled `relay` helper. A direct SwiftPM run falls ba
 - live in the menu bar and open a compact popover/control-center;
 - show gateway status;
 - call `/healthz`;
-- call `/v1/models` and list model IDs;
+- call `/v1/models` and show redacted local catalog/source grouping;
 - activate Codex config through the gateway CLI with explicit `-source` and `-target` paths.
 - remember the last provider config path locally with `UserDefaults`.
 - persist Appearance (`System`, `Light`, `Dark`) and refresh Launch at login from macOS `SMAppService` status.
 - show local usage summaries from an explicit JSONL path.
 - load and save explicit provider config JSON after local validation and backup.
+- add provider metadata through a form that stores routing/catalog/capability fields and credential references only.
 
 ## Smoke
 
@@ -57,8 +58,8 @@ From the repository root:
 ./scripts/codex-e2e-smoke.sh
 ```
 
-The smoke also checks explicit Codex config activation, local usage summary, temporary LaunchAgent install/status/health/logs/uninstall, bundled app gateway startup, and `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base URLs with userinfo, query strings, or fragments.
-The menu-bar smoke launches the packaged app through LaunchServices in UI-smoke mode and captures `接入`, `Usage`, `设置`, Light Settings, and provider sheet screenshots under `dist/ui-smoke/`.
+The smoke also checks explicit Codex config activation, local usage summary, temporary LaunchAgent install/status/health/logs/uninstall, bundled app gateway startup, and `swift run RelayKitAppValidationTests`, which checks provider config validation rejects credential fields and base/catalog URLs with userinfo, query strings, fragments, or unsupported catalog schemes.
+The menu-bar smoke launches the packaged app through LaunchServices in UI-smoke mode and captures `接入`, `Usage`, `设置`, Light Settings, and provider sheet screenshots under `dist/ui-smoke/`. Connect evidence records only redacted catalog/source counts, not raw model IDs.
 The Codex E2E smoke uses only temporary `CODEX_HOME` and `HOME` directories, points Codex at the RelayKit loopback gateway, and writes redacted evidence under `dist/codex-e2e/`.
 
 ## Local Release Package
@@ -91,5 +92,5 @@ The script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requ
 ## Not In This Slice
 
 - Keychain credential storage;
-- provider credential editing;
+- executable Keychain/key-file credential resolution;
 - signing, notarization, or public distribution.

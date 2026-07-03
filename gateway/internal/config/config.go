@@ -52,6 +52,7 @@ type ProviderProfile struct {
 	CredentialRef *CredentialRef `json:"credential_ref,omitempty"`
 	Capabilities  Capabilities   `json:"capabilities,omitempty"`
 	Routing       Routing        `json:"routing,omitempty"`
+	Catalog       Catalog        `json:"catalog,omitempty"`
 	Models        []Model        `json:"models"`
 }
 
@@ -73,6 +74,11 @@ type Routing struct {
 	Priority    int    `json:"priority,omitempty"`
 	Status      string `json:"status,omitempty"`
 	Visible     bool   `json:"visible,omitempty"`
+}
+
+type Catalog struct {
+	ModelsURL string `json:"models_url,omitempty"`
+	KeyHeader string `json:"key_header,omitempty"`
 }
 
 type Model struct {
@@ -133,6 +139,9 @@ func validate(cfg Config) error {
 		if err := validateRouting(p.Routing); err != nil {
 			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid routing for provider %q: %w", p.ID, err)}
 		}
+		if err := validateCatalog(p.Catalog); err != nil {
+			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid catalog for provider %q: %w", p.ID, err)}
+		}
 		for _, m := range p.Models {
 			if m.ID == "" {
 				return &Error{Code: CodeValidationError, Err: fmt.Errorf("model id required for provider %q", p.ID)}
@@ -141,6 +150,22 @@ func validate(cfg Config) error {
 				return &Error{Code: CodeValidationError, Err: fmt.Errorf("upstream_model must not contain credential-looking values for provider %q", p.ID)}
 			}
 		}
+	}
+	return nil
+}
+
+func validateCatalog(c Catalog) error {
+	if c.ModelsURL != "" {
+		u, err := url.Parse(c.ModelsURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("models_url must be an http(s) URL")
+		}
+		if err := validateBaseURL(c.ModelsURL); err != nil {
+			return fmt.Errorf("models_url: %w", err)
+		}
+	}
+	if c.KeyHeader != "" && !isSafeReferenceName(c.KeyHeader) {
+		return fmt.Errorf("key_header must be a safe header reference")
 	}
 	return nil
 }

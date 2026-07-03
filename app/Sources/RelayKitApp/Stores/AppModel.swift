@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
     @Published var codexConnectionStatus = "target not set"
     @Published var gatewayStatus = "stopped"
     @Published var models: [RelayModel] = []
+    @Published var localCatalog: LocalModelCatalog?
+    @Published var localCatalogStatus = "not scanned"
+    @Published var localCatalogAuthState = "credential reference needed"
     @Published var usageSummaries: [UsageSummary] = []
     @Published var providerConfigText = ""
     @Published var message = ""
@@ -37,6 +40,7 @@ final class AppModel: ObservableObject {
 
     private let gateway = GatewayProcess()
     private let client = GatewayClient()
+    private let catalogClient = LocalCatalogClient()
     private let settingsStore = AppSettingsStore()
     private let loginItemService = LoginItemService()
 
@@ -87,6 +91,22 @@ final class AppModel: ObservableObject {
             models = try await client.models()
             message = "Loaded \(models.count) model(s)"
         } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    func refreshLocalCatalog() async {
+        do {
+            localCatalog = try await catalogClient.catalog()
+            let modelCount = localCatalog?.modelCount ?? 0
+            let sourceCount = localCatalog?.sourceGroups.count ?? 0
+            localCatalogStatus = "catalog available: \(modelCount) model(s), \(sourceCount) source(s)"
+            localCatalogAuthState = "auth required for execution"
+            message = "Loaded local catalog from agent-local-gateway"
+        } catch {
+            localCatalog = nil
+            localCatalogStatus = "agent-local-gateway unavailable"
+            localCatalogAuthState = "catalog unavailable"
             message = error.localizedDescription
         }
     }

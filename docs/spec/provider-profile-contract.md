@@ -75,6 +75,27 @@ Rules:
 
 Routing metadata does not replace explicit model IDs in `models`. The gateway still routes by configured model ID.
 
+## Catalog Metadata
+
+`catalog` is optional public metadata for read-only model discovery:
+
+```json
+{
+  "catalog": {
+    "models_url": "https://example.test/v1/models",
+    "key_header": "Authorization"
+  }
+}
+```
+
+Rules:
+
+- `models_url` must be an absolute `http` or `https` URL.
+- `models_url` must not contain user info, query strings, or fragments.
+- `key_header` is a safe header reference only. It is not a credential value and must not include bearer prefixes, API keys, or token material.
+
+Catalog metadata tells RelayKit where a provider's public model list can be discovered. It does not authorize execution by itself.
+
 ## Model Metadata
 
 Each model may optionally include `upstream_model`:
@@ -95,10 +116,12 @@ When `upstream_model` is present, RelayKit routes by the public `id` but sends `
 The provider add sheet persists only fields that are implemented honestly today:
 
 - provider id and name;
+- public source and display prefix routing metadata;
 - base URL;
 - API format;
-- env credential reference as `credential_ref`;
-- model id and display name;
-- context window.
+- credential reference as `credential_ref`;
+- catalog models URL and key-header reference metadata;
+- model id, display name, upstream model, and context window;
+- boolean capability metadata and route visibility/priority.
 
-Keychain/key-file references and manual capability toggles remain hidden or contract-only until product/security decisions select them explicitly.
+Env credential references are executable today. Keychain/key-file references remain validated metadata and auth-blocked until product/security decisions select real credential storage or key-file reading.

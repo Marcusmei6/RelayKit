@@ -46,10 +46,10 @@ capture() {
   fi
   test -s "${evidence}"
   case "${name}" in
-    connect) required='["tab-connect","cli-route","model-list"]' ;;
+    connect) required='["tab-connect","cli-route","local-cli-scan","model-list","local-catalog","auth-blocked-state"]' ;;
     usage) required='["tab-usage","usage-kpis","usage-rows"]' ;;
     settings|settings-light) required='["tab-settings","appearance-control","launch-login-control","settings-actions","advanced-paths"]' ;;
-    provider) required='["tab-provider","provider-modal","credential-reference-form"]' ;;
+    provider) required='["tab-provider","provider-modal","credential-reference-form","provider-source-field","provider-prefix-field","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
     *) required='[]' ;;
   esac
   jq -e --argjson required "${required}" '
@@ -62,9 +62,18 @@ capture() {
     ($doc.settings.appearance_mode | test("^(system|light|dark)$")) and
     ($doc.settings.launch_at_login_requested | type == "boolean") and
     ($doc.settings.launch_at_login_status | type == "string") and
+    ($doc.connect.model_ids_redacted == true) and
+    ($doc.connect.demo_model_rows_present == false) and
     ($doc.surface.sections | index("global-status")) and
     (all($required[]; . as $section | ($doc.surface.sections | index($section))))
   ' "${evidence}" >/dev/null
+  if [[ "${name}" == "connect" ]]; then
+    jq -e '
+      .connect.catalog_model_count > 0 and
+      .connect.catalog_source_group_count > 0 and
+      (.connect.auth_state | test("auth required|credential reference needed"))
+    ' "${evidence}" >/dev/null
+  fi
   /usr/sbin/screencapture -x "${OUT}/${name}.png"
   test -s "${OUT}/${name}.png"
   kill "${PID}" >/dev/null 2>&1 || true

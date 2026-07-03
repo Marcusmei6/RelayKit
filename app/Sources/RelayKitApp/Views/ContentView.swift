@@ -49,9 +49,12 @@ struct ContentView: View {
                 Color.black.opacity(0.45)
                     .ignoresSafeArea()
                     .onTapGesture { showingProviderForm = false }
-                ProviderFormView {
-                    showingProviderForm = false
-                }
+                ProviderFormView(
+                    onClose: {
+                        showingProviderForm = false
+                    },
+                    smokeSectionRecorder: smokeSectionRecorder
+                )
                 .environmentObject(model)
                 .smokeSection("tab-provider", recorder: smokeSectionRecorder)
                 .smokeSection("provider-modal", recorder: smokeSectionRecorder)
@@ -61,6 +64,9 @@ struct ContentView: View {
         }
         .foregroundStyle(primaryText)
         .preferredColorScheme(preferredColorScheme)
+        .task {
+            await model.refreshLocalCatalog()
+        }
     }
 
     private var header: some View {
@@ -95,7 +101,7 @@ struct ContentView: View {
                 statusPill
                 HStack(spacing: 8) {
                     headerMetric("Port", "19777")
-                    headerMetric("Models", "\(model.models.count)")
+                    headerMetric("Models", "\(model.localCatalog?.modelCount ?? 0)")
                     headerMetric("Codex", model.codexConnectionIsConfigured ? "on" : "setup")
                 }
             }
@@ -171,15 +177,18 @@ struct ContentView: View {
             SectionCard {
                 HStack(alignment: .top, spacing: 14) {
                     VStack(alignment: .leading, spacing: 7) {
-                        sectionEyebrow("CLI ROUTE")
-                        Text("选择本机 CLI 后管理模型接入")
+                        sectionEyebrow("LOCAL CLI")
+                        Text("本机 CLI")
                             .font(.headline)
-                        Text("Codex 是当前 P0 真实目标；Claude Code 保持未来占位。")
+                        Text(model.localCatalogStatus)
                             .font(.caption)
                             .foregroundStyle(secondaryText)
                     }
                     Spacer()
-                    gatewayControls
+                    Button("重扫") {
+                        Task { await model.refreshLocalCatalog() }
+                    }
+                    .buttonStyle(ControlButtonStyle())
                 }
 
                 HStack(spacing: 12) {
@@ -195,13 +204,17 @@ struct ContentView: View {
             }
             .smokeSection("tab-connect", recorder: smokeSectionRecorder)
             .smokeSection("cli-route", recorder: smokeSectionRecorder)
+            .smokeSection("local-cli-scan", recorder: smokeSectionRecorder)
 
             SectionCard {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
-                        sectionEyebrow("MODELS")
-                        Text("Codex 已接入模型")
+                        sectionEyebrow("LOCAL CATALOG")
+                        Text("Codex 可发现上游")
                             .font(.headline)
+                        Text("执行状态：\(model.localCatalogAuthState)")
+                            .font(.caption)
+                            .foregroundStyle(secondaryText)
                     }
                     Spacer()
                     Button {
@@ -214,6 +227,8 @@ struct ContentView: View {
                 modelList
             }
             .smokeSection("model-list", recorder: smokeSectionRecorder)
+            .smokeSection("local-catalog", recorder: smokeSectionRecorder)
+            .smokeSection("auth-blocked-state", recorder: smokeSectionRecorder)
         }
     }
 
@@ -261,36 +276,36 @@ struct ContentView: View {
 
     private var modelList: some View {
         VStack(spacing: 8) {
-            if model.models.isEmpty {
-                EmptyProductState(
-                    title: "No models loaded",
-                    message: "Start gateway, then refresh models.",
-                    icon: "tray"
-                )
-                .frame(maxWidth: .infinity, minHeight: 150)
-            } else {
-                ForEach(model.models) { item in
+            if let catalog = model.localCatalog, !catalog.sourceGroups.isEmpty {
+                ForEach(catalog.sourceGroups, id: \.source) { group in
                     HStack(spacing: 12) {
-                        Image(systemName: "cpu")
+                        Image(systemName: "server.rack")
                             .foregroundStyle(Color(hex: 0x78D8FF))
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(item.id)
+                            Text(group.publicLabel)
                                 .font(.subheadline.weight(.semibold))
                                 .lineLimit(1)
-                            Text(item.ownedBy)
+                            Text("\(group.count) discovered model(s)")
                                 .font(.caption)
                                 .foregroundStyle(secondaryText)
                                 .lineLimit(1)
                         }
                         Spacer()
-                        Text("LOCAL")
+                        Text("AUTH REQUIRED")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(secondaryText)
+                            .foregroundStyle(Color(hex: 0xFFD685))
                     }
                     .padding(12)
                     .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(borderColor))
                 }
+            } else {
+                EmptyProductState(
+                    title: "No local catalog",
+                    message: "agent-local-gateway discovery is unavailable or returned no models.",
+                    icon: "magnifyingglass"
+                )
+                .frame(maxWidth: .infinity, minHeight: 150)
             }
         }
     }
@@ -716,14 +731,18 @@ enum Tab: String, CaseIterable, Identifiable {
 private struct ProviderFormView: View {
     @EnvironmentObject private var model: AppModel
     let onClose: () -> Void
+    let smokeSectionRecorder: ((String) -> Void)?
     @State private var providerId = ""
-    @State private var providerName = ""
-    @State private var modelId = ""
-    @State private var modelDisplayName = ""
+    @State private var source = "custom"
+    @State private var displayPrefix = "custom/"
     @State private var apiFormat = "openai_chat"
     @State private var baseURL = ""
-    @State private var contextWindow = "128000"
-    @State private var authReference = ""
+    @State private var modelsURL = ""
+    @State private var credentialKind = "env"
+    @State private var credentialReference = ""
+    @State private var keyHeader = "Authorization"
+    @State private var modelMapping = ""
+    @State private var contextWindow = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -731,7 +750,7 @@ private struct ProviderFormView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("新增模型接入")
                         .font(.title2.weight(.semibold))
-                    Text("Store credential references, never secret values.")
+                    Text("Store credential references and routing metadata, never secret values.")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.56))
                 }
@@ -745,17 +764,27 @@ private struct ProviderFormView: View {
             }
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                field("Provider ID", $providerId, "local-openai-compatible")
-                field("Provider name", $providerName, "Local OpenAI Compatible")
-                field("Model ID", $modelId, "local/coder-fast")
-                field("Display name", $modelDisplayName, "Coder Fast")
-                field("API format", $apiFormat, "openai_chat")
-                field("Base URL", $baseURL, "http://127.0.0.1:11434/v1")
+                field("Provider ID", $providerId, "local-bridge")
+                field("Source", $source, "custom")
+                field("Display prefix", $displayPrefix, "custom/")
+                field("Protocol", $apiFormat, "openai_chat")
+                field("Base URL", $baseURL, "https://api.example.com/v1")
+                field("Models URL", $modelsURL, "optional /v1/models URL")
+                field("Credential mode", $credentialKind, "env | keychain | key_file")
+                field("Credential ref", $credentialReference, "RELAYKIT_PROVIDER_TOKEN")
+                field("Key header", $keyHeader, "Authorization")
                 field("Context window", $contextWindow, "128000")
-                field("Auth env ref", $authReference, "RELAYKIT_EXAMPLE_API_KEY")
             }
 
-            Text("Capabilities and priority stay gateway-discovered or future schema work.")
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Model mapping")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.52))
+                TextField("public/model -> upstream-model", text: $modelMapping)
+                    .textFieldStyle(ProductTextFieldStyle())
+            }
+
+            Text("Catalog discovery is read-only. Keychain/key-file credential refs remain auth-blocked until credential storage is selected.")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.48))
 
@@ -782,6 +811,12 @@ private struct ProviderFormView: View {
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
         .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
         .preferredColorScheme(.dark)
+        .smokeSection("provider-source-field", recorder: smokeSectionRecorder)
+        .smokeSection("provider-prefix-field", recorder: smokeSectionRecorder)
+        .smokeSection("provider-protocol-field", recorder: smokeSectionRecorder)
+        .smokeSection("provider-base-url-field", recorder: smokeSectionRecorder)
+        .smokeSection("provider-models-url-field", recorder: smokeSectionRecorder)
+        .smokeSection("provider-model-mapping-field", recorder: smokeSectionRecorder)
     }
 
     private func field(_ label: String, _ value: Binding<String>, _ prompt: String) -> some View {
@@ -795,40 +830,87 @@ private struct ProviderFormView: View {
     }
 
     private var validationMessage: String {
-        if providerId.isEmpty || modelId.isEmpty || apiFormat.isEmpty || baseURL.isEmpty {
-            return "Provider ID, model ID, API format, and base URL are required."
+        let parsed = parsedMapping
+        if providerId.isEmpty || source.isEmpty || displayPrefix.isEmpty || parsed.publicModel.isEmpty || apiFormat.isEmpty || baseURL.isEmpty {
+            return "Provider ID, source, prefix, model mapping, protocol, and base URL are required."
+        }
+        if !displayPrefix.hasSuffix("/") {
+            return "Display prefix must end with /."
         }
         if !contextWindow.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Int(contextWindow) == nil {
             return "Context window must be a number."
         }
-        let lowerAuth = authReference.lowercased()
+        let lowerAuth = credentialReference.lowercased()
         let credentialMarkers = ["bearer ", "sk-", "api_key=", "token=", "access_token=", "refresh_token=", "password=", "secret=", "authorization="]
         if credentialMarkers.contains(where: lowerAuth.contains) {
-            return "Credential values are not allowed; use an environment variable name."
+            return "Credential values are not allowed; use a reference."
+        }
+        if credentialKind == "env" && !credentialReference.isEmpty && !isEnvReference(credentialReference) {
+            return "Env credential refs must be environment variable names."
+        }
+        if credentialKind == "key_file" && !credentialReference.isEmpty &&
+            !credentialReference.hasPrefix("~/") && !credentialReference.hasPrefix("/") {
+            return "Key-file refs must be absolute or home-relative paths."
+        }
+        if credentialKind != "env" && credentialKind != "keychain" && credentialKind != "key_file" {
+            return "Credential mode must be env, keychain, or key_file."
         }
         do {
             _ = try ProviderConfigDraftWriter.addProvider(draft, to: Data(#"{"providers":[]}"#.utf8))
         } catch {
             return error.localizedDescription
         }
+        if credentialKind != "env" && !credentialReference.isEmpty {
+            return "Ready to save provider metadata; route stays disabled until credential storage is selected."
+        }
         return "Ready to save provider metadata."
     }
 
     private var canSave: Bool {
-        validationMessage == "Ready to save provider metadata."
+        validationMessage.hasPrefix("Ready to save provider metadata")
     }
 
     private var draft: ProviderConfigDraft {
-        ProviderConfigDraft(
+        let parsed = parsedMapping
+        return ProviderConfigDraft(
             providerId: providerId,
-            providerName: providerName.isEmpty ? providerId : providerName,
+            providerName: providerId,
             baseURL: baseURL,
             apiFormat: apiFormat,
-            authEnv: authReference,
-            modelId: modelId,
-            modelDisplayName: modelDisplayName,
-            contextWindow: Int(contextWindow)
+            authEnv: credentialKind == "env" ? credentialReference : "",
+            modelId: parsed.publicModel,
+            modelDisplayName: parsed.publicModel,
+            contextWindow: Int(contextWindow),
+            source: source,
+            modelPrefix: displayPrefix,
+            modelsURL: modelsURL,
+            credentialKind: credentialKind,
+            credentialReference: credentialReference,
+            keyHeader: keyHeader,
+            upstreamModel: parsed.upstreamModel,
+            streaming: true,
+            tools: false,
+            usage: true,
+            reasoning: true,
+            priority: 100,
+            visible: true
         )
+    }
+
+    private var parsedMapping: (publicModel: String, upstreamModel: String) {
+        let cleaned = modelMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            return ("", "")
+        }
+        let parts = cleaned.components(separatedBy: "->")
+        let publicModel = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        let upstreamModel = parts.dropFirst().joined(separator: "->").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (publicModel, upstreamModel)
+    }
+
+    private func isEnvReference(_ value: String) -> Bool {
+        let pattern = #"^[A-Za-z_][A-Za-z0-9_]*$"#
+        return value.range(of: pattern, options: .regularExpression) != nil
     }
 }
 

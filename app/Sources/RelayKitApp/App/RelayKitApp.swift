@@ -50,7 +50,11 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
                 self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApplication.shared.activate()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                    self?.writeSmokeEvidence()
+                    guard let self else { return }
+                    Task { @MainActor in
+                        await self.model.refreshLocalCatalog()
+                        self.writeSmokeEvidence()
+                    }
                 }
             }
         }
@@ -103,6 +107,14 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
                 "appearance_mode": model.appearanceMode.rawValue,
                 "launch_at_login_requested": model.launchAtLoginRequested,
                 "launch_at_login_status": model.launchAtLoginStatus,
+            ],
+            "connect": [
+                "catalog_model_count": model.localCatalog?.modelCount ?? 0,
+                "catalog_source_group_count": model.localCatalog?.sourceGroups.count ?? 0,
+                "catalog_status": model.localCatalogStatus,
+                "auth_state": model.localCatalogAuthState,
+                "model_ids_redacted": true,
+                "demo_model_rows_present": false,
             ],
         ]
         do {

@@ -9,6 +9,19 @@ public struct ProviderConfigDraft {
     public let modelId: String
     public let modelDisplayName: String
     public let contextWindow: Int?
+    public let source: String
+    public let modelPrefix: String
+    public let modelsURL: String
+    public let credentialKind: String
+    public let credentialReference: String
+    public let keyHeader: String
+    public let upstreamModel: String
+    public let streaming: Bool?
+    public let tools: Bool?
+    public let usage: Bool?
+    public let reasoning: Bool?
+    public let priority: Int?
+    public let visible: Bool?
 
     public init(
         providerId: String,
@@ -18,7 +31,20 @@ public struct ProviderConfigDraft {
         authEnv: String,
         modelId: String,
         modelDisplayName: String,
-        contextWindow: Int?
+        contextWindow: Int?,
+        source: String = "",
+        modelPrefix: String = "",
+        modelsURL: String = "",
+        credentialKind: String = "env",
+        credentialReference: String = "",
+        keyHeader: String = "",
+        upstreamModel: String = "",
+        streaming: Bool? = nil,
+        tools: Bool? = nil,
+        usage: Bool? = nil,
+        reasoning: Bool? = nil,
+        priority: Int? = nil,
+        visible: Bool? = nil
     ) {
         self.providerId = providerId
         self.providerName = providerName
@@ -28,6 +54,19 @@ public struct ProviderConfigDraft {
         self.modelId = modelId
         self.modelDisplayName = modelDisplayName
         self.contextWindow = contextWindow
+        self.source = source
+        self.modelPrefix = modelPrefix
+        self.modelsURL = modelsURL
+        self.credentialKind = credentialKind
+        self.credentialReference = credentialReference
+        self.keyHeader = keyHeader
+        self.upstreamModel = upstreamModel
+        self.streaming = streaming
+        self.tools = tools
+        self.usage = usage
+        self.reasoning = reasoning
+        self.priority = priority
+        self.visible = visible
     }
 }
 
@@ -46,6 +85,9 @@ public enum ProviderConfigDraftWriter {
         if let contextWindow = draft.contextWindow, contextWindow > 0 {
             model["context_window"] = contextWindow
         }
+        if !clean(draft.upstreamModel).isEmpty {
+            model["upstream_model"] = clean(draft.upstreamModel)
+        }
 
         var provider: [String: Any] = [
             "id": clean(draft.providerId),
@@ -54,11 +96,57 @@ public enum ProviderConfigDraftWriter {
             "api_format": clean(draft.apiFormat),
             "models": [model],
         ]
-        if !clean(draft.authEnv).isEmpty {
+        let credentialReference = clean(draft.credentialReference).isEmpty ? clean(draft.authEnv) : clean(draft.credentialReference)
+        let credentialKind = clean(draft.credentialKind).isEmpty ? "env" : clean(draft.credentialKind)
+        let metadataOnlyCredential = !credentialReference.isEmpty && credentialKind != "env"
+        if !credentialReference.isEmpty {
             provider["credential_ref"] = [
-                "kind": "env",
-                "value": clean(draft.authEnv),
+                "kind": credentialKind,
+                "value": credentialReference,
             ]
+        }
+        var capabilities: [String: Any] = [:]
+        if let streaming = draft.streaming {
+            capabilities["streaming"] = streaming
+        }
+        if let tools = draft.tools {
+            capabilities["tools"] = tools
+        }
+        if let usage = draft.usage {
+            capabilities["usage"] = usage
+        }
+        if let reasoning = draft.reasoning {
+            capabilities["reasoning"] = reasoning
+        }
+        if !capabilities.isEmpty {
+            provider["capabilities"] = capabilities
+        }
+        var routing: [String: Any] = [:]
+        if !clean(draft.source).isEmpty {
+            routing["source"] = clean(draft.source)
+        }
+        if !clean(draft.modelPrefix).isEmpty {
+            routing["model_prefix"] = clean(draft.modelPrefix)
+        }
+        if let priority = draft.priority {
+            routing["priority"] = priority
+        }
+        if let visible = draft.visible {
+            routing["visible"] = metadataOnlyCredential ? false : visible
+        }
+        if !routing.isEmpty {
+            routing["status"] = metadataOnlyCredential ? "disabled" : "enabled"
+            provider["routing"] = routing
+        }
+        var catalog: [String: Any] = [:]
+        if !clean(draft.modelsURL).isEmpty {
+            catalog["models_url"] = clean(draft.modelsURL)
+        }
+        if !clean(draft.keyHeader).isEmpty {
+            catalog["key_header"] = clean(draft.keyHeader)
+        }
+        if !catalog.isEmpty {
+            provider["catalog"] = catalog
         }
 
         providers.append(provider)

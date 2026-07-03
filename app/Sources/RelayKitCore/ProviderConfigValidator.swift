@@ -48,6 +48,9 @@ public enum ProviderConfigValidator {
             if let routing = provider["routing"] {
                 try validateRouting(routing)
             }
+            if let catalog = provider["catalog"] {
+                try validateCatalog(catalog)
+            }
             guard let models = provider["models"] as? [[String: Any]], !models.isEmpty else {
                 throw ProviderConfigError.invalid("models array is required for provider \(id)")
             }
@@ -142,6 +145,29 @@ public enum ProviderConfigValidator {
         }
         if let visible = routing["visible"], !(visible is Bool) {
             throw ProviderConfigError.invalid("routing visible must be a boolean")
+        }
+    }
+
+    private static func validateCatalog(_ value: Any) throws {
+        guard let catalog = value as? [String: Any] else {
+            throw ProviderConfigError.invalid("catalog must be an object")
+        }
+        if let modelsURL = catalog["models_url"] as? String,
+           !modelsURL.isEmpty {
+            guard let parts = URLComponents(string: modelsURL),
+                  parts.scheme == "http" || parts.scheme == "https",
+                  parts.host != nil,
+                  parts.user == nil,
+                  parts.password == nil,
+                  parts.query == nil,
+                  parts.fragment == nil else {
+                throw ProviderConfigError.invalid("catalog models_url must be an http(s) URL without credentials, query, or fragment")
+            }
+        }
+        if let keyHeader = catalog["key_header"] as? String,
+           !keyHeader.isEmpty,
+           !isSafeReferenceName(keyHeader) {
+            throw ProviderConfigError.invalid("catalog key_header must be a safe header reference")
         }
     }
 
