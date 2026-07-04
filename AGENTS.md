@@ -10,6 +10,13 @@ RelayKit is intended to become a public open-source project. Keep the repository
 - Keep provider integrations public by default. Private adapters belong outside this repository.
 - Prefer small, boring changes. Do not add framework scaffolding for features not in the current milestone.
 
+## Shared Runtime Verification Boundary
+
+- Validation must not seize shared runtime services. Treat `127.0.0.1:18787`, `com.meihang.agent-local-gateway.*`, `~/.codex/config.toml`, `~/.codex/auth.json`, and any `~/Library/LaunchAgents/*` entry as global shared resources, not as RelayKit's private sandbox.
+- RelayKit verification must use isolated ports such as `127.0.0.1:18790` or `127.0.0.1:19777`, with processes started and stopped by the verification itself. Do not modify `~/.config/agent-local-gateway/codex-model-catalog.json` or another client's config for a local RelayKit smoke.
+- Taking over `18787` is a planned cutover, not a validation shortcut. Before doing it, get explicit user confirmation, state what will change, who is affected, and the rollback path, then stop clients, sync all configs/catalogs, verify the complete model set end to end, and roll back immediately on any failure.
+- Before any operation touching shared services or launch agents, write the intended change, expected impact, and rollback command in the response and wait for confirmation.
+
 ## Architecture Direction
 
 - `app/` is the Apple-native shell: SwiftUI/AppKit UI, Keychain, LaunchAgent, helper lifecycle.
