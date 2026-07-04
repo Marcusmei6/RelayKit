@@ -6,7 +6,7 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var tab = Tab.connect
     @State private var showingProviderForm = false
-    @State private var selectedCatalogGroup: LocalModelCatalog.SourceGroup?
+    @State private var editingProvider: ConfiguredProviderEntry?
     @State private var showingAdvancedSettings = false
     @State private var showingUsagePath = false
     private let smokeOpensProviderFromAddStrip: Bool
@@ -55,6 +55,7 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .onTapGesture { showingProviderForm = false }
                 ProviderFormView(
+                    mode: .add,
                     onClose: {
                         showingProviderForm = false
                     },
@@ -67,17 +68,21 @@ struct ContentView: View {
                 .padding(18)
             }
 
-            if let selectedCatalogGroup {
+            if let editingProvider {
                 Color.black.opacity(0.45)
                     .ignoresSafeArea()
-                    .onTapGesture { self.selectedCatalogGroup = nil }
-                CatalogGroupDetailView(group: selectedCatalogGroup) {
-                    self.selectedCatalogGroup = nil
-                } onAdd: {
-                    self.selectedCatalogGroup = nil
-                    showingProviderForm = true
-                }
-                .smokeSection("catalog-row-detail", recorder: smokeSectionRecorder)
+                    .onTapGesture { self.editingProvider = nil }
+                ProviderFormView(
+                    mode: .edit(editingProvider),
+                    onClose: {
+                        self.editingProvider = nil
+                    },
+                    smokeSectionRecorder: smokeSectionRecorder
+                )
+                .environmentObject(model)
+                .smokeSection("provider-edit-modal", recorder: smokeSectionRecorder)
+                .smokeSection("provider-modal", recorder: smokeSectionRecorder)
+                .smokeSection("credential-reference-form", recorder: smokeSectionRecorder)
                 .padding(18)
             }
         }
@@ -85,8 +90,8 @@ struct ContentView: View {
         .preferredColorScheme(preferredColorScheme)
         .task {
             await model.refreshLocalCatalog()
-            if showCatalogDetail, selectedCatalogGroup == nil {
-                selectedCatalogGroup = model.localCatalog?.sourceGroups.first
+            if showCatalogDetail, editingProvider == nil {
+                editingProvider = model.configuredProviders.first
             }
             if smokeOpensProviderFromAddStrip, !showingProviderForm {
                 openProviderFormFromAddStrip()
@@ -238,21 +243,35 @@ struct ContentView: View {
             SectionCard {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
-                        sectionEyebrow("LOCAL CATALOG")
-                        Text("Codex 可发现上游")
+                        sectionEyebrow("RELAYKIT PROVIDERS")
+                        Text("已配置接入")
+                            .font(.headline)
+                        Text("这些是 RelayKit 本地 provider/client 配置，可编辑。")
+                            .font(.caption)
+                            .foregroundStyle(secondaryText)
+                    }
+                }
+                configuredProviderList
+                addStrip
+            }
+            .smokeSection("configured-providers", recorder: smokeSectionRecorder)
+            .smokeSection("add-strip", recorder: smokeSectionRecorder)
+            .smokeSection("auth-blocked-state", recorder: smokeSectionRecorder)
+
+            SectionCard {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        sectionEyebrow("REFERENCE DISCOVERY")
+                        Text("可参考的本机发现来源")
                             .font(.headline)
                         Text("执行状态：\(model.localCatalogAuthState)")
                             .font(.caption)
                             .foregroundStyle(secondaryText)
                     }
                 }
-                modelList
-                addStrip
+                referenceCatalogList
             }
-            .smokeSection("model-list", recorder: smokeSectionRecorder)
-            .smokeSection("local-catalog", recorder: smokeSectionRecorder)
-            .smokeSection("add-strip", recorder: smokeSectionRecorder)
-            .smokeSection("auth-blocked-state", recorder: smokeSectionRecorder)
+            .smokeSection("reference-catalog", recorder: smokeSectionRecorder)
         }
     }
 
@@ -278,29 +297,36 @@ struct ContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(selected ? Color(hex: 0x78D8FF).opacity(0.42) : borderColor))
     }
 
-    private var modelList: some View {
+    private var configuredProviderList: some View {
         VStack(spacing: 8) {
-            if let catalog = model.localCatalog, !catalog.sourceGroups.isEmpty {
-                ForEach(catalog.sourceGroups, id: \.source) { group in
+            if model.configuredProviders.isEmpty {
+                EmptyProductState(
+                    title: "No RelayKit providers",
+                    message: "Add a local provider/client config to route models through RelayKit.",
+                    icon: "square.stack.3d.up.slash"
+                )
+                .frame(maxWidth: .infinity, minHeight: 130)
+            } else {
+                ForEach(model.configuredProviders) { provider in
                     Button {
-                        selectedCatalogGroup = group
+                        editingProvider = provider
                     } label: {
                         HStack(spacing: 12) {
-                            Image(systemName: "server.rack")
+                            Image(systemName: "slider.horizontal.3")
                                 .foregroundStyle(Color(hex: 0x78D8FF))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(group.publicLabel)
+                                Text(provider.name)
                                     .font(.subheadline.weight(.semibold))
                                     .lineLimit(1)
-                                Text("\(group.count) discovered model(s)")
+                                Text("\(provider.apiFormat) · \(provider.modelId)")
                                     .font(.caption)
                                     .foregroundStyle(secondaryText)
                                     .lineLimit(1)
                             }
                             Spacer()
-                            Text("AUTH REQUIRED")
+                            Text(provider.credentialKind.uppercased())
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(Color(hex: 0xFFD685))
+                                .foregroundStyle(Color(hex: 0x78D8FF))
                         }
                         .padding(12)
                         .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
@@ -308,10 +334,39 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                 }
+            }
+        }
+    }
+
+    private var referenceCatalogList: some View {
+        VStack(spacing: 8) {
+            if let catalog = model.localCatalog, !catalog.sourceGroups.isEmpty {
+                ForEach(catalog.sourceGroups, id: \.source) { group in
+                    HStack(spacing: 12) {
+                        Image(systemName: "server.rack")
+                            .foregroundStyle(Color(hex: 0xFFD685))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(group.publicLabel)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                            Text("\(group.count) discovered model(s) · reference only")
+                                .font(.caption)
+                                .foregroundStyle(secondaryText)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Text("DISCOVERY")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color(hex: 0xFFD685))
+                    }
+                    .padding(12)
+                    .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(borderColor))
+                }
             } else {
                 EmptyProductState(
-                    title: "No local catalog",
-                    message: "agent-local-gateway discovery is unavailable or returned no models.",
+                    title: "No reference catalog",
+                    message: "Local discovery is unavailable or returned no models.",
                     icon: "magnifyingglass"
                 )
                 .frame(maxWidth: .infinity, minHeight: 150)
@@ -723,7 +778,34 @@ enum Tab: String, CaseIterable, Identifiable {
 }
 
 private struct ProviderFormView: View {
+    enum Mode {
+        case add
+        case edit(ConfiguredProviderEntry)
+
+        var title: String {
+            switch self {
+            case .add: "新增模型接入"
+            case .edit: "编辑模型接入"
+            }
+        }
+
+        var saveTitle: String {
+            switch self {
+            case .add: "保存接入"
+            case .edit: "保存"
+            }
+        }
+
+        var smokeSection: String {
+            switch self {
+            case .add: "provider-add-mode"
+            case .edit: "provider-edit-mode"
+            }
+        }
+    }
+
     @EnvironmentObject private var model: AppModel
+    let mode: Mode
     let onClose: () -> Void
     let smokeSectionRecorder: ((String) -> Void)?
     @State private var providerId = ""
@@ -739,11 +821,30 @@ private struct ProviderFormView: View {
     @State private var modelMapping = ""
     @State private var contextWindow = ""
 
+    init(mode: Mode, onClose: @escaping () -> Void, smokeSectionRecorder: ((String) -> Void)?) {
+        self.mode = mode
+        self.onClose = onClose
+        self.smokeSectionRecorder = smokeSectionRecorder
+        if case .edit(let provider) = mode {
+            _providerId = State(initialValue: provider.id)
+            _source = State(initialValue: provider.source)
+            _displayPrefix = State(initialValue: provider.modelPrefix)
+            _apiFormat = State(initialValue: provider.apiFormat)
+            _baseURL = State(initialValue: provider.baseURL)
+            _modelsURL = State(initialValue: provider.modelsURL)
+            _credentialKind = State(initialValue: provider.credentialKind)
+            _credentialReference = State(initialValue: provider.credentialReference)
+            _keyHeader = State(initialValue: provider.keyHeader)
+            _modelMapping = State(initialValue: provider.upstreamModel.isEmpty ? provider.modelId : "\(provider.modelId) -> \(provider.upstreamModel)")
+            _contextWindow = State(initialValue: provider.contextWindow.map(String.init) ?? "")
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("新增模型接入")
+                    Text(mode.title)
                         .font(.title2.weight(.semibold))
                     Text("Store credential references and routing metadata, never secret values.")
                         .font(.caption)
@@ -760,15 +861,12 @@ private struct ProviderFormView: View {
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 field("Provider ID", $providerId, "local-bridge")
-                field("Source", $source, "custom")
-                field("Display prefix", $displayPrefix, "custom/")
                 field("Protocol", $apiFormat, "openai_chat")
                 field("Base URL", $baseURL, "https://api.example.com/v1")
                 field("Models URL", $modelsURL, "optional /v1/models URL")
                 field("Credential mode", $credentialKind, "env | keychain | key_file")
                 field("Credential ref", $credentialReference, "RELAYKIT_PROVIDER_TOKEN")
                 field("Key header", $keyHeader, "Authorization")
-                field("Context window", $contextWindow, "128000")
             }
 
             VStack(alignment: .leading, spacing: 5) {
@@ -793,6 +891,17 @@ private struct ProviderFormView: View {
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.48))
 
+            DisclosureGroup("Advanced") {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    field("Source", $source, "custom")
+                    field("Display prefix", $displayPrefix, "custom/")
+                    field("Context window", $contextWindow, "128000")
+                }
+                .padding(.top, 8)
+            }
+            .font(.caption)
+            .foregroundStyle(.white.opacity(0.62))
+
             Text(validationMessage)
                 .font(.caption)
                 .foregroundStyle(canSave ? .white.opacity(0.56) : Color(hex: 0xFF8FA3))
@@ -801,8 +910,15 @@ private struct ProviderFormView: View {
                 Spacer()
                 Button("取消") { onClose() }
                     .buttonStyle(ControlButtonStyle())
-                Button("保存接入") {
-                    if model.addProvider(draft, keychainCredential: keychainCredential) {
+                Button(mode.saveTitle) {
+                    let saved: Bool
+                    switch mode {
+                    case .add:
+                        saved = model.addProvider(draft, keychainCredential: keychainCredential)
+                    case .edit(let provider):
+                        saved = model.updateProvider(provider.id, draft: draft, keychainCredential: keychainCredential)
+                    }
+                    if saved {
                         onClose()
                     }
                 }
@@ -816,8 +932,7 @@ private struct ProviderFormView: View {
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
         .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
         .preferredColorScheme(.dark)
-        .smokeSection("provider-source-field", recorder: smokeSectionRecorder)
-        .smokeSection("provider-prefix-field", recorder: smokeSectionRecorder)
+        .smokeSection(mode.smokeSection, recorder: smokeSectionRecorder)
         .smokeSection("provider-protocol-field", recorder: smokeSectionRecorder)
         .smokeSection("provider-base-url-field", recorder: smokeSectionRecorder)
         .smokeSection("provider-models-url-field", recorder: smokeSectionRecorder)
@@ -836,10 +951,10 @@ private struct ProviderFormView: View {
 
     private var validationMessage: String {
         let parsed = parsedMapping
-        if providerId.isEmpty || source.isEmpty || displayPrefix.isEmpty || parsed.publicModel.isEmpty || apiFormat.isEmpty || baseURL.isEmpty {
-            return "Provider ID, source, prefix, model mapping, protocol, and base URL are required."
+        if providerId.isEmpty || parsed.publicModel.isEmpty || apiFormat.isEmpty || baseURL.isEmpty {
+            return "Provider ID, model mapping, protocol, and base URL are required."
         }
-        if !displayPrefix.hasSuffix("/") {
+        if !displayPrefix.isEmpty && !displayPrefix.hasSuffix("/") {
             return "Display prefix must end with /."
         }
         if !contextWindow.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Int(contextWindow) == nil {
@@ -913,67 +1028,6 @@ private struct ProviderFormView: View {
     private func isEnvReference(_ value: String) -> Bool {
         let pattern = #"^[A-Za-z_][A-Za-z0-9_]*$"#
         return value.range(of: pattern, options: .regularExpression) != nil
-    }
-}
-
-private struct CatalogGroupDetailView: View {
-    let group: LocalModelCatalog.SourceGroup
-    let onClose: () -> Void
-    let onAdd: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(group.publicLabel)
-                        .font(.title2.weight(.semibold))
-                    Text("\(group.count) discovered model(s) · AUTH REQUIRED")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.56))
-                }
-                Spacer()
-                Button {
-                    onClose()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(ControlButtonStyle())
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                detailRow("Source", "redacted")
-                detailRow("Model IDs", "redacted")
-                detailRow("RelayKit route", "not configured")
-                detailRow("Execution", "credential reference needed")
-            }
-
-            HStack {
-                Spacer()
-                Button("关闭") { onClose() }
-                    .buttonStyle(ControlButtonStyle())
-                Button("新增接入") { onAdd() }
-                    .buttonStyle(ControlButtonStyle(prominent: true))
-            }
-        }
-        .padding(18)
-        .frame(width: 420)
-        .background(Color(hex: 0x101722), in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
-        .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
-        .preferredColorScheme(.dark)
-    }
-
-    private func detailRow(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title)
-                .foregroundStyle(.white.opacity(0.52))
-            Spacer()
-            Text(value)
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
-        }
-        .font(.caption)
-        .padding(10)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 

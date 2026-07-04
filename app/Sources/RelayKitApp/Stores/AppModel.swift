@@ -6,6 +6,7 @@ final class AppModel: ObservableObject {
     @Published var providerConfigPath: String {
         didSet {
             UserDefaults.standard.set(providerConfigPath, forKey: "providerConfigPath")
+            refreshConfiguredProviders()
         }
     }
     @Published var codexTargetPath: String {
@@ -25,6 +26,7 @@ final class AppModel: ObservableObject {
     @Published var localCatalogAuthState = "credential reference needed"
     @Published var usageSummaries: [UsageSummary] = []
     @Published var providerConfigText = ""
+    @Published var configuredProviders: [ConfiguredProviderEntry] = []
     @Published var message = ""
     @Published var appearanceMode: AppAppearanceMode {
         didSet {
@@ -52,6 +54,7 @@ final class AppModel: ObservableObject {
         launchAtLoginRequested = settingsStore.launchAtLoginRequested
         refreshCodexConnectionStatus()
         refreshLaunchAtLoginStatus()
+        refreshConfiguredProviders()
     }
 
     func startGateway() {
@@ -117,6 +120,7 @@ final class AppModel: ObservableObject {
             let json = try JSONSerialization.jsonObject(with: Data(text.utf8))
             try ProviderConfigValidator.validate(json)
             providerConfigText = text
+            refreshConfiguredProviders(from: Data(text.utf8))
             message = "Loaded provider config"
         } catch {
             message = error.localizedDescription
@@ -137,6 +141,7 @@ final class AppModel: ObservableObject {
             }
             try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? providerConfigText
+            refreshConfiguredProviders(from: pretty)
             if let backupPath {
                 message = "Saved provider config; backup: \(backupPath)"
             } else {
@@ -169,6 +174,7 @@ final class AppModel: ObservableObject {
             }
             try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
+            refreshConfiguredProviders(from: pretty)
             if let backupPath {
                 message = draft.credentialKind == "keychain" && !keychainCredential.isEmpty
                     ? "Stored Keychain credential; added provider; backup: \(backupPath)"
@@ -178,6 +184,37 @@ final class AppModel: ObservableObject {
                     ? "Stored Keychain credential; added provider"
                     : "Added provider"
             }
+            return true
+        } catch {
+            message = error.localizedDescription
+            return false
+        }
+    }
+
+    func updateProvider(_ originalProviderId: String, draft: ProviderConfigDraft, keychainCredential: String = "") -> Bool {
+        do {
+            let existing = try providerConfigData()
+            let json = try JSONSerialization.jsonObject(with: existing)
+            guard var root = json as? [String: Any],
+                  let providers = root["providers"] as? [[String: Any]] else {
+                throw ProviderConfigError.invalid("providers array is required")
+            }
+            root["providers"] = providers.filter { ($0["id"] as? String ?? "") != originalProviderId }
+            let filtered = try JSONSerialization.data(withJSONObject: root)
+            let pretty = try ProviderConfigDraftWriter.addProvider(draft, to: filtered)
+            if draft.credentialKind == "keychain" && !keychainCredential.isEmpty {
+                try KeychainCredentialStore.save(value: keychainCredential, service: draft.credentialReference)
+            }
+            var backupPath: String?
+            if FileManager.default.fileExists(atPath: providerConfigPath) {
+                let backup = providerConfigPath + ".bak." + UUID().uuidString
+                try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
+                backupPath = backup
+            }
+            try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
+            providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
+            refreshConfiguredProviders(from: pretty)
+            message = backupPath.map { "Saved provider; backup: \($0)" } ?? "Saved provider"
             return true
         } catch {
             message = error.localizedDescription
@@ -271,4 +308,76 @@ final class AppModel: ObservableObject {
             .path
     }
 
+    private func providerConfigData() throws -> Data {
+        if FileManager.default.fileExists(atPath: providerConfigPath) {
+            return try Data(contentsOf: URL(fileURLWithPath: providerConfigPath))
+        }
+        if !providerConfigText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return Data(providerConfigText.utf8)
+        }
+        return Data(#"{"providers":[]}"#.utf8)
+    }
+
+    private func refreshConfiguredProviders() {
+        guard let data = try? providerConfigData() else {
+            configuredProviders = []
+            return
+        }
+        refreshConfiguredProviders(from: data)
+    }
+
+    private func refreshConfiguredProviders(from data: Data) {
+        guard let json = try? JSONSerialization.jsonObject(with: data),
+              let root = json as? [String: Any],
+              let providers = root["providers"] as? [[String: Any]] else {
+            configuredProviders = []
+            return
+        }
+        configuredProviders = providers.compactMap(ConfiguredProviderEntry.init(provider:))
+    }
+
+}
+
+struct ConfiguredProviderEntry: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let baseURL: String
+    let apiFormat: String
+    let credentialKind: String
+    let credentialReference: String
+    let keyHeader: String
+    let modelId: String
+    let upstreamModel: String
+    let modelsURL: String
+    let source: String
+    let modelPrefix: String
+    let contextWindow: Int?
+
+    init?(provider: [String: Any]) {
+        guard let id = provider["id"] as? String,
+              let name = provider["name"] as? String,
+              let baseURL = provider["base_url"] as? String,
+              let apiFormat = provider["api_format"] as? String,
+              let models = provider["models"] as? [[String: Any]],
+              let model = models.first,
+              let modelId = model["id"] as? String else {
+            return nil
+        }
+        let credentialRef = provider["credential_ref"] as? [String: Any]
+        let catalog = provider["catalog"] as? [String: Any]
+        let routing = provider["routing"] as? [String: Any]
+        self.id = id
+        self.name = name
+        self.baseURL = baseURL
+        self.apiFormat = apiFormat
+        self.credentialKind = credentialRef?["kind"] as? String ?? "env"
+        self.credentialReference = credentialRef?["value"] as? String ?? provider["auth_env"] as? String ?? ""
+        self.keyHeader = credentialRef?["header"] as? String ?? catalog?["key_header"] as? String ?? "Authorization"
+        self.modelId = modelId
+        self.upstreamModel = model["upstream_model"] as? String ?? ""
+        self.modelsURL = catalog?["models_url"] as? String ?? ""
+        self.source = routing?["source"] as? String ?? ""
+        self.modelPrefix = routing?["model_prefix"] as? String ?? ""
+        self.contextWindow = model["context_window"] as? Int
+    }
 }

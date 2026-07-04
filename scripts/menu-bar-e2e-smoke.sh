@@ -46,11 +46,11 @@ capture() {
   fi
   test -s "${evidence}"
   case "${name}" in
-    connect) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","model-list","local-catalog","add-strip","auth-blocked-state"]' ;;
-    detail) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","model-list","local-catalog","catalog-row-detail","add-strip","auth-blocked-state"]' ;;
+    connect) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","reference-catalog","add-strip","auth-blocked-state"]' ;;
+    detail) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","reference-catalog","provider-edit-modal","add-strip","auth-blocked-state"]' ;;
     usage) required='["tab-usage","usage-kpis","usage-rows"]' ;;
     settings|settings-light) required='["tab-settings","appearance-control","launch-login-control","settings-actions","advanced-paths"]' ;;
-    provider) required='["add-strip","add-strip-action","tab-provider","provider-modal","credential-reference-form","provider-source-field","provider-prefix-field","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
+    provider) required='["add-strip","add-strip-action","tab-provider","provider-modal","provider-add-mode","credential-reference-form","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
     *) required='[]' ;;
   esac
   jq -e --argjson required "${required}" '
@@ -72,13 +72,15 @@ capture() {
   if [[ "${name}" == "connect" ]]; then
     jq -e '
       . as $doc |
-      $doc.connect.catalog_model_count > 0 and
-      $doc.connect.catalog_source_group_count > 0 and
-      $doc.connect.display_mode == "local-catalog-source-groups" and
-      ($doc.connect.displayed_row_labels | length) == $doc.connect.catalog_source_group_count and
-      (all($doc.connect.displayed_row_labels[]; test("^source-[0-9]+$"))) and
-      ($doc.connect.displayed_row_labels | index("qwen3-coder") | not) and
-      ($doc.connect.displayed_row_labels | index("claude-example") | not) and
+      $doc.connect.configured_provider_count > 0 and
+      ($doc.connect.configured_provider_labels | length) == $doc.connect.configured_provider_count and
+      $doc.connect.reference_catalog_model_count > 0 and
+      $doc.connect.reference_catalog_source_group_count > 0 and
+      $doc.connect.display_mode == "configured-providers-and-reference-sources" and
+      ($doc.connect.reference_row_labels | length) == $doc.connect.reference_catalog_source_group_count and
+      (all($doc.connect.reference_row_labels[]; test("^source-[0-9]+$"))) and
+      ($doc.connect.reference_row_labels | index("qwen3-coder") | not) and
+      ($doc.connect.reference_row_labels | index("claude-example") | not) and
       ($doc.connect.auth_state | test("auth required|credential reference needed")) and
       $doc.connect.add_strip_available == true and
       $doc.connect.cli_selected == "codex" and
@@ -96,7 +98,9 @@ capture() {
   fi
   if [[ "${name}" == "detail" ]]; then
     jq -e '
-      .connect.catalog_detail_opened == true and
+      .connect.provider_edit_opened == true and
+      .connect.provider_edit_has_save == true and
+      .connect.provider_edit_has_add_cta == false and
       .connect.model_ids_redacted == true and
       .connect.source_names_redacted == true
     ' "${evidence}" >/dev/null

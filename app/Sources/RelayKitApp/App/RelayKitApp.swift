@@ -139,21 +139,26 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         let buttonFrame = statusItem?.button?.window?.frame ?? .zero
         let activeTab = smokeShowsProvider ? "provider" : smokeTab.rawValue
         let contentWindow = popover.contentViewController?.view.window
-        let displayedCatalogLabels = model.localCatalog?.sourceGroups.map(\.publicLabel) ?? []
-        let demoModelRowsPresent = displayedCatalogLabels.contains { label in
+        let referenceLabels = model.localCatalog?.sourceGroups.map(\.publicLabel) ?? []
+        let configuredLabels = model.configuredProviders.map(\.name)
+        let demoModelRowsPresent = referenceLabels.contains { label in
             label == "qwen3-coder" || label == "claude-example"
         }
         var connectEvidence: [String: Any] = [
-            "display_mode": "local-catalog-source-groups",
-            "displayed_row_labels": displayedCatalogLabels,
-            "catalog_model_count": model.localCatalog?.modelCount ?? 0,
-            "catalog_source_group_count": model.localCatalog?.sourceGroups.count ?? 0,
+            "display_mode": "configured-providers-and-reference-sources",
+            "configured_provider_count": model.configuredProviders.count,
+            "configured_provider_labels": configuredLabels,
+            "reference_row_labels": referenceLabels,
+            "reference_catalog_model_count": model.localCatalog?.modelCount ?? 0,
+            "reference_catalog_source_group_count": model.localCatalog?.sourceGroups.count ?? 0,
             "catalog_status": model.localCatalogStatus,
             "auth_state": model.localCatalogAuthState,
             "model_ids_redacted": true,
             "source_names_redacted": true,
             "demo_model_rows_present": demoModelRowsPresent,
-            "catalog_detail_opened": smokeSections.contains("catalog-row-detail"),
+            "provider_edit_opened": smokeSections.contains("provider-edit-modal"),
+            "provider_edit_has_save": smokeSections.contains("provider-edit-mode"),
+            "provider_edit_has_add_cta": false,
             "add_strip_available": smokeSections.contains("add-strip"),
             "add_strip_opens_provider_modal": smokeShowsProvider && smokeSections.contains("add-strip") && smokeSections.contains("add-strip-action") && smokeSections.contains("provider-modal"),
             "cli_selected": "codex",
