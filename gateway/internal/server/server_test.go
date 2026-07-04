@@ -29,6 +29,9 @@ func TestHealthz(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
 		t.Fatalf("body = %s", rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"service":"relaykit"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
 }
 
 func TestModels(t *testing.T) {
@@ -435,7 +438,7 @@ func TestResponsesDoesNotLeakUpstreamErrorBody(t *testing.T) {
 func TestResponsesDoesNotLeakUpstreamTransportError(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "providers.json")
-	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"http://sentinel-private-host.invalid/v1","api_format":"openai_chat","models":[{"id":"public/coder"}]}]}`
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"http://sentinel-redacted-host.invalid/v1","api_format":"openai_chat","models":[{"id":"public/coder"}]}]}`
 	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +455,7 @@ func TestResponsesDoesNotLeakUpstreamTransportError(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	for _, forbidden := range []string{"sentinel-private-host", "invalid", "/v1", "chat/completions"} {
+	for _, forbidden := range []string{"sentinel-redacted-host", "invalid", "/v1", "chat/completions"} {
 		if strings.Contains(rec.Body.String(), forbidden) {
 			t.Fatalf("transport error leaked %q in body: %s", forbidden, rec.Body.String())
 		}

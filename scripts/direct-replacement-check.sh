@@ -16,7 +16,7 @@ if grep -Eqi 'agent-local-gateway|bridge' <<<"${commands}"; then
   exit 1
 fi
 
-curl -fsS "${URL}/healthz" | jq -e '.status == "ok"' >/dev/null
+curl -fsS "${URL}/healthz" | jq -e '.service == "relaykit" and .status == "ok"' >/dev/null
 curl -fsS "${URL}/v1/models" |
   jq -e '
     (.data | type == "array") and

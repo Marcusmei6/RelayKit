@@ -62,7 +62,8 @@ func NewWithUsageLog(configPath, usageLogPath string) (http.Handler, error) {
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
-		"status": "ok",
+		"service": "relaykit",
+		"status":  "ok",
 	})
 }
 

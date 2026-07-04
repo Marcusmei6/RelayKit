@@ -157,9 +157,9 @@ func expectLocalCatalogSummary() throws {
     let body = """
     {
       "data": [
-        {"id": "private-a", "owned_by": "official", "context_window": 128000},
-        {"id": "private-b", "source": "official"},
-        {"id": "private-c", "owned_by": "neeko", "display_name": "Private C"}
+        {"id": "fixture-model-a", "owned_by": "source-beta", "context_window": 128000},
+        {"id": "fixture-model-b", "source": "source-beta"},
+        {"id": "fixture-model-c", "owned_by": "source-alpha", "display_name": "Fixture C"}
       ]
     }
     """
@@ -167,7 +167,7 @@ func expectLocalCatalogSummary() throws {
     if summary.modelCount != 3 {
         fatalError("catalog model count = \(summary.modelCount)")
     }
-    if summary.sourceGroups.map(\.source) != ["neeko", "official"] {
+    if summary.sourceGroups.map(\.source) != ["source-alpha", "source-beta"] {
         fatalError("catalog groups = \(summary.sourceGroups)")
     }
     if summary.sourceGroups.map(\.publicLabel) != ["source-1", "source-2"] {

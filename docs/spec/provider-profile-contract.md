@@ -126,4 +126,4 @@ The provider add sheet persists only fields that are implemented honestly today:
 - model id, display name, upstream model, and context window;
 - boolean capability metadata and route visibility/priority.
 
-Env credential references are executable today. Keychain/key-file references remain validated metadata and auth-blocked until product/security decisions select real credential storage or key-file reading.
+Env and key-file credential references are executable in the gateway today. Keychain references remain validated metadata until product/security decisions select real credential storage. App-created non-env routes remain disabled by default unless the user explicitly supplies and enables a local credential reference.
