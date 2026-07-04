@@ -873,14 +873,15 @@ private struct ProviderFormView: View {
             _modelMapping = State(initialValue: provider.upstreamModel.isEmpty ? provider.modelId : "\(provider.modelId) -> \(provider.upstreamModel)")
             _contextWindow = State(initialValue: provider.contextWindow.map(String.init) ?? "")
         } else if case .import(let group) = mode {
-            _providerId = State(initialValue: "import-\(group.publicLabel)")
+            _providerId = State(initialValue: "import-\(group.source)")
             _source = State(initialValue: group.source)
-            _displayPrefix = State(initialValue: "\(group.publicLabel)/")
-            _apiFormat = State(initialValue: "openai_chat")
+            _displayPrefix = State(initialValue: "\(group.source)/")
+            _apiFormat = State(initialValue: group.protocolSummary)
+            _baseURL = State(initialValue: group.executionBaseURL)
             _modelsURL = State(initialValue: "http://127.0.0.1:18787/v1/models")
             _credentialKind = State(initialValue: "env")
             _credentialReference = State(initialValue: "")
-            _modelMapping = State(initialValue: group.firstModelId)
+            _modelMapping = State(initialValue: group.modelSummaries.map(\.id).joined(separator: ", "))
             _contextWindow = State(initialValue: "")
         }
     }
@@ -907,20 +908,14 @@ private struct ProviderFormView: View {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 field("Provider ID", $providerId, "local-bridge")
                 field("Protocol", $apiFormat, "openai_chat")
-                field("Base URL", $baseURL, "https://api.example.com/v1")
-                field("Models URL", $modelsURL, "optional /v1/models URL")
+                field("Execution base URL", $baseURL, "required execution /v1 base URL")
+                field("Catalog models URL", $modelsURL, "optional discovery/catalog URL")
                 field("Credential mode", $credentialKind, "env | keychain | key_file")
                 field("Credential ref", $credentialReference, "RELAYKIT_PROVIDER_TOKEN")
                 field("Key header", $keyHeader, "Authorization")
             }
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Model mapping")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.52))
-                TextField("public/model -> upstream-model", text: $modelMapping)
-                    .textFieldStyle(ProductTextFieldStyle())
-            }
+            modelMappingSection
 
             if credentialKind == "keychain" {
                 VStack(alignment: .leading, spacing: 5) {
@@ -999,9 +994,11 @@ private struct ProviderFormView: View {
     }
 
     private var validationMessage: String {
-        let parsed = parsedMapping
-        if providerId.isEmpty || parsed.publicModel.isEmpty || apiFormat.isEmpty || baseURL.isEmpty {
+        if providerId.isEmpty || !hasModelMapping || apiFormat.isEmpty || baseURL.isEmpty {
             return "Provider ID, model mapping, protocol, and base URL are required."
+        }
+        if apiFormat == "unknown" || apiFormat == "mixed" {
+            return "Protocol is \(apiFormat); choose openai_chat or anthropic_messages before saving."
         }
         if !displayPrefix.isEmpty && !displayPrefix.hasSuffix("/") {
             return "Display prefix must end with /."
@@ -1039,7 +1036,7 @@ private struct ProviderFormView: View {
     private var importPrefilledSection: String {
         guard case .import = mode,
               !providerId.isEmpty,
-              !modelMapping.isEmpty,
+              importModelDrafts.count > 1,
               !modelsURL.isEmpty else {
             return ""
         }
@@ -1055,6 +1052,7 @@ private struct ProviderFormView: View {
 
     private var draft: ProviderConfigDraft {
         let parsed = parsedMapping
+        let importedModels = importModelDrafts
         return ProviderConfigDraft(
             providerId: providerId,
             providerName: providerId,
@@ -1071,6 +1069,7 @@ private struct ProviderFormView: View {
             credentialReference: credentialReference,
             keyHeader: keyHeader,
             upstreamModel: parsed.upstreamModel,
+            models: importedModels,
             streaming: true,
             tools: false,
             usage: true,
@@ -1089,6 +1088,93 @@ private struct ProviderFormView: View {
         let publicModel = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
         let upstreamModel = parts.dropFirst().joined(separator: "->").trimmingCharacters(in: .whitespacesAndNewlines)
         return (publicModel, upstreamModel)
+    }
+
+    private var hasModelMapping: Bool {
+        if case .import = mode {
+            return !importModelDrafts.isEmpty
+        }
+        return !parsedMapping.publicModel.isEmpty
+    }
+
+    private var importModelDrafts: [ProviderConfigDraft.ModelDraft] {
+        guard case .import(let group) = mode else {
+            return []
+        }
+        return group.modelSummaries.map {
+            ProviderConfigDraft.ModelDraft(
+                id: $0.id,
+                displayName: $0.displayName ?? $0.id,
+                contextWindow: $0.contextWindow,
+                upstreamModel: $0.upstreamModel ?? ""
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var modelMappingSection: some View {
+        if case .import(let group) = mode {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Live source import")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.52))
+                HStack(spacing: 8) {
+                    importChip("source", group.source)
+                    importChip("\(group.count)", "models")
+                    importChip(group.transportSummary, group.bridgeHost ?? "no bridge")
+                }
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(group.modelSummaries, id: \.id) { item in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.displayName ?? item.id)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                                Text(item.id)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.46))
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(item.upstreamModel ?? "same upstream")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .lineLimit(1)
+                                Text(item.contextWindow.map { "\($0) ctx" } ?? "ctx unknown")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.white.opacity(0.46))
+                            }
+                        }
+                        .padding(8)
+                        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                .frame(maxHeight: 150)
+            }
+            .smokeSection(group.modelSummaries.count > 1 ? "provider-import-multiple-model-rows" : "", recorder: smokeSectionRecorder)
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Model mapping")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.52))
+                TextField("public/model -> upstream-model", text: $modelMapping)
+                    .textFieldStyle(ProductTextFieldStyle())
+            }
+        }
+    }
+
+    private func importChip(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.42))
+            Text(value.isEmpty ? "missing" : value)
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func isEnvReference(_ value: String) -> Bool {

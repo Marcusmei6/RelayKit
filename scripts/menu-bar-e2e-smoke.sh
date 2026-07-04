@@ -61,7 +61,7 @@ capture() {
   case "${name}" in
     connect) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","import-candidates","add-strip","auth-blocked-state"]' ;;
     detail) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","import-candidates","provider-edit-modal","configured-provider-row-action","add-strip","auth-blocked-state"]' ;;
-    import) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","import-candidates","provider-import-modal","provider-import-mode","provider-import-prefilled-fields","provider-import-missing-required-fields","discovered-row-action","add-strip","auth-blocked-state"]' ;;
+    import) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","import-candidates","provider-import-modal","provider-import-mode","provider-import-prefilled-fields","provider-import-multiple-model-rows","discovered-row-action","add-strip","auth-blocked-state"]' ;;
     usage) required='["tab-usage","usage-kpis","usage-rows"]' ;;
     settings|settings-light) required='["tab-settings","appearance-control","launch-login-control","settings-actions","advanced-paths"]' ;;
     provider) required='["add-strip","add-strip-action","tab-provider","provider-modal","provider-add-mode","credential-reference-form","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
@@ -131,7 +131,13 @@ capture() {
       .connect.import_mode_opened == true and
       .connect.import_row_action_invoked == true and
       .connect.import_has_prefilled_fields == true and
-      .connect.import_has_missing_required_fields == true and
+      .connect.import_has_multiple_model_rows == true and
+      .connect.import_selected_model_count > 1 and
+      .connect.import_uses_first_model_only == false and
+      .connect.import_bridge_host_detected == true and
+      .connect.import_execution_base_url_prefilled == true and
+      .connect.import_protocol_checked == true and
+      (.connect.import_has_missing_required_fields | type == "boolean") and
       .connect.redacted_only_detail_opened == false and
       .connect.model_ids_redacted == true and
       .connect.source_names_redacted == true

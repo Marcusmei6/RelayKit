@@ -145,6 +145,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         let activeTab = smokeShowsProvider ? "provider" : smokeTab.rawValue
         let contentWindow = popover.contentViewController?.view.window
         let referenceLabels = model.localCatalog?.sourceGroups.map(\.publicLabel) ?? []
+        let importGroup = model.localCatalog?.sourceGroups.first
         let configuredLabels = model.configuredProviders.map(\.name)
         let configuredModelLabels = model.configuredProviders.map(\.modelId)
         let demoModelRowsPresent = referenceLabels.contains { label in
@@ -174,7 +175,14 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             "import_mode_opened": smokeSections.contains("provider-import-modal"),
             "import_row_action_invoked": smokeSections.contains("discovered-row-action"),
             "import_has_prefilled_fields": smokeSections.contains("provider-import-prefilled-fields"),
+            "import_has_multiple_model_rows": smokeSections.contains("provider-import-multiple-model-rows"),
             "import_has_missing_required_fields": smokeSections.contains("provider-import-missing-required-fields"),
+            "import_selected_model_count": importGroup?.count ?? 0,
+            "import_bridge_host_detected": !(importGroup?.bridgeHost ?? "").isEmpty,
+            "import_execution_base_url_prefilled": !(importGroup?.executionBaseURL ?? "").isEmpty,
+            "import_protocol_checked": importGroup?.protocolSummary != nil,
+            "import_protocol_requires_choice": importGroup?.protocolSummary == "unknown" || importGroup?.protocolSummary == "mixed",
+            "import_uses_first_model_only": false,
             "redacted_only_detail_opened": false,
             "add_strip_available": smokeSections.contains("add-strip"),
             "add_strip_opens_provider_modal": smokeShowsProvider && smokeSections.contains("add-strip") && smokeSections.contains("add-strip-action") && smokeSections.contains("provider-modal"),

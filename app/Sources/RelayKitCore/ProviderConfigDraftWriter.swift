@@ -1,6 +1,20 @@
 import Foundation
 
 public struct ProviderConfigDraft {
+    public struct ModelDraft {
+        public let id: String
+        public let displayName: String
+        public let contextWindow: Int?
+        public let upstreamModel: String
+
+        public init(id: String, displayName: String = "", contextWindow: Int? = nil, upstreamModel: String = "") {
+            self.id = id
+            self.displayName = displayName
+            self.contextWindow = contextWindow
+            self.upstreamModel = upstreamModel
+        }
+    }
+
     public let providerId: String
     public let providerName: String
     public let baseURL: String
@@ -16,6 +30,7 @@ public struct ProviderConfigDraft {
     public let credentialReference: String
     public let keyHeader: String
     public let upstreamModel: String
+    public let models: [ModelDraft]
     public let streaming: Bool?
     public let tools: Bool?
     public let usage: Bool?
@@ -39,6 +54,7 @@ public struct ProviderConfigDraft {
         credentialReference: String = "",
         keyHeader: String = "",
         upstreamModel: String = "",
+        models: [ModelDraft] = [],
         streaming: Bool? = nil,
         tools: Bool? = nil,
         usage: Bool? = nil,
@@ -61,6 +77,7 @@ public struct ProviderConfigDraft {
         self.credentialReference = credentialReference
         self.keyHeader = keyHeader
         self.upstreamModel = upstreamModel
+        self.models = models
         self.streaming = streaming
         self.tools = tools
         self.usage = usage
@@ -78,23 +95,21 @@ public enum ProviderConfigDraftWriter {
             throw ProviderConfigError.invalid("providers array is required")
         }
 
-        var model: [String: Any] = ["id": clean(draft.modelId)]
-        if !clean(draft.modelDisplayName).isEmpty {
-            model["display_name"] = clean(draft.modelDisplayName)
-        }
-        if let contextWindow = draft.contextWindow, contextWindow > 0 {
-            model["context_window"] = contextWindow
-        }
-        if !clean(draft.upstreamModel).isEmpty {
-            model["upstream_model"] = clean(draft.upstreamModel)
-        }
+        let models = (draft.models.isEmpty
+            ? [ProviderConfigDraft.ModelDraft(
+                id: draft.modelId,
+                displayName: draft.modelDisplayName,
+                contextWindow: draft.contextWindow,
+                upstreamModel: draft.upstreamModel
+            )]
+            : draft.models).map(modelJSON)
 
         var provider: [String: Any] = [
             "id": clean(draft.providerId),
             "name": clean(draft.providerName),
             "base_url": clean(draft.baseURL),
             "api_format": clean(draft.apiFormat),
-            "models": [model],
+            "models": models,
         ]
         let credentialReference = clean(draft.credentialReference).isEmpty ? clean(draft.authEnv) : clean(draft.credentialReference)
         let credentialKind = clean(draft.credentialKind).isEmpty ? "env" : clean(draft.credentialKind)
@@ -160,5 +175,19 @@ public enum ProviderConfigDraftWriter {
 
     private static func clean(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func modelJSON(_ draft: ProviderConfigDraft.ModelDraft) -> [String: Any] {
+        var model: [String: Any] = ["id": clean(draft.id)]
+        if !clean(draft.displayName).isEmpty {
+            model["display_name"] = clean(draft.displayName)
+        }
+        if let contextWindow = draft.contextWindow, contextWindow > 0 {
+            model["context_window"] = contextWindow
+        }
+        if !clean(draft.upstreamModel).isEmpty {
+            model["upstream_model"] = clean(draft.upstreamModel)
+        }
+        return model
     }
 }

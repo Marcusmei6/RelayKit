@@ -86,6 +86,20 @@ func expectProviderDraftWriter() throws {
 }
 
 func expectProviderDraftWriterWithPrototypeMetadata() throws {
+    let importedModels = [
+        ProviderConfigDraft.ModelDraft(
+            id: "bridge/coder",
+            displayName: "Bridge Coder",
+            contextWindow: 128000,
+            upstreamModel: "upstream-coder"
+        ),
+        ProviderConfigDraft.ModelDraft(
+            id: "bridge/reviewer",
+            displayName: "Bridge Reviewer",
+            contextWindow: 64000,
+            upstreamModel: "upstream-reviewer"
+        ),
+    ]
     let draft = ProviderConfigDraft(
         providerId: "local-bridge",
         providerName: "Local Bridge",
@@ -102,6 +116,7 @@ func expectProviderDraftWriterWithPrototypeMetadata() throws {
         credentialReference: "~/Library/Application Support/RelayKit/bridge.key",
         keyHeader: "Authorization",
         upstreamModel: "upstream-coder",
+        models: importedModels,
         streaming: true,
         tools: false,
         usage: true,
@@ -130,7 +145,10 @@ func expectProviderDraftWriterWithPrototypeMetadata() throws {
           routing["status"] as? String == "enabled",
           routing["visible"] as? Bool == true,
           let models = added["models"] as? [[String: Any]],
-          models.first?["upstream_model"] as? String == "upstream-coder" else {
+          models.count == 2,
+          models.first?["upstream_model"] as? String == "upstream-coder",
+          models.last?["id"] as? String == "bridge/reviewer",
+          models.last?["upstream_model"] as? String == "upstream-reviewer" else {
         fatalError("provider draft writer did not include prototype metadata: \(json)")
     }
 }
@@ -199,9 +217,9 @@ func expectLocalCatalogSummary() throws {
     let body = """
     {
       "data": [
-        {"id": "fixture-model-a", "owned_by": "source-beta", "context_window": 128000},
-        {"id": "fixture-model-b", "source": "source-beta"},
-        {"id": "fixture-model-c", "owned_by": "source-alpha", "display_name": "Fixture C"}
+        {"id": "fixture-model-a", "owned_by": "source-beta", "context_window": 128000, "protocol": "openai_chat", "transport": "remote_bridge", "bridge_host": "127.0.0.1:18788", "upstream_model": "up-a", "status": "ready", "visibility": "visible"},
+        {"id": "fixture-model-b", "source": "source-beta", "protocol": "openai_chat", "transport": "remote_bridge", "bridge_host": "127.0.0.1:18788", "upstream_model": "up-b"},
+        {"id": "fixture-model-c", "owned_by": "source-alpha", "display_name": "Fixture C", "protocol": "", "status": "ready"}
       ]
     }
     """
@@ -217,6 +235,17 @@ func expectLocalCatalogSummary() throws {
     }
     if summary.sourceGroups.first?.firstModelId != "fixture-model-c" {
         fatalError("catalog import candidate should retain safe local model ids for UI prefill")
+    }
+    let beta = summary.sourceGroups[1]
+    if beta.modelSummaries.count != 2 ||
+        beta.protocolSummary != "openai_chat" ||
+        beta.transportSummary != "remote_bridge" ||
+        beta.bridgeHost != "127.0.0.1:18788" ||
+        beta.executionBaseURL != "http://127.0.0.1:18788/v1" ||
+        beta.modelSummaries.first?.upstreamModel != "up-a" ||
+        beta.modelSummaries.first?.status != "ready" ||
+        beta.modelSummaries.first?.visibility != "visible" {
+        fatalError("catalog import fields missing: \(beta)")
     }
     if summary.redactedEvidence["model_ids_redacted"] as? Bool != true {
         fatalError("catalog evidence must redact model ids: \(summary.redactedEvidence)")
