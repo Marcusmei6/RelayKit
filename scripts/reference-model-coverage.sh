@@ -49,9 +49,7 @@ if [[ -f "${USAGE_LOG}" ]]; then
         request_count: (.value | length),
         success_count: (.value | map(select(.status == "success")) | length),
         source_name_redacted: true,
-        model_ids_redacted: true,
-        routing_drift: false,
-        drift_note: "none"
+        model_ids_redacted: true
       })' >"${USAGE_OUT}"
 else
   jq -n '[{
@@ -59,9 +57,7 @@ else
     request_count: 0,
     success_count: 0,
     source_name_redacted: true,
-    model_ids_redacted: true,
-    routing_drift: false,
-    drift_note: "agent-local-gateway usage log unavailable"
+    model_ids_redacted: true
   }]' >"${USAGE_OUT}"
 fi
 
