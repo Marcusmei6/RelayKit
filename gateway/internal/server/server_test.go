@@ -51,9 +51,15 @@ func TestModels(t *testing.T) {
 			Object  string `json:"object"`
 			OwnedBy string `json:"owned_by"`
 		} `json:"data"`
+		Models []struct {
+			ID string `json:"id"`
+		} `json:"models"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode err = %v; body=%s", err, rec.Body.String())
+	}
+	if len(body.Models) != len(body.Data) {
+		t.Fatalf("models field must mirror data field: %+v", body)
 	}
 	found := false
 	for _, m := range body.Data {
@@ -64,6 +70,62 @@ func TestModels(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestModelsProbesKeyFileProvidersAndHidesUnhealthyModels(t *testing.T) {
+	healthyUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode healthy probe err = %v", err)
+		}
+		if req.Model != "healthy-upstream" {
+			t.Fatalf("healthy probe model = %q", req.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}]}`))
+	}))
+	defer healthyUpstream.Close()
+	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not ready", http.StatusGatewayTimeout)
+	}))
+	defer slowUpstream.Close()
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "provider.key")
+	if err := os.WriteFile(keyPath, []byte("file-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[` +
+		`{"id":"healthy","name":"Healthy","base_url":"` + healthyUpstream.URL + `","api_format":"openai_chat","credential_ref":{"kind":"key_file","value":"` + keyPath + `"},"models":[{"id":"public/healthy","upstream_model":"healthy-upstream"}]},` +
+		`{"id":"slow","name":"Slow","base_url":"` + slowUpstream.URL + `","api_format":"openai_chat","credential_ref":{"kind":"key_file","value":"` + keyPath + `"},"models":[{"id":"public/slow","upstream_model":"slow-upstream"}]}` +
+		`]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := rec.Body.String()
+	if !strings.Contains(got, "public/healthy") {
+		t.Fatalf("healthy model missing: %s", got)
+	}
+	if strings.Contains(got, "public/slow") {
+		t.Fatalf("slow model should be hidden: %s", got)
+	}
+	if !strings.Contains(got, `"probed":true`) || !strings.Contains(got, `"unhealthy":1`) {
+		t.Fatalf("redacted health counts missing: %s", got)
 	}
 }
 
@@ -221,7 +283,7 @@ func TestResponsesProxiesToFakeOpenAIChat(t *testing.T) {
 					"finish_reason": "stop",
 				},
 			},
-			"usage": map[string]int{"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
+			"usage": map[string]int{"prompt_tokens": 4, "completion_tokens": 1},
 		}); err != nil {
 			t.Fatalf("encode upstream response err = %v", err)
 		}
@@ -251,10 +313,11 @@ func TestResponsesProxiesToFakeOpenAIChat(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		ID     string `json:"id"`
-		Model  string `json:"model"`
-		Status string `json:"status"`
-		Output []struct {
+		ID         string `json:"id"`
+		Model      string `json:"model"`
+		Status     string `json:"status"`
+		OutputText string `json:"output_text"`
+		Output     []struct {
 			Type    string `json:"type"`
 			Role    string `json:"role"`
 			Content []struct {
@@ -272,6 +335,9 @@ func TestResponsesProxiesToFakeOpenAIChat(t *testing.T) {
 	}
 	if resp.Status != "completed" {
 		t.Fatalf("status = %q", resp.Status)
+	}
+	if resp.OutputText != "hi" {
+		t.Fatalf("output_text = %q", resp.OutputText)
 	}
 	if len(resp.Output) != 1 || len(resp.Output[0].Content) != 1 || resp.Output[0].Content[0].Text != "hi" {
 		t.Fatalf("output = %+v", resp.Output)
@@ -406,7 +472,7 @@ func TestUsageJSONLOmitsBodiesHeadersAndURLs(t *testing.T) {
 				"message":       map[string]string{"role": "assistant", "content": "secret-response-body"},
 				"finish_reason": "stop",
 			}},
-			"usage": map[string]int{"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+			"usage": map[string]int{"prompt_tokens": 7, "completion_tokens": 3},
 		}); err != nil {
 			t.Fatalf("encode upstream response err = %v", err)
 		}
@@ -640,7 +706,7 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 		chunks := []string{
 			`data: {"id":"chatcmpl-stream","model":"upstream-coder","choices":[{"delta":{"role":"assistant"}}]}`,
 			`data: {"id":"chatcmpl-stream","model":"upstream-coder","choices":[{"delta":{"content":"he"}}]}`,
-			`data: {"id":"chatcmpl-stream","model":"upstream-coder","choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}],"usage":{"total_tokens":5}}`,
+			`data: {"id":"chatcmpl-stream","model":"upstream-coder","choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}`,
 			`data: [DONE]`,
 		}
 		for _, chunk := range chunks {
@@ -691,6 +757,7 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 		`"finish_reason":"stop"`,
 		`"total_tokens":5`,
 		`"input_tokens"`,
+		`"output_text":"hello"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stream missing %q in:\n%s", want, got)

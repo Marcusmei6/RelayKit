@@ -206,7 +206,8 @@ Status: public-safe contract implemented for env references and metadata validat
 
 - `docs/spec/provider-profile-contract.md` defines `credential_ref`, `capabilities`, `routing`, `catalog`, and model `upstream_model`.
 - Gateway config loading validates public-safe credential references and metadata, rejects secret-looking values, requires catalog model URLs to be http(s) URLs without credentials/query/fragment, and still routes by explicit model id.
-- Runtime auth supports `credential_ref.kind = "env"` and legacy `auth_env`; `keychain` and `key_file` are accepted as contract-only metadata but are not read or injected.
+- Runtime auth supports `credential_ref.kind = "env"`, `credential_ref.kind = "key_file"`, and legacy `auth_env`; `keychain` remains contract-only metadata.
+- Direct key-file providers are probed during `/v1/models` with a bounded local timeout. Unhealthy models are omitted from the ready catalog and only redacted aggregate health counts are returned.
 - The app provider form writes source/prefix/protocol/base/catalog/model-mapping metadata and credential references through `credential_ref`; Keychain/key-file references remain auth-blocked metadata until explicit credential storage is selected.
 - Remaining work that requires explicit selection: real Keychain storage, key-file reading, credential migration UI, public provider presets, and richer capability discovery/import.
 

@@ -62,6 +62,8 @@ Acceptance test to be written when Go is available: Given a missing config path,
 
 `GET /v1/models` derives its response from loaded provider profiles.
 
+The response keeps the OpenAI-compatible `data` array and also mirrors it as `models` for Codex catalog refresh compatibility. `model_health` may include redacted aggregate counts such as `healthy` and `unhealthy`; it must not include raw upstream URLs, headers, credentials, or private failure bodies.
+
 For every configured model:
 
 - `id` is the configured model id;
@@ -104,9 +106,9 @@ Upstream Chat response fields map back to Responses shape:
 | --- | --- |
 | `id` | `id` when present, otherwise synthesize `resp_<chat id or timestamp>` |
 | `model` | `model` |
-| `choices[0].message.content` | `output[0].content[0].text` |
+| `choices[0].message.content` | `output_text` and `output[0].content[0].text` |
 | `choices[0].finish_reason` | `status = completed` for `stop`; otherwise `status = incomplete` |
-| `usage` | `usage` passthrough |
+| `usage` | normalized Responses `usage` with `total_tokens` derived from input/output tokens when needed |
 
 Acceptance test to be written when Go is available: Given a fake upstream Chat server returning `choices[0].message.content = "hi"`, when `/v1/responses` receives `{"model":"qwen3-coder","input":"Say hi"}`, then the gateway returns Responses-shaped JSON containing output text `hi`.
 

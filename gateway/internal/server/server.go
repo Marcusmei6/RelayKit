@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -65,24 +67,102 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) models(w http.ResponseWriter, _ *http.Request) {
-	var data []map[string]any
+	models, health := s.catalogModels()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object":       "list",
+		"data":         models,
+		"models":       models,
+		"model_health": health,
+	})
+}
+
+func (s *Server) catalogModels() ([]map[string]any, map[string]any) {
+	type catalogCandidate struct {
+		provider config.ProviderProfile
+		model    config.Model
+		entry    map[string]any
+	}
+	var candidates []catalogCandidate
 	for _, p := range s.config.Providers {
 		if !providerEnabled(p) {
 			continue
 		}
 		for _, m := range p.Models {
-			data = append(data, map[string]any{
-				"id":       m.ID,
-				"object":   "model",
-				"created":  int64(0),
-				"owned_by": p.ID,
+			candidates = append(candidates, catalogCandidate{
+				provider: p,
+				model:    m,
+				entry: map[string]any{
+					"id":       m.ID,
+					"object":   "model",
+					"created":  int64(0),
+					"owned_by": p.ID,
+				},
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"object": "list",
-		"data":   data,
-	})
+	healthy := make([]bool, len(candidates))
+	probed := false
+	var wg sync.WaitGroup
+	for i, candidate := range candidates {
+		if !shouldProbeCatalogModel(candidate.provider) {
+			healthy[i] = true
+			continue
+		}
+		probed = true
+		wg.Add(1)
+		go func(i int, candidate catalogCandidate) {
+			defer wg.Done()
+			healthy[i] = s.probeModel(candidate.provider, candidate.model)
+		}(i, candidate)
+	}
+	wg.Wait()
+
+	data := make([]map[string]any, 0, len(candidates))
+	unhealthyCount := 0
+	for i, candidate := range candidates {
+		if !healthy[i] {
+			unhealthyCount++
+			continue
+		}
+		data = append(data, candidate.entry)
+	}
+	return data, map[string]any{
+		"probed":    probed,
+		"healthy":   len(data),
+		"unhealthy": unhealthyCount,
+	}
+}
+
+func shouldProbeCatalogModel(provider config.ProviderProfile) bool {
+	return provider.CredentialRef != nil && provider.CredentialRef.Kind == config.CredentialKindKeyFile
+}
+
+func (s *Server) probeModel(provider config.ProviderProfile, model config.Model) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	payload, err := json.Marshal(upstreamRequest(provider.APIFormat, upstreamModelName(model), []chatMessage{{Role: "user", Content: "ping"}}, false))
+	if err != nil {
+		return false
+	}
+	upstreamURL, err := url.JoinPath(provider.BaseURL, upstreamPath(provider.APIFormat))
+	if err != nil {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := applyProviderAuth(req, provider); err != nil {
+		return false
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode >= 200 && resp.StatusCode <= 299
 }
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
@@ -494,12 +574,13 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 			status := statusFromFinish(finishReason)
 			responseUsage := responsesUsage(usage)
 			response := map[string]any{
-				"id":     responseID(id),
-				"object": "response",
-				"status": status,
-				"model":  requestedModel,
-				"output": []map[string]any{},
-				"usage":  responseUsage,
+				"id":          responseID(id),
+				"object":      "response",
+				"status":      status,
+				"model":       requestedModel,
+				"output":      []map[string]any{},
+				"output_text": outputText,
+				"usage":       responseUsage,
 			}
 			if itemStarted {
 				itemID := messageItemID(id)
@@ -783,12 +864,13 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 			status := statusFromFinish(finishReason)
 			responseUsage := responsesUsage(usage)
 			response := map[string]any{
-				"id":     responseID(id),
-				"object": "response",
-				"status": status,
-				"model":  requestedModel,
-				"output": []map[string]any{},
-				"usage":  responseUsage,
+				"id":          responseID(id),
+				"object":      "response",
+				"status":      status,
+				"model":       requestedModel,
+				"output":      []map[string]any{},
+				"output_text": outputText,
+				"usage":       responseUsage,
 			}
 			if itemStarted {
 				itemID := messageItemID(id)
@@ -877,10 +959,11 @@ func responsesFromChat(chat chatResponse, requestedModel string) map[string]any 
 	}
 
 	return map[string]any{
-		"id":     responseID(chat.ID),
-		"object": "response",
-		"status": status,
-		"model":  model,
+		"id":          responseID(chat.ID),
+		"object":      "response",
+		"status":      status,
+		"model":       model,
+		"output_text": text,
 		"output": []map[string]any{
 			{
 				"type": "message",
@@ -936,12 +1019,13 @@ func responsesFromAnthropic(msg anthropicResponse, requestedModel string) map[st
 		}, output...)
 	}
 	return map[string]any{
-		"id":     responseID(msg.ID),
-		"object": "response",
-		"status": statusFromFinish(msg.StopReason),
-		"model":  model,
-		"output": output,
-		"usage":  msg.Usage,
+		"id":          responseID(msg.ID),
+		"object":      "response",
+		"status":      statusFromFinish(msg.StopReason),
+		"model":       model,
+		"output_text": text,
+		"output":      output,
+		"usage":       responsesUsage(msg.Usage),
 	}
 }
 
@@ -1006,6 +1090,7 @@ type usageEvent struct {
 }
 
 func (s *Server) recordCompletedUsage(providerID, model, requestID, status string, streaming bool, usage map[string]any, start time.Time) {
+	normalizedUsage := responsesUsage(usage)
 	s.recordUsage(usageEvent{
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 		RequestID:    requestID,
@@ -1016,9 +1101,9 @@ func (s *Server) recordCompletedUsage(providerID, model, requestID, status strin
 		Status:       status,
 		HTTPStatus:   http.StatusOK,
 		DurationMS:   time.Since(start).Milliseconds(),
-		InputTokens:  tokenCount(usage, "input_tokens", "prompt_tokens"),
-		OutputTokens: tokenCount(usage, "output_tokens", "completion_tokens"),
-		TotalTokens:  tokenCount(usage, "total_tokens"),
+		InputTokens:  tokenCount(normalizedUsage, "input_tokens"),
+		OutputTokens: tokenCount(normalizedUsage, "output_tokens"),
+		TotalTokens:  tokenCount(normalizedUsage, "total_tokens"),
 	})
 }
 
