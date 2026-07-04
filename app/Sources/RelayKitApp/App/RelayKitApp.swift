@@ -155,7 +155,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             "demo_model_rows_present": demoModelRowsPresent,
             "catalog_detail_opened": smokeSections.contains("catalog-row-detail"),
             "add_strip_available": smokeSections.contains("add-strip"),
-            "add_strip_opens_provider_modal": smokeShowsProvider && smokeSections.contains("add-strip") && smokeSections.contains("provider-modal"),
+            "add_strip_opens_provider_modal": smokeShowsProvider && smokeSections.contains("add-strip") && smokeSections.contains("add-strip-action") && smokeSections.contains("provider-modal"),
             "cli_selected": "codex",
         ]
         if let gatewayExercise {

@@ -50,7 +50,7 @@ capture() {
     detail) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","model-list","local-catalog","catalog-row-detail","add-strip","auth-blocked-state"]' ;;
     usage) required='["tab-usage","usage-kpis","usage-rows"]' ;;
     settings|settings-light) required='["tab-settings","appearance-control","launch-login-control","settings-actions","advanced-paths"]' ;;
-    provider) required='["tab-provider","provider-modal","credential-reference-form","provider-source-field","provider-prefix-field","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
+    provider) required='["add-strip","add-strip-action","tab-provider","provider-modal","credential-reference-form","provider-source-field","provider-prefix-field","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
     *) required='[]' ;;
   esac
   jq -e --argjson required "${required}" '

@@ -9,12 +9,14 @@ struct ContentView: View {
     @State private var selectedCatalogGroup: LocalModelCatalog.SourceGroup?
     @State private var showingAdvancedSettings = false
     @State private var showingUsagePath = false
+    private let smokeOpensProviderFromAddStrip: Bool
     private let showCatalogDetail: Bool
     private let smokeSectionRecorder: ((String) -> Void)?
 
     init(initialTab: Tab = .connect, showProviderForm: Bool = false, showCatalogDetail: Bool = false, smokeSectionRecorder: ((String) -> Void)? = nil) {
         _tab = State(initialValue: initialTab)
-        _showingProviderForm = State(initialValue: showProviderForm)
+        _showingProviderForm = State(initialValue: false)
+        self.smokeOpensProviderFromAddStrip = showProviderForm
         self.showCatalogDetail = showCatalogDetail
         self.smokeSectionRecorder = smokeSectionRecorder
     }
@@ -85,6 +87,9 @@ struct ContentView: View {
             await model.refreshLocalCatalog()
             if showCatalogDetail, selectedCatalogGroup == nil {
                 selectedCatalogGroup = model.localCatalog?.sourceGroups.first
+            }
+            if smokeOpensProviderFromAddStrip, !showingProviderForm {
+                openProviderFormFromAddStrip()
             }
         }
     }
@@ -316,7 +321,7 @@ struct ContentView: View {
 
     private var addStrip: some View {
         Button {
-            showingProviderForm = true
+            openProviderFormFromAddStrip()
         } label: {
             HStack {
                 Image(systemName: "plus")
@@ -330,6 +335,11 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(hex: 0x78D8FF).opacity(0.36), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
         }
         .buttonStyle(.plain)
+    }
+
+    private func openProviderFormFromAddStrip() {
+        smokeSectionRecorder?("add-strip-action")
+        showingProviderForm = true
     }
 
     private var usageTab: some View {

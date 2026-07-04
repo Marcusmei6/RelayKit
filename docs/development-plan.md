@@ -185,7 +185,7 @@ Status: local P0 regression complete; remaining items require future schema, cre
 
 - Primary surface is a menu-bar resident control-center, not a dashboard window.
 - Main tabs are `接入`, `Usage`, and `设置`.
-- `接入` owns real bundled gateway start/stop/restart, health, model refresh, Codex active target state, and a disabled Claude Code placeholder.
+- `接入` owns CLI selection, Codex active target state, disabled Claude Code placeholder, redacted local catalog rows, catalog detail overlay, and provider add entry. Gateway port/health/model state stays in the global header; lifecycle smoke may exercise start/stop/restart without putting those controls back in the Connect catalog card.
 - `Usage` reads real local usage summaries only; empty state is allowed, mock cards are not.
 - `设置` may show only settings wired to real state; unfinished settings stay hidden or disabled.
 - Provider/model add uses a form sheet that writes the current public provider schema. JSON editing remains a fallback, not the primary P0 path.
