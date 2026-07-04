@@ -153,7 +153,7 @@ func shouldProbeCatalogModel(provider config.ProviderProfile) bool {
 }
 
 func (s *Server) probeModel(provider config.ProviderProfile, model config.Model) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	payload, err := json.Marshal(upstreamRequest(provider.APIFormat, upstreamModelName(model), []chatMessage{{Role: "user", Content: "ping"}}, false))
 	if err != nil {
