@@ -132,6 +132,8 @@ capture() {
       .connect.import_row_action_invoked == true and
       .connect.import_has_prefilled_fields == true and
       .connect.import_has_multiple_model_rows == true and
+      .connect.import_model_rows_collapsible == true and
+      .connect.import_model_list_bounded == true and
       .connect.import_selected_model_count > 1 and
       .connect.import_uses_first_model_only == false and
       .connect.import_bridge_host_detected == true and

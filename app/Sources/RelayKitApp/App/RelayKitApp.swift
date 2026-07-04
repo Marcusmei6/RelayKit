@@ -176,6 +176,8 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             "import_row_action_invoked": smokeSections.contains("discovered-row-action"),
             "import_has_prefilled_fields": smokeSections.contains("provider-import-prefilled-fields"),
             "import_has_multiple_model_rows": smokeSections.contains("provider-import-multiple-model-rows"),
+            "import_model_rows_collapsible": smokeSections.contains("provider-import-model-row-collapsible"),
+            "import_model_list_bounded": smokeSections.contains("provider-import-model-list-bounded"),
             "import_has_missing_required_fields": smokeSections.contains("provider-import-missing-required-fields"),
             "import_selected_model_count": importGroup?.count ?? 0,
             "import_bridge_host_detected": !(importGroup?.bridgeHost ?? "").isEmpty,

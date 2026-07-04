@@ -1123,33 +1123,17 @@ private struct ProviderFormView: View {
                     importChip("\(group.count)", "models")
                     importChip(group.transportSummary, group.bridgeHost ?? "no bridge")
                 }
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    ForEach(group.modelSummaries, id: \.id) { item in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.displayName ?? item.id)
-                                    .font(.caption.weight(.semibold))
-                                    .lineLimit(1)
-                                Text(item.id)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.46))
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            VStack(alignment: .trailing, spacing: 2) {
-                                Text(item.upstreamModel ?? "same upstream")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .lineLimit(1)
-                                Text(item.contextWindow.map { "\($0) ctx" } ?? "ctx unknown")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.white.opacity(0.46))
-                            }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(group.modelSummaries, id: \.id) { item in
+                            ImportModelRow(item: item, group: group)
+                                .smokeSection("provider-import-model-row-collapsible", recorder: smokeSectionRecorder)
                         }
-                        .padding(8)
-                        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 150)
+                .frame(height: 132)
+                .smokeSection("provider-import-model-list-bounded", recorder: smokeSectionRecorder)
             }
             .smokeSection(group.modelSummaries.count > 1 ? "provider-import-multiple-model-rows" : "", recorder: smokeSectionRecorder)
         } else {
@@ -1180,6 +1164,69 @@ private struct ProviderFormView: View {
     private func isEnvReference(_ value: String) -> Bool {
         let pattern = #"^[A-Za-z_][A-Za-z0-9_]*$"#
         return value.range(of: pattern, options: .regularExpression) != nil
+    }
+}
+
+private struct ImportModelRow: View {
+    let item: LocalModelCatalog.ModelSummary
+    let group: LocalModelCatalog.SourceGroup
+
+    var body: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 4) {
+                detail("model", item.id)
+                detail("upstream", item.upstreamModel ?? "same")
+                detail("transport", group.transportSummary)
+                detail("bridge", group.bridgeHost ?? "none")
+                detail("status", item.status ?? "unknown")
+                detail("visibility", item.visibility ?? "unknown")
+                detail("context", item.contextWindow.map(String.init) ?? "unknown")
+            }
+            .padding(.top, 6)
+        } label: {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.displayName ?? item.id)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(item.id)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.46))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .layoutPriority(1)
+                Spacer(minLength: 8)
+                Text(item.status ?? "unknown")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(1)
+                Text(item.contextWindow.map { "\($0)" } ?? "ctx?")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(1)
+            }
+        }
+        .font(.caption)
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func detail(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.42))
+                .frame(width: 54, alignment: .leading)
+            Text(value)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.72))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
