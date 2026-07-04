@@ -215,6 +215,9 @@ func expectLocalCatalogSummary() throws {
     if summary.sourceGroups.map(\.publicLabel) != ["source-1", "source-2"] {
         fatalError("catalog public labels must not expose source names: \(summary.sourceGroups)")
     }
+    if summary.sourceGroups.first?.firstModelId != "fixture-model-c" {
+        fatalError("catalog import candidate should retain safe local model ids for UI prefill")
+    }
     if summary.redactedEvidence["model_ids_redacted"] as? Bool != true {
         fatalError("catalog evidence must redact model ids: \(summary.redactedEvidence)")
     }

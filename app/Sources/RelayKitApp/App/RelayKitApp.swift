@@ -12,7 +12,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
     private let smokeTab = Tab(rawValue: value(after: "--ui-smoke-tab") ?? "") ?? .connect
     private let smokeShowsProvider = CommandLine.arguments.contains("--ui-smoke-provider")
     private let smokeShowsDetail = CommandLine.arguments.contains("--ui-smoke-detail")
-    private let smokeShowsReferenceDetail = CommandLine.arguments.contains("--ui-smoke-reference-detail")
+    private let smokeShowsImport = CommandLine.arguments.contains("--ui-smoke-import")
     private let smokeEvidencePath = value(after: "--ui-smoke-evidence")
     private let smokeProviderConfigPath = value(after: "--ui-smoke-provider-config")
 
@@ -43,7 +43,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 520, height: 680)
         popover.contentViewController = NSHostingController(
-            rootView: ContentView(initialTab: smokeTab, showProviderForm: smokeShowsProvider, showCatalogDetail: smokeShowsDetail, showReferenceDetail: smokeShowsReferenceDetail) { [weak self] section in
+            rootView: ContentView(initialTab: smokeTab, showProviderForm: smokeShowsProvider, showCatalogDetail: smokeShowsDetail, showImportCandidate: smokeShowsImport) { [weak self] section in
                 self?.smokeSections.insert(section)
             }
                 .environmentObject(model)
@@ -155,13 +155,13 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             label == "qwen3-coder" || label == "claude-example"
         }
         var connectEvidence: [String: Any] = [
-            "display_mode": "configured-providers-and-reference-sources",
+            "display_mode": "single-provider-setup-list",
             "configured_provider_count": model.configuredProviders.count,
             "configured_provider_labels": configuredLabels,
             "configured_provider_model_labels": configuredModelLabels,
-            "reference_row_labels": referenceLabels,
-            "reference_catalog_model_count": model.localCatalog?.modelCount ?? 0,
-            "reference_catalog_source_group_count": model.localCatalog?.sourceGroups.count ?? 0,
+            "discovered_row_labels": referenceLabels,
+            "discovered_catalog_model_count": model.localCatalog?.modelCount ?? 0,
+            "discovered_catalog_source_group_count": model.localCatalog?.sourceGroups.count ?? 0,
             "catalog_status": model.localCatalogStatus,
             "auth_state": model.localCatalogAuthState,
             "model_ids_redacted": true,
@@ -171,8 +171,11 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             "provider_edit_row_action_invoked": smokeSections.contains("configured-provider-row-action"),
             "provider_edit_has_save": smokeSections.contains("provider-edit-mode"),
             "provider_edit_has_add_cta": false,
-            "reference_detail_opened": smokeSections.contains("reference-detail-modal"),
-            "reference_row_action_invoked": smokeSections.contains("reference-row-action"),
+            "import_mode_opened": smokeSections.contains("provider-import-modal"),
+            "import_row_action_invoked": smokeSections.contains("discovered-row-action"),
+            "import_has_prefilled_fields": smokeSections.contains("provider-import-prefilled-fields"),
+            "import_has_missing_required_fields": smokeSections.contains("provider-import-missing-required-fields"),
+            "redacted_only_detail_opened": false,
             "add_strip_available": smokeSections.contains("add-strip"),
             "add_strip_opens_provider_modal": smokeShowsProvider && smokeSections.contains("add-strip") && smokeSections.contains("add-strip-action") && smokeSections.contains("provider-modal"),
             "add_form_has_save": smokeSections.contains("provider-add-mode"),

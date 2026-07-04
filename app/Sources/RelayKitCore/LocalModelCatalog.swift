@@ -30,6 +30,11 @@ public struct LocalModelCatalog: Sendable {
         public let source: String
         public let count: Int
         public let publicLabel: String
+        public let modelIds: [String]
+
+        public var firstModelId: String {
+            modelIds.first ?? ""
+        }
     }
 
     private struct Response: Decodable {
@@ -61,11 +66,16 @@ public struct LocalModelCatalog: Sendable {
         self.models = models
         let grouped = Dictionary(grouping: models) { $0.source }
         sourceGroups = grouped
-            .map { (source: $0.key, count: $0.value.count) }
+            .map { (source: $0.key, models: $0.value) }
             .sorted { lhs, rhs in lhs.source < rhs.source }
             .enumerated()
             .map { index, group in
-                SourceGroup(source: group.source, count: group.count, publicLabel: "source-\(index + 1)")
+                SourceGroup(
+                    source: group.source,
+                    count: group.models.count,
+                    publicLabel: "source-\(index + 1)",
+                    modelIds: group.models.map(\.id).sorted()
+                )
             }
     }
 }

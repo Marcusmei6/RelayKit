@@ -7,20 +7,20 @@ struct ContentView: View {
     @State private var tab = Tab.connect
     @State private var showingProviderForm = false
     @State private var editingProvider: ConfiguredProviderEntry?
-    @State private var selectedReferenceGroup: LocalModelCatalog.SourceGroup?
+    @State private var importingGroup: LocalModelCatalog.SourceGroup?
     @State private var showingAdvancedSettings = false
     @State private var showingUsagePath = false
     private let smokeOpensProviderFromAddStrip: Bool
     private let showCatalogDetail: Bool
-    private let showReferenceDetail: Bool
+    private let showImportCandidate: Bool
     private let smokeSectionRecorder: ((String) -> Void)?
 
-    init(initialTab: Tab = .connect, showProviderForm: Bool = false, showCatalogDetail: Bool = false, showReferenceDetail: Bool = false, smokeSectionRecorder: ((String) -> Void)? = nil) {
+    init(initialTab: Tab = .connect, showProviderForm: Bool = false, showCatalogDetail: Bool = false, showImportCandidate: Bool = false, smokeSectionRecorder: ((String) -> Void)? = nil) {
         _tab = State(initialValue: initialTab)
         _showingProviderForm = State(initialValue: false)
         self.smokeOpensProviderFromAddStrip = showProviderForm
         self.showCatalogDetail = showCatalogDetail
-        self.showReferenceDetail = showReferenceDetail
+        self.showImportCandidate = showImportCandidate
         self.smokeSectionRecorder = smokeSectionRecorder
     }
 
@@ -89,16 +89,7 @@ struct ContentView: View {
                 .padding(18)
             }
 
-            if let selectedReferenceGroup {
-                Color.black.opacity(0.45)
-                    .ignoresSafeArea()
-                    .onTapGesture { self.selectedReferenceGroup = nil }
-                ReferenceGroupDetailView(group: selectedReferenceGroup) {
-                    self.selectedReferenceGroup = nil
-                }
-                .smokeSection("reference-detail-modal", recorder: smokeSectionRecorder)
-                .padding(18)
-            }
+            providerImportOverlay
         }
         .foregroundStyle(primaryText)
         .preferredColorScheme(preferredColorScheme)
@@ -107,8 +98,8 @@ struct ContentView: View {
             if showCatalogDetail, editingProvider == nil {
                 openFirstConfiguredProviderFromRowAction()
             }
-            if showReferenceDetail, selectedReferenceGroup == nil {
-                openFirstReferenceGroupFromRowAction()
+            if showImportCandidate, importingGroup == nil {
+                openFirstDiscoveredCandidateFromRowAction()
             }
             if smokeOpensProviderFromAddStrip, !showingProviderForm {
                 openProviderFormFromAddStrip()
@@ -260,35 +251,42 @@ struct ContentView: View {
             SectionCard {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
-                        sectionEyebrow("RELAYKIT PROVIDERS")
-                        Text("已配置接入")
+                        sectionEyebrow("RELAYKIT SETUP")
+                        Text("模型接入")
                             .font(.headline)
-                        Text("这些是 RelayKit 本地 provider/client 配置，可编辑。")
+                        Text("已配置项可编辑；本机发现项可导入配置。")
                             .font(.caption)
                             .foregroundStyle(secondaryText)
                     }
                 }
-                configuredProviderList
+                providerSetupList
                 addStrip
             }
             .smokeSection("configured-providers", recorder: smokeSectionRecorder)
+            .smokeSection("import-candidates", recorder: smokeSectionRecorder)
             .smokeSection("add-strip", recorder: smokeSectionRecorder)
             .smokeSection("auth-blocked-state", recorder: smokeSectionRecorder)
+        }
+    }
 
-            SectionCard {
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        sectionEyebrow("REFERENCE DISCOVERY")
-                        Text("可参考的本机发现来源")
-                            .font(.headline)
-                        Text("执行状态：\(model.localCatalogAuthState)")
-                            .font(.caption)
-                            .foregroundStyle(secondaryText)
-                    }
-                }
-                referenceCatalogList
-            }
-            .smokeSection("reference-catalog", recorder: smokeSectionRecorder)
+    @ViewBuilder
+    private var providerImportOverlay: some View {
+        if let importingGroup {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .onTapGesture { self.importingGroup = nil }
+            ProviderFormView(
+                mode: .import(importingGroup),
+                onClose: {
+                    self.importingGroup = nil
+                },
+                smokeSectionRecorder: smokeSectionRecorder
+            )
+            .environmentObject(model)
+            .smokeSection("provider-import-modal", recorder: smokeSectionRecorder)
+            .smokeSection("provider-modal", recorder: smokeSectionRecorder)
+            .smokeSection("credential-reference-form", recorder: smokeSectionRecorder)
+            .padding(18)
         }
     }
 
@@ -314,12 +312,13 @@ struct ContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(selected ? Color(hex: 0x78D8FF).opacity(0.42) : borderColor))
     }
 
-    private var configuredProviderList: some View {
+    private var providerSetupList: some View {
         VStack(spacing: 8) {
-            if model.configuredProviders.isEmpty {
+            let discoveredGroups = model.localCatalog?.sourceGroups ?? []
+            if model.configuredProviders.isEmpty && discoveredGroups.isEmpty {
                 EmptyProductState(
                     title: "No RelayKit providers",
-                    message: "Add a local provider/client config to route models through RelayKit.",
+                    message: "Add a provider/client config or start local discovery to route models through RelayKit.",
                     icon: "square.stack.3d.up.slash"
                 )
                 .frame(maxWidth: .infinity, minHeight: 130)
@@ -353,31 +352,24 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                 }
-            }
-        }
-    }
-
-    private var referenceCatalogList: some View {
-        VStack(spacing: 8) {
-            if let catalog = model.localCatalog, !catalog.sourceGroups.isEmpty {
-                ForEach(catalog.sourceGroups, id: \.source) { group in
+                ForEach(discoveredGroups, id: \.source) { group in
                     Button {
-                        openReferenceGroupFromRowAction(group)
+                        openDiscoveredCandidateFromRowAction(group)
                     } label: {
                         HStack(spacing: 12) {
-                            Image(systemName: "server.rack")
+                            Image(systemName: "square.and.arrow.down")
                                 .foregroundStyle(Color(hex: 0xFFD685))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(group.publicLabel)
+                                Text("\(group.publicLabel) · discovered")
                                     .font(.subheadline.weight(.semibold))
                                     .lineLimit(1)
-                                Text("\(group.count) discovered model(s) · reference only")
+                                Text("\(group.count) model(s) · \(group.firstModelId.isEmpty ? "model pending" : group.firstModelId)")
                                     .font(.caption)
                                     .foregroundStyle(secondaryText)
                                     .lineLimit(1)
                             }
                             Spacer()
-                            Text("DISCOVERY")
+                            Text("IMPORT")
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundStyle(Color(hex: 0xFFD685))
                         }
@@ -389,13 +381,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                 }
-            } else {
-                EmptyProductState(
-                    title: "No reference catalog",
-                    message: "Local discovery is unavailable or returned no models.",
-                    icon: "magnifyingglass"
-                )
-                .frame(maxWidth: .infinity, minHeight: 150)
             }
         }
     }
@@ -433,14 +418,14 @@ struct ContentView: View {
         editingProvider = provider
     }
 
-    private func openFirstReferenceGroupFromRowAction() {
+    private func openFirstDiscoveredCandidateFromRowAction() {
         guard let group = model.localCatalog?.sourceGroups.first else { return }
-        openReferenceGroupFromRowAction(group)
+        openDiscoveredCandidateFromRowAction(group)
     }
 
-    private func openReferenceGroupFromRowAction(_ group: LocalModelCatalog.SourceGroup) {
-        smokeSectionRecorder?("reference-row-action")
-        selectedReferenceGroup = group
+    private func openDiscoveredCandidateFromRowAction(_ group: LocalModelCatalog.SourceGroup) {
+        smokeSectionRecorder?("discovered-row-action")
+        importingGroup = group
     }
 
     private var usageTab: some View {
@@ -827,11 +812,13 @@ private struct ProviderFormView: View {
     enum Mode {
         case add
         case edit(ConfiguredProviderEntry)
+        case `import`(LocalModelCatalog.SourceGroup)
 
         var title: String {
             switch self {
             case .add: "新增模型接入"
             case .edit: "编辑模型接入"
+            case .import: "导入本机发现"
             }
         }
 
@@ -839,6 +826,7 @@ private struct ProviderFormView: View {
             switch self {
             case .add: "保存接入"
             case .edit: "保存"
+            case .import: "导入并保存"
             }
         }
 
@@ -846,6 +834,7 @@ private struct ProviderFormView: View {
             switch self {
             case .add: "provider-add-mode"
             case .edit: "provider-edit-mode"
+            case .import: "provider-import-mode"
             }
         }
     }
@@ -883,6 +872,16 @@ private struct ProviderFormView: View {
             _keyHeader = State(initialValue: provider.keyHeader)
             _modelMapping = State(initialValue: provider.upstreamModel.isEmpty ? provider.modelId : "\(provider.modelId) -> \(provider.upstreamModel)")
             _contextWindow = State(initialValue: provider.contextWindow.map(String.init) ?? "")
+        } else if case .import(let group) = mode {
+            _providerId = State(initialValue: "import-\(group.publicLabel)")
+            _source = State(initialValue: group.source)
+            _displayPrefix = State(initialValue: "\(group.publicLabel)/")
+            _apiFormat = State(initialValue: "openai_chat")
+            _modelsURL = State(initialValue: "http://127.0.0.1:18787/v1/models")
+            _credentialKind = State(initialValue: "env")
+            _credentialReference = State(initialValue: "")
+            _modelMapping = State(initialValue: group.firstModelId)
+            _contextWindow = State(initialValue: "")
         }
     }
 
@@ -963,6 +962,8 @@ private struct ProviderFormView: View {
                         saved = model.addProvider(draft, keychainCredential: keychainCredential)
                     case .edit(let provider):
                         saved = model.updateProvider(provider.id, draft: draft, keychainCredential: keychainCredential)
+                    case .import:
+                        saved = model.addProvider(draft, keychainCredential: keychainCredential)
                     }
                     if saved {
                         onClose()
@@ -979,6 +980,8 @@ private struct ProviderFormView: View {
         .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
         .preferredColorScheme(.dark)
         .smokeSection(mode.smokeSection, recorder: smokeSectionRecorder)
+        .smokeSection(importPrefilledSection, recorder: smokeSectionRecorder)
+        .smokeSection(importMissingRequiredSection, recorder: smokeSectionRecorder)
         .smokeSection("provider-protocol-field", recorder: smokeSectionRecorder)
         .smokeSection("provider-base-url-field", recorder: smokeSectionRecorder)
         .smokeSection("provider-models-url-field", recorder: smokeSectionRecorder)
@@ -1033,6 +1036,23 @@ private struct ProviderFormView: View {
         validationMessage.hasPrefix("Ready to save provider metadata")
     }
 
+    private var importPrefilledSection: String {
+        guard case .import = mode,
+              !providerId.isEmpty,
+              !modelMapping.isEmpty,
+              !modelsURL.isEmpty else {
+            return ""
+        }
+        return "provider-import-prefilled-fields"
+    }
+
+    private var importMissingRequiredSection: String {
+        guard case .import = mode, !canSave else {
+            return ""
+        }
+        return "provider-import-missing-required-fields"
+    }
+
     private var draft: ProviderConfigDraft {
         let parsed = parsedMapping
         return ProviderConfigDraft(
@@ -1074,64 +1094,6 @@ private struct ProviderFormView: View {
     private func isEnvReference(_ value: String) -> Bool {
         let pattern = #"^[A-Za-z_][A-Za-z0-9_]*$"#
         return value.range(of: pattern, options: .regularExpression) != nil
-    }
-}
-
-private struct ReferenceGroupDetailView: View {
-    let group: LocalModelCatalog.SourceGroup
-    let onClose: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(group.publicLabel)
-                        .font(.title2.weight(.semibold))
-                    Text("\(group.count) discovered model(s) · reference only")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.56))
-                }
-                Spacer()
-                Button {
-                    onClose()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(ControlButtonStyle())
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                detailRow("Source", "redacted")
-                detailRow("Model IDs", "redacted")
-                detailRow("RelayKit route", "not configured")
-                detailRow("Use", "reference/import hint")
-            }
-
-            HStack {
-                Spacer()
-                Button("关闭") { onClose() }
-                    .buttonStyle(ControlButtonStyle())
-            }
-        }
-        .padding(18)
-        .frame(width: 420)
-        .background(Color(hex: 0x101722), in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
-        .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
-        .preferredColorScheme(.dark)
-    }
-
-    private func detailRow(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title)
-                .foregroundStyle(.white.opacity(0.52))
-            Spacer()
-            Text(value)
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
-        }
-        .font(.caption)
-        .padding(10)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -1235,7 +1197,12 @@ private extension Color {
 }
 
 private extension View {
+    @ViewBuilder
     func smokeSection(_ id: String, recorder: ((String) -> Void)?) -> some View {
-        modifier(SmokeSectionModifier(id: id, recorder: recorder))
+        if id.isEmpty {
+            self
+        } else {
+            modifier(SmokeSectionModifier(id: id, recorder: recorder))
+        }
     }
 }

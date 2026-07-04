@@ -59,9 +59,9 @@ capture() {
   fi
   test -s "${evidence}"
   case "${name}" in
-    connect) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","reference-catalog","add-strip","auth-blocked-state"]' ;;
-    detail) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","reference-catalog","provider-edit-modal","configured-provider-row-action","add-strip","auth-blocked-state"]' ;;
-    reference) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","reference-catalog","reference-detail-modal","reference-row-action","add-strip","auth-blocked-state"]' ;;
+    connect) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","import-candidates","add-strip","auth-blocked-state"]' ;;
+    detail) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","import-candidates","provider-edit-modal","configured-provider-row-action","add-strip","auth-blocked-state"]' ;;
+    import) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","configured-providers","import-candidates","provider-import-modal","provider-import-mode","provider-import-prefilled-fields","provider-import-missing-required-fields","discovered-row-action","add-strip","auth-blocked-state"]' ;;
     usage) required='["tab-usage","usage-kpis","usage-rows"]' ;;
     settings|settings-light) required='["tab-settings","appearance-control","launch-login-control","settings-actions","advanced-paths"]' ;;
     provider) required='["add-strip","add-strip-action","tab-provider","provider-modal","provider-add-mode","credential-reference-form","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
@@ -88,13 +88,13 @@ capture() {
       . as $doc |
       $doc.connect.configured_provider_count == 0 and
       ($doc.connect.configured_provider_labels | length) == $doc.connect.configured_provider_count and
-      $doc.connect.reference_catalog_model_count > 0 and
-      $doc.connect.reference_catalog_source_group_count > 0 and
-      $doc.connect.display_mode == "configured-providers-and-reference-sources" and
-      ($doc.connect.reference_row_labels | length) == $doc.connect.reference_catalog_source_group_count and
-      (all($doc.connect.reference_row_labels[]; test("^source-[0-9]+$"))) and
-      ($doc.connect.reference_row_labels | index("qwen3-coder") | not) and
-      ($doc.connect.reference_row_labels | index("claude-example") | not) and
+      $doc.connect.discovered_catalog_model_count > 0 and
+      $doc.connect.discovered_catalog_source_group_count > 0 and
+      $doc.connect.display_mode == "single-provider-setup-list" and
+      ($doc.connect.discovered_row_labels | length) == $doc.connect.discovered_catalog_source_group_count and
+      (all($doc.connect.discovered_row_labels[]; test("^source-[0-9]+$"))) and
+      ($doc.connect.discovered_row_labels | index("qwen3-coder") | not) and
+      ($doc.connect.discovered_row_labels | index("claude-example") | not) and
       ($doc.connect.configured_provider_labels | index("qwen3-coder") | not) and
       ($doc.connect.configured_provider_labels | index("claude-example") | not) and
       ($doc.connect.configured_provider_model_labels | index("qwen3-coder") | not) and
@@ -125,14 +125,21 @@ capture() {
       .connect.source_names_redacted == true
     ' "${evidence}" >/dev/null
   fi
-  if [[ "${name}" == "reference" ]]; then
+  if [[ "${name}" == "import" ]]; then
     jq -e '
       .connect.configured_provider_count == 0 and
-      .connect.reference_detail_opened == true and
-      .connect.reference_row_action_invoked == true and
+      .connect.import_mode_opened == true and
+      .connect.import_row_action_invoked == true and
+      .connect.import_has_prefilled_fields == true and
+      .connect.import_has_missing_required_fields == true and
+      .connect.redacted_only_detail_opened == false and
       .connect.model_ids_redacted == true and
       .connect.source_names_redacted == true
     ' "${evidence}" >/dev/null
+    if grep -Eq 'Source redacted|Model IDs redacted|not configured|reference only' "${evidence}"; then
+      echo "import smoke regressed to redacted-only reference detail" >&2
+      exit 1
+    fi
   fi
   if [[ "${name}" == "provider" ]]; then
     jq -e '
@@ -194,7 +201,7 @@ fi
 
 capture connect --ui-smoke-tab connect --ui-smoke-provider-config "${EMPTY_PROVIDER_CONFIG}"
 capture detail --ui-smoke-tab connect --ui-smoke-detail --ui-smoke-provider-config "${FIXTURE_PROVIDER_CONFIG}"
-capture reference --ui-smoke-tab connect --ui-smoke-reference-detail --ui-smoke-provider-config "${EMPTY_PROVIDER_CONFIG}"
+capture import --ui-smoke-tab connect --ui-smoke-import --ui-smoke-provider-config "${EMPTY_PROVIDER_CONFIG}"
 capture usage --ui-smoke-tab usage --ui-smoke-provider-config "${EMPTY_PROVIDER_CONFIG}"
 capture settings --ui-smoke-tab settings --ui-smoke-provider-config "${EMPTY_PROVIDER_CONFIG}"
 /usr/bin/defaults write "${BUNDLE_ID}" "${APPEARANCE_KEY}" light
