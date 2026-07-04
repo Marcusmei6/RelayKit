@@ -100,10 +100,14 @@ public enum ProviderConfigDraftWriter {
         let credentialKind = clean(draft.credentialKind).isEmpty ? "env" : clean(draft.credentialKind)
         let metadataOnlyCredential = !credentialReference.isEmpty && credentialKind == "keychain"
         if !credentialReference.isEmpty {
-            provider["credential_ref"] = [
+            var credentialRef: [String: Any] = [
                 "kind": credentialKind,
                 "value": credentialReference,
             ]
+            if !clean(draft.keyHeader).isEmpty {
+                credentialRef["header"] = clean(draft.keyHeader)
+            }
+            provider["credential_ref"] = credentialRef
         }
         var capabilities: [String: Any] = [:]
         if let streaming = draft.streaming {

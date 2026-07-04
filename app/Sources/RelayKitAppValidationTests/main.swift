@@ -116,6 +116,7 @@ func expectProviderDraftWriterWithPrototypeMetadata() throws {
           let added = providers.last,
           let credentialRef = added["credential_ref"] as? [String: Any],
           credentialRef["kind"] as? String == "key_file",
+          credentialRef["header"] as? String == "Authorization",
           let metadata = added["catalog"] as? [String: Any],
           metadata["models_url"] as? String == "http://127.0.0.1:18787/v1/models",
           metadata["key_header"] as? String == "Authorization",
