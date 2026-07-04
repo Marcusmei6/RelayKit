@@ -21,7 +21,7 @@ Supported reference kinds:
 | kind | value contract | runtime status |
 | --- | --- | --- |
 | `env` | Environment variable name, matching `[A-Za-z_][A-Za-z0-9_]*`. Optional `header` selects a safe HTTP header name. | Implemented. Gateway reads the environment variable and injects the upstream auth header. |
-| `keychain` | Local item reference using only letters, numbers, `.`, `_`, `:`, `@`, `/`, and `-`. | Contract only. Do not read Keychain until the security/product decision is made. |
+| `keychain` | Local generic-password item service name using only letters, numbers, `.`, `_`, `:`, `@`, `/`, and `-`. Optional `header` selects a safe HTTP header name. | Implemented for local macOS runtime. The app writes the credential value to Keychain; provider JSON stores only this reference. Gateway reads the item and injects only the configured upstream auth header. |
 | `key_file` | Absolute path or home-relative path beginning with `/` or `~/`. Optional `header` selects a safe HTTP header name. | Implemented for local runtime. Gateway reads the file and injects only the configured upstream auth header. |
 
 `auth_env` remains supported for backwards compatibility. New app-created provider entries should prefer `credential_ref.kind = "env"`.
@@ -126,4 +126,4 @@ The provider add sheet persists only fields that are implemented honestly today:
 - model id, display name, upstream model, and context window;
 - boolean capability metadata and route visibility/priority.
 
-Env and key-file credential references are executable in the gateway today. Keychain references remain validated metadata until product/security decisions select real credential storage. App-created non-env routes remain disabled by default unless the user explicitly supplies and enables a local credential reference.
+Env, Keychain, and key-file credential references are executable in the gateway today. The app provider form may write a Keychain credential value to macOS Keychain, but provider JSON must contain only `credential_ref.kind = "keychain"` and the item reference. App-created routes are enabled only from explicit provider metadata and credential references; raw credential values never belong in provider JSON.

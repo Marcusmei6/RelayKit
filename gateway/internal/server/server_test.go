@@ -636,6 +636,56 @@ func TestCredentialRefKeyFileSetsCustomAuthorizationHeader(t *testing.T) {
 	}
 }
 
+func TestCredentialRefKeychainSetsAuthorizationHeader(t *testing.T) {
+	oldLookup := lookupKeychainCredential
+	lookupKeychainCredential = func(name string) (string, error) {
+		if name != "relaykit.test.provider-token" {
+			t.Fatalf("keychain item = %q", name)
+		}
+		return "keychain-token", nil
+	}
+	defer func() { lookupKeychainCredential = oldLookup }()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer keychain-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":    "chatcmpl-keychain",
+			"model": "qwen3-coder",
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "OK"},
+				"finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","credential_ref":{"kind":"keychain","value":"relaykit.test.provider-token"},"models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	body := strings.NewReader(`{"model":"qwen3-coder","input":"reply OK"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestResponsesAcceptsZstdEncodedRequest(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

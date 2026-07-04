@@ -181,7 +181,7 @@ Status: README refreshed and agent model routes scrubbed to public defaults.
 
 ## Phase 7: P0 Menu-Bar Control Center
 
-Status: local P0 regression complete; remaining items require future schema, credentials, or distribution decisions.
+Status: local P0 regression complete; remaining items require future schema or distribution decisions.
 
 - Primary surface is a menu-bar resident control-center, not a dashboard window.
 - Main tabs are `接入`, `Usage`, and `设置`.
@@ -198,18 +198,18 @@ Status: local P0 regression complete; remaining items require future schema, cre
 - Menu-bar UI smoke now writes screenshot plus evidence JSON under `dist/ui-smoke/` and verifies `open -n dist/RelayKitApp.app --args ...`, compact status-item visibility, anchored popover state, semantic tab sections, Settings state, Light appearance persistence, provider modal capture, and stale RelayKit-owned process cleanup.
 - Connect now treats the running local `agent-local-gateway` reference service as read-only catalog input, groups discovered models by public source/owner, records only redacted source/model counts in smoke evidence, and keeps execution auth state explicit instead of listing private model IDs as configured RelayKit routes.
 - Gateway OpenAI Chat streaming Responses events must stay compatible with Codex CLI: accept Responses input message parts, emit output item/content part lifecycle events before text deltas, and include Responses-shaped usage totals in `response.completed`.
-- Remaining non-P0 work: Claude Code adaptation, advanced provider capability schema/import, Keychain/key-file credential storage, signing/notarization/publishing, and real public provider presets.
+- Remaining non-P0 work: Claude Code adaptation, advanced provider capability schema/import, signing/notarization/publishing, and real public provider presets.
 
 ## Phase 7.5: Provider Credential and Capability Contract
 
-Status: public-safe contract implemented for env references and metadata validation; Keychain/key-file resolution remains deferred.
+Status: public-safe contract implemented for env, Keychain, and key-file references.
 
 - `docs/spec/provider-profile-contract.md` defines `credential_ref`, `capabilities`, `routing`, `catalog`, and model `upstream_model`.
 - Gateway config loading validates public-safe credential references and metadata, rejects secret-looking values, requires catalog model URLs to be http(s) URLs without credentials/query/fragment, and still routes by explicit model id.
-- Runtime auth supports `credential_ref.kind = "env"`, `credential_ref.kind = "key_file"`, and legacy `auth_env`; `keychain` remains contract-only metadata.
-- Direct key-file providers are probed during `/v1/models` with a bounded local timeout. Unhealthy models are omitted from the ready catalog and only redacted aggregate health counts are returned.
-- The app provider form writes source/prefix/protocol/base/catalog/model-mapping metadata and credential references through `credential_ref`; Keychain/key-file references remain auth-blocked metadata until explicit credential storage is selected.
-- Remaining work that requires explicit selection: real Keychain storage, key-file reading, credential migration UI, public provider presets, and richer capability discovery/import.
+- Runtime auth supports `credential_ref.kind = "env"`, `credential_ref.kind = "keychain"`, `credential_ref.kind = "key_file"`, and legacy `auth_env`.
+- Direct Keychain and key-file providers are probed during `/v1/models` with a bounded local timeout. Unhealthy models are omitted from the ready catalog and only redacted aggregate health counts are returned.
+- The app provider form writes source/prefix/protocol/base/catalog/model-mapping metadata and credential references through `credential_ref`; optional Keychain credential input is written only to macOS Keychain.
+- Remaining work that requires explicit selection: credential migration UI, public provider presets, and richer capability discovery/import.
 
 ## Task Ownership
 

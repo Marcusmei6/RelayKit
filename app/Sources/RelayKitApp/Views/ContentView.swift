@@ -734,6 +734,7 @@ private struct ProviderFormView: View {
     @State private var modelsURL = ""
     @State private var credentialKind = "env"
     @State private var credentialReference = ""
+    @State private var keychainCredential = ""
     @State private var keyHeader = "Authorization"
     @State private var modelMapping = ""
     @State private var contextWindow = ""
@@ -778,7 +779,17 @@ private struct ProviderFormView: View {
                     .textFieldStyle(ProductTextFieldStyle())
             }
 
-            Text("Catalog discovery is read-only. Keychain refs remain auth-blocked until credential storage is selected.")
+            if credentialKind == "keychain" {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Keychain credential")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.52))
+                    SecureField("optional value to store in macOS Keychain", text: $keychainCredential)
+                        .textFieldStyle(ProductTextFieldStyle())
+                }
+            }
+
+            Text("Credential values are written only to macOS Keychain; provider JSON stores references.")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.48))
 
@@ -791,7 +802,7 @@ private struct ProviderFormView: View {
                 Button("取消") { onClose() }
                     .buttonStyle(ControlButtonStyle())
                 Button("保存接入") {
-                    if model.addProvider(draft) {
+                    if model.addProvider(draft, keychainCredential: keychainCredential) {
                         onClose()
                     }
                 }
@@ -853,9 +864,6 @@ private struct ProviderFormView: View {
             _ = try ProviderConfigDraftWriter.addProvider(draft, to: Data(#"{"providers":[]}"#.utf8))
         } catch {
             return error.localizedDescription
-        }
-        if credentialKind == "keychain" && !credentialReference.isEmpty {
-            return "Ready to save provider metadata; route stays disabled until credential storage is selected."
         }
         return "Ready to save provider metadata."
     }

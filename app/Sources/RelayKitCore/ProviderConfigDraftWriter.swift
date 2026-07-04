@@ -98,7 +98,6 @@ public enum ProviderConfigDraftWriter {
         ]
         let credentialReference = clean(draft.credentialReference).isEmpty ? clean(draft.authEnv) : clean(draft.credentialReference)
         let credentialKind = clean(draft.credentialKind).isEmpty ? "env" : clean(draft.credentialKind)
-        let metadataOnlyCredential = !credentialReference.isEmpty && credentialKind == "keychain"
         if !credentialReference.isEmpty {
             var credentialRef: [String: Any] = [
                 "kind": credentialKind,
@@ -136,10 +135,10 @@ public enum ProviderConfigDraftWriter {
             routing["priority"] = priority
         }
         if let visible = draft.visible {
-            routing["visible"] = metadataOnlyCredential ? false : visible
+            routing["visible"] = visible
         }
         if !routing.isEmpty {
-            routing["status"] = metadataOnlyCredential ? "disabled" : "enabled"
+            routing["status"] = "enabled"
             provider["routing"] = routing
         }
         var catalog: [String: Any] = [:]

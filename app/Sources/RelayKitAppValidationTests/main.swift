@@ -1,5 +1,6 @@
 import Foundation
 import RelayKitCore
+import Security
 
 let validConfig = """
 {
@@ -131,6 +132,46 @@ func expectProviderDraftWriterWithPrototypeMetadata() throws {
           let models = added["models"] as? [[String: Any]],
           models.first?["upstream_model"] as? String == "upstream-coder" else {
         fatalError("provider draft writer did not include prototype metadata: \(json)")
+    }
+}
+
+func expectProviderDraftWriterWithKeychainReference() throws {
+    let draft = ProviderConfigDraft(
+        providerId: "local-keychain",
+        providerName: "Local Keychain",
+        baseURL: "http://127.0.0.1:11436/v1",
+        apiFormat: "openai_chat",
+        authEnv: "",
+        modelId: "keychain/coder",
+        modelDisplayName: "Keychain Coder",
+        contextWindow: 32000,
+        source: "local-keychain",
+        modelPrefix: "keychain/",
+        credentialKind: "keychain",
+        credentialReference: "relaykit.test.provider-token",
+        keyHeader: "Authorization",
+        upstreamModel: "upstream-coder",
+        priority: 50,
+        visible: true
+    )
+    let data = try ProviderConfigDraftWriter.addProvider(draft, to: Data(validConfig.utf8))
+    let text = String(data: data, encoding: .utf8) ?? ""
+    if text.contains("sk-test-secret-value") {
+        fatalError("provider draft wrote a credential value: \(text)")
+    }
+    let json = try JSONSerialization.jsonObject(with: data)
+    try ProviderConfigValidator.validate(json)
+    guard let root = json as? [String: Any],
+          let providers = root["providers"] as? [[String: Any]],
+          let added = providers.last,
+          let credentialRef = added["credential_ref"] as? [String: Any],
+          credentialRef["kind"] as? String == "keychain",
+          credentialRef["value"] as? String == "relaykit.test.provider-token",
+          credentialRef["header"] as? String == "Authorization",
+          let routing = added["routing"] as? [String: Any],
+          routing["status"] as? String == "enabled",
+          routing["visible"] as? Bool == true else {
+        fatalError("provider draft writer did not include keychain reference: \(json)")
     }
 }
 
@@ -269,14 +310,39 @@ func expectAppSettingsPersistence() {
     }
 }
 
+func expectKeychainCredentialStore() throws {
+    let service = "relaykit.validation.\(UUID().uuidString)"
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: "RelayKit",
+    ]
+    defer {
+        SecItemDelete(query as CFDictionary)
+    }
+    try KeychainCredentialStore.save(value: "fixture-keychain-value", service: service)
+    var readQuery = query
+    readQuery[kSecReturnData as String] = true
+    readQuery[kSecMatchLimit as String] = kSecMatchLimitOne
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(readQuery as CFDictionary, &result)
+    guard status == errSecSuccess,
+          let data = result as? Data,
+          String(data: data, encoding: .utf8) == "fixture-keychain-value" else {
+        fatalError("Keychain credential store did not save expected fixture value: \(status)")
+    }
+}
+
 try expectValid(validConfig)
 try expectProviderDraftWriter()
 try expectProviderDraftWriterWithPrototypeMetadata()
+try expectProviderDraftWriterWithKeychainReference()
 expectProviderDraftRejectsCredentialValue()
 try expectLocalCatalogSummary()
 try expectCredentialRefContract()
 try expectCapabilityContract()
 expectAppSettingsPersistence()
+try expectKeychainCredentialStore()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }

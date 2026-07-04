@@ -147,7 +147,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func addProvider(_ draft: ProviderConfigDraft) -> Bool {
+    func addProvider(_ draft: ProviderConfigDraft, keychainCredential: String = "") -> Bool {
         do {
             let existing: Data
             if FileManager.default.fileExists(atPath: providerConfigPath) {
@@ -158,6 +158,9 @@ final class AppModel: ObservableObject {
                 existing = Data(providerConfigText.utf8)
             }
             let pretty = try ProviderConfigDraftWriter.addProvider(draft, to: existing)
+            if draft.credentialKind == "keychain" && !keychainCredential.isEmpty {
+                try KeychainCredentialStore.save(value: keychainCredential, service: draft.credentialReference)
+            }
             var backupPath: String?
             if FileManager.default.fileExists(atPath: providerConfigPath) {
                 let backup = providerConfigPath + ".bak." + UUID().uuidString
@@ -167,9 +170,13 @@ final class AppModel: ObservableObject {
             try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
             if let backupPath {
-                message = "Added provider; backup: \(backupPath)"
+                message = draft.credentialKind == "keychain" && !keychainCredential.isEmpty
+                    ? "Stored Keychain credential; added provider; backup: \(backupPath)"
+                    : "Added provider; backup: \(backupPath)"
             } else {
-                message = "Added provider"
+                message = draft.credentialKind == "keychain" && !keychainCredential.isEmpty
+                    ? "Stored Keychain credential; added provider"
+                    : "Added provider"
             }
             return true
         } catch {

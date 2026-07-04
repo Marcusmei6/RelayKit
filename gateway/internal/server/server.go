@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,6 +26,18 @@ type Server struct {
 	config       *config.Config
 	client       *http.Client
 	usageLogPath string
+}
+
+var lookupKeychainCredential = func(name string) (string, error) {
+	out, err := exec.Command("/usr/bin/security", "find-generic-password", "-s", name, "-w").Output()
+	if err != nil {
+		return "", fmt.Errorf("keychain credential unavailable")
+	}
+	token := strings.TrimSpace(string(out))
+	if token == "" {
+		return "", fmt.Errorf("keychain credential is empty")
+	}
+	return token, nil
 }
 
 func New(configPath string) (http.Handler, error) {
@@ -135,7 +148,8 @@ func (s *Server) catalogModels() ([]map[string]any, map[string]any) {
 }
 
 func shouldProbeCatalogModel(provider config.ProviderProfile) bool {
-	return provider.CredentialRef != nil && provider.CredentialRef.Kind == config.CredentialKindKeyFile
+	return provider.CredentialRef != nil &&
+		(provider.CredentialRef.Kind == config.CredentialKindKeyFile || provider.CredentialRef.Kind == config.CredentialKindKeychain)
 }
 
 func (s *Server) probeModel(provider config.ProviderProfile, model config.Model) bool {
@@ -333,7 +347,18 @@ func applyProviderAuth(req *http.Request, provider config.ProviderProfile) error
 		}
 		return nil
 	}
-	if provider.CredentialRef == nil || provider.CredentialRef.Kind != config.CredentialKindKeyFile {
+	if provider.CredentialRef == nil {
+		return nil
+	}
+	if provider.CredentialRef.Kind == config.CredentialKindKeychain {
+		token, err := lookupKeychainCredential(provider.CredentialRef.Value)
+		if err != nil {
+			return err
+		}
+		setAuthHeader(req, provider, token)
+		return nil
+	}
+	if provider.CredentialRef.Kind != config.CredentialKindKeyFile {
 		return nil
 	}
 	path := strings.TrimPrefix(provider.CredentialRef.Value, "~/")
