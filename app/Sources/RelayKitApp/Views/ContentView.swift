@@ -778,7 +778,7 @@ private struct ProviderFormView: View {
                     .textFieldStyle(ProductTextFieldStyle())
             }
 
-            Text("Catalog discovery is read-only. Keychain/key-file credential refs remain auth-blocked until credential storage is selected.")
+            Text("Catalog discovery is read-only. Keychain refs remain auth-blocked until credential storage is selected.")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.48))
 
@@ -854,7 +854,7 @@ private struct ProviderFormView: View {
         } catch {
             return error.localizedDescription
         }
-        if credentialKind != "env" && !credentialReference.isEmpty {
+        if credentialKind == "keychain" && !credentialReference.isEmpty {
             return "Ready to save provider metadata; route stays disabled until credential storage is selected."
         }
         return "Ready to save provider metadata."

@@ -125,8 +125,8 @@ func expectProviderDraftWriterWithPrototypeMetadata() throws {
           routing["source"] as? String == "local-bridge",
           routing["model_prefix"] as? String == "bridge/",
           routing["priority"] as? Int == 50,
-          routing["status"] as? String == "disabled",
-          routing["visible"] as? Bool == false,
+          routing["status"] as? String == "enabled",
+          routing["visible"] as? Bool == true,
           let models = added["models"] as? [[String: Any]],
           models.first?["upstream_model"] as? String == "upstream-coder" else {
         fatalError("provider draft writer did not include prototype metadata: \(json)")

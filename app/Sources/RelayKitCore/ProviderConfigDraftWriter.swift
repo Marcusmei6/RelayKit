@@ -98,7 +98,7 @@ public enum ProviderConfigDraftWriter {
         ]
         let credentialReference = clean(draft.credentialReference).isEmpty ? clean(draft.authEnv) : clean(draft.credentialReference)
         let credentialKind = clean(draft.credentialKind).isEmpty ? "env" : clean(draft.credentialKind)
-        let metadataOnlyCredential = !credentialReference.isEmpty && credentialKind != "env"
+        let metadataOnlyCredential = !credentialReference.isEmpty && credentialKind == "keychain"
         if !credentialReference.isEmpty {
             provider["credential_ref"] = [
                 "kind": credentialKind,
