@@ -1,7 +1,7 @@
 import Foundation
 
-public struct LocalModelCatalog {
-    public struct Model: Decodable, Identifiable {
+public struct LocalModelCatalog: Sendable {
+    public struct Model: Decodable, Identifiable, Sendable {
         public let id: String
         public let source: String
         public let displayName: String?
@@ -26,7 +26,7 @@ public struct LocalModelCatalog {
         }
     }
 
-    public struct SourceGroup: Equatable {
+    public struct SourceGroup: Equatable, Sendable {
         public let source: String
         public let count: Int
         public let publicLabel: String
