@@ -11,6 +11,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
     private var smokeSections = Set<String>()
     private let smokeTab = Tab(rawValue: value(after: "--ui-smoke-tab") ?? "") ?? .connect
     private let smokeShowsProvider = CommandLine.arguments.contains("--ui-smoke-provider")
+    private let smokeShowsDetail = CommandLine.arguments.contains("--ui-smoke-detail")
     private let smokeEvidencePath = value(after: "--ui-smoke-evidence")
 
     static func main() {
@@ -37,7 +38,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 520, height: 680)
         popover.contentViewController = NSHostingController(
-            rootView: ContentView(initialTab: smokeTab, showProviderForm: smokeShowsProvider) { [weak self] section in
+            rootView: ContentView(initialTab: smokeTab, showProviderForm: smokeShowsProvider, showCatalogDetail: smokeShowsDetail) { [weak self] section in
                 self?.smokeSections.insert(section)
             }
                 .environmentObject(model)
@@ -152,6 +153,10 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             "model_ids_redacted": true,
             "source_names_redacted": true,
             "demo_model_rows_present": demoModelRowsPresent,
+            "catalog_detail_opened": smokeSections.contains("catalog-row-detail"),
+            "add_strip_available": smokeSections.contains("add-strip"),
+            "add_strip_opens_provider_modal": smokeShowsProvider && smokeSections.contains("add-strip") && smokeSections.contains("provider-modal"),
+            "cli_selected": "codex",
         ]
         if let gatewayExercise {
             connectEvidence["gateway_control_exercise"] = gatewayExercise

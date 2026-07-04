@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${ROOT}/dist/reference-model-coverage.json"
+USAGE_OUT="${ROOT}/dist/reference-usage-source-coverage.json"
 URL="${RELAYKIT_REFERENCE_MODELS_URL:-http://127.0.0.1:18787/v1/models}"
+USAGE_LOG="${RELAYKIT_REFERENCE_USAGE_LOG:-${HOME}/.config/agent-local-gateway/usage.jsonl}"
 KEEP_SOURCE_NAMES="${RELAYKIT_REFERENCE_KEEP_SOURCE_NAMES:-0}"
 KEEP_MODEL_IDS="${RELAYKIT_REFERENCE_KEEP_MODEL_IDS:-0}"
 
@@ -31,3 +33,39 @@ curl -fsS "${URL}" |
 
 jq . "${OUT}"
 echo "RelayKit reference model coverage written: ${OUT}"
+
+if [[ -f "${USAGE_LOG}" ]]; then
+  tail -200 "${USAGE_LOG}" |
+    jq -s '[
+      .[]
+      | select(type == "object")
+      | {
+          source: (.source // "unknown"),
+          status: (.status // "unknown")
+        }
+    ]
+    | group_by(.source)
+    | to_entries
+    | map({
+        source: "source-\(.key + 1)",
+        request_count: (.value | length),
+        success_count: (.value | map(select(.status == "success")) | length),
+        source_name_redacted: true,
+        model_ids_redacted: true,
+        routing_drift: (.value[0].source == "official"),
+        drift_note: (if .value[0].source == "official" then "actual source category was official" else "none" end)
+      })' >"${USAGE_OUT}"
+else
+  jq -n '[{
+    source: "unavailable",
+    request_count: 0,
+    success_count: 0,
+    source_name_redacted: true,
+    model_ids_redacted: true,
+    routing_drift: false,
+    drift_note: "agent-local-gateway usage log unavailable"
+  }]' >"${USAGE_OUT}"
+fi
+
+jq . "${USAGE_OUT}"
+echo "RelayKit reference usage source coverage written: ${USAGE_OUT}"

@@ -46,7 +46,8 @@ capture() {
   fi
   test -s "${evidence}"
   case "${name}" in
-    connect) required='["tab-connect","cli-route","local-cli-scan","gateway-controls","gateway-start-stop-restart","gateway-health-refresh","codex-target-state","claude-disabled-placeholder","model-list","local-catalog","auth-blocked-state"]' ;;
+    connect) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","model-list","local-catalog","add-strip","auth-blocked-state"]' ;;
+    detail) required='["tab-connect","cli-route","local-cli-scan","cli-selected-state","codex-target-state","claude-disabled-placeholder","model-list","local-catalog","catalog-row-detail","add-strip","auth-blocked-state"]' ;;
     usage) required='["tab-usage","usage-kpis","usage-rows"]' ;;
     settings|settings-light) required='["tab-settings","appearance-control","launch-login-control","settings-actions","advanced-paths"]' ;;
     provider) required='["tab-provider","provider-modal","credential-reference-form","provider-source-field","provider-prefix-field","provider-protocol-field","provider-base-url-field","provider-models-url-field","provider-model-mapping-field"]' ;;
@@ -79,6 +80,8 @@ capture() {
       ($doc.connect.displayed_row_labels | index("qwen3-coder") | not) and
       ($doc.connect.displayed_row_labels | index("claude-example") | not) and
       ($doc.connect.auth_state | test("auth required|credential reference needed")) and
+      $doc.connect.add_strip_available == true and
+      $doc.connect.cli_selected == "codex" and
       $doc.connect.gateway_control_exercise.start_invoked == true and
       $doc.connect.gateway_control_exercise.start_process_id > 0 and
       $doc.connect.gateway_control_exercise.start_process_running == true and
@@ -90,6 +93,16 @@ capture() {
       $doc.connect.gateway_control_exercise.stop_status == "stopped" and
       $doc.connect.gateway_control_exercise.post_stop_health_status == "stopped"
     ' "${evidence}" >/dev/null
+  fi
+  if [[ "${name}" == "detail" ]]; then
+    jq -e '
+      .connect.catalog_detail_opened == true and
+      .connect.model_ids_redacted == true and
+      .connect.source_names_redacted == true
+    ' "${evidence}" >/dev/null
+  fi
+  if [[ "${name}" == "provider" ]]; then
+    jq -e '.connect.add_strip_opens_provider_modal == true' "${evidence}" >/dev/null
   fi
   /usr/sbin/screencapture -x "${OUT}/${name}.png"
   test -s "${OUT}/${name}.png"
@@ -112,6 +125,7 @@ else
 fi
 
 capture connect --ui-smoke-tab connect
+capture detail --ui-smoke-tab connect --ui-smoke-detail
 capture usage --ui-smoke-tab usage
 capture settings --ui-smoke-tab settings
 /usr/bin/defaults write "${BUNDLE_ID}" "${APPEARANCE_KEY}" light

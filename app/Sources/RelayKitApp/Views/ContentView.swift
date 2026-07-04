@@ -6,13 +6,16 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var tab = Tab.connect
     @State private var showingProviderForm = false
+    @State private var selectedCatalogGroup: LocalModelCatalog.SourceGroup?
     @State private var showingAdvancedSettings = false
     @State private var showingUsagePath = false
+    private let showCatalogDetail: Bool
     private let smokeSectionRecorder: ((String) -> Void)?
 
-    init(initialTab: Tab = .connect, showProviderForm: Bool = false, smokeSectionRecorder: ((String) -> Void)? = nil) {
+    init(initialTab: Tab = .connect, showProviderForm: Bool = false, showCatalogDetail: Bool = false, smokeSectionRecorder: ((String) -> Void)? = nil) {
         _tab = State(initialValue: initialTab)
         _showingProviderForm = State(initialValue: showProviderForm)
+        self.showCatalogDetail = showCatalogDetail
         self.smokeSectionRecorder = smokeSectionRecorder
     }
 
@@ -61,11 +64,28 @@ struct ContentView: View {
                 .smokeSection("credential-reference-form", recorder: smokeSectionRecorder)
                 .padding(18)
             }
+
+            if let selectedCatalogGroup {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture { self.selectedCatalogGroup = nil }
+                CatalogGroupDetailView(group: selectedCatalogGroup) {
+                    self.selectedCatalogGroup = nil
+                } onAdd: {
+                    self.selectedCatalogGroup = nil
+                    showingProviderForm = true
+                }
+                .smokeSection("catalog-row-detail", recorder: smokeSectionRecorder)
+                .padding(18)
+            }
         }
         .foregroundStyle(primaryText)
         .preferredColorScheme(preferredColorScheme)
         .task {
             await model.refreshLocalCatalog()
+            if showCatalogDetail, selectedCatalogGroup == nil {
+                selectedCatalogGroup = model.localCatalog?.sourceGroups.first
+            }
         }
     }
 
@@ -192,23 +212,23 @@ struct ContentView: View {
                 }
 
                 HStack(spacing: 12) {
-                    cliCard(
+                    cliSwitch(
                         title: "Codex",
                         subtitle: model.codexConnectionStatus,
-                        state: model.codexConnectionIsConfigured ? .active : .setup,
+                        selected: true,
+                        disabled: false,
                         icon: "terminal.fill"
                     )
-                    cliCard(title: "Claude Code", subtitle: "Later", active: false, icon: "hourglass")
+                    cliSwitch(title: "Claude Code", subtitle: "Future", selected: false, disabled: true, icon: "hourglass")
                         .disabled(true)
                 }
             }
             .smokeSection("tab-connect", recorder: smokeSectionRecorder)
             .smokeSection("cli-route", recorder: smokeSectionRecorder)
             .smokeSection("local-cli-scan", recorder: smokeSectionRecorder)
+            .smokeSection("cli-selected-state", recorder: smokeSectionRecorder)
             .smokeSection("codex-target-state", recorder: smokeSectionRecorder)
             .smokeSection("claude-disabled-placeholder", recorder: smokeSectionRecorder)
-
-            gatewayControlPanel
 
             SectionCard {
                 HStack(alignment: .firstTextBaseline) {
@@ -220,69 +240,25 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(secondaryText)
                     }
-                    Spacer()
-                    Button {
-                        showingProviderForm = true
-                    } label: {
-                        Label("新增", systemImage: "plus")
-                    }
-                    .buttonStyle(ControlButtonStyle(prominent: true))
                 }
                 modelList
+                addStrip
             }
             .smokeSection("model-list", recorder: smokeSectionRecorder)
             .smokeSection("local-catalog", recorder: smokeSectionRecorder)
+            .smokeSection("add-strip", recorder: smokeSectionRecorder)
             .smokeSection("auth-blocked-state", recorder: smokeSectionRecorder)
         }
     }
 
-    private var gatewayControlPanel: some View {
-        SectionCard {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    sectionEyebrow("GATEWAY")
-                    Text("本机网关")
-                        .font(.headline)
-                    Text("127.0.0.1:19777 · \(model.gatewayStatus)")
-                        .font(.caption)
-                        .foregroundStyle(secondaryText)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text("\(model.models.count) gateway model(s)")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(mutedText)
-                    HStack(spacing: 6) {
-                        Button("Start") { model.startGateway() }
-                        Button("Stop") { model.stopGateway() }
-                        Button("Restart") { model.restartGateway() }
-                    }
-                    .buttonStyle(ControlButtonStyle())
-                    HStack(spacing: 6) {
-                        Button("Health") { Task { await model.refreshHealth() } }
-                        Button("Refresh Models") { Task { await model.refreshModels() } }
-                    }
-                    .buttonStyle(ControlButtonStyle())
-                }
-            }
-        }
-        .smokeSection("gateway-controls", recorder: smokeSectionRecorder)
-        .smokeSection("gateway-start-stop-restart", recorder: smokeSectionRecorder)
-        .smokeSection("gateway-health-refresh", recorder: smokeSectionRecorder)
-    }
-
-    private func cliCard(title: String, subtitle: String, active: Bool, icon: String) -> some View {
-        cliCard(title: title, subtitle: subtitle, state: active ? .active : .future, icon: icon)
-    }
-
-    private func cliCard(title: String, subtitle: String, state: CLIState, icon: String) -> some View {
+    private func cliSwitch(title: String, subtitle: String, selected: Bool, disabled: Bool, icon: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: icon)
                 Spacer()
-                Text(state.label)
+                Text(disabled ? "FUTURE" : selected ? "SELECTED" : "READY")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(state.tint)
+                    .foregroundStyle(disabled ? mutedText : Color(hex: 0x78D8FF))
             }
             Text(title)
                 .font(.headline)
@@ -293,34 +269,39 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(state.background, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(state.border))
+        .background(selected ? Color(hex: 0x78D8FF).opacity(0.11) : surfaceSubtle, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(selected ? Color(hex: 0x78D8FF).opacity(0.42) : borderColor))
     }
 
     private var modelList: some View {
         VStack(spacing: 8) {
             if let catalog = model.localCatalog, !catalog.sourceGroups.isEmpty {
                 ForEach(catalog.sourceGroups, id: \.source) { group in
-                    HStack(spacing: 12) {
-                        Image(systemName: "server.rack")
-                            .foregroundStyle(Color(hex: 0x78D8FF))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(group.publicLabel)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                            Text("\(group.count) discovered model(s)")
-                                .font(.caption)
-                                .foregroundStyle(secondaryText)
-                                .lineLimit(1)
+                    Button {
+                        selectedCatalogGroup = group
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "server.rack")
+                                .foregroundStyle(Color(hex: 0x78D8FF))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(group.publicLabel)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                Text("\(group.count) discovered model(s)")
+                                    .font(.caption)
+                                    .foregroundStyle(secondaryText)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text("AUTH REQUIRED")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(Color(hex: 0xFFD685))
                         }
-                        Spacer()
-                        Text("AUTH REQUIRED")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(Color(hex: 0xFFD685))
+                        .padding(12)
+                        .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(borderColor))
                     }
-                    .padding(12)
-                    .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(borderColor))
+                    .buttonStyle(.plain)
                 }
             } else {
                 EmptyProductState(
@@ -331,6 +312,24 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, minHeight: 150)
             }
         }
+    }
+
+    private var addStrip: some View {
+        Button {
+            showingProviderForm = true
+        } label: {
+            HStack {
+                Image(systemName: "plus")
+                Text("新增模型接入")
+                Spacer()
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(12)
+            .frame(maxWidth: .infinity)
+            .background(Color(hex: 0x78D8FF).opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(hex: 0x78D8FF).opacity(0.36), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
+        }
+        .buttonStyle(.plain)
     }
 
     private var usageTab: some View {
@@ -689,44 +688,6 @@ struct ContentView: View {
     }
 }
 
-private enum CLIState {
-    case active
-    case setup
-    case future
-
-    var label: String {
-        switch self {
-        case .active: "ACTIVE"
-        case .setup: "SETUP"
-        case .future: "FUTURE"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .active: Color(hex: 0xFFD685)
-        case .setup: Color(hex: 0x78D8FF)
-        case .future: .primary.opacity(0.36)
-        }
-    }
-
-    var background: Color {
-        switch self {
-        case .active: Color(hex: 0xFFD685).opacity(0.13)
-        case .setup: Color(hex: 0x78D8FF).opacity(0.11)
-        case .future: Color.primary.opacity(0.055)
-        }
-    }
-
-    var border: Color {
-        switch self {
-        case .active: Color(hex: 0xFFD685).opacity(0.42)
-        case .setup: Color(hex: 0x78D8FF).opacity(0.34)
-        case .future: borderColor
-        }
-    }
-}
-
 enum Tab: String, CaseIterable, Identifiable {
     case connect
     case usage
@@ -934,6 +895,67 @@ private struct ProviderFormView: View {
     private func isEnvReference(_ value: String) -> Bool {
         let pattern = #"^[A-Za-z_][A-Za-z0-9_]*$"#
         return value.range(of: pattern, options: .regularExpression) != nil
+    }
+}
+
+private struct CatalogGroupDetailView: View {
+    let group: LocalModelCatalog.SourceGroup
+    let onClose: () -> Void
+    let onAdd: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(group.publicLabel)
+                        .font(.title2.weight(.semibold))
+                    Text("\(group.count) discovered model(s) · AUTH REQUIRED")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.56))
+                }
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(ControlButtonStyle())
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                detailRow("Source", "redacted")
+                detailRow("Model IDs", "redacted")
+                detailRow("RelayKit route", "not configured")
+                detailRow("Execution", "credential reference needed")
+            }
+
+            HStack {
+                Spacer()
+                Button("关闭") { onClose() }
+                    .buttonStyle(ControlButtonStyle())
+                Button("新增接入") { onAdd() }
+                    .buttonStyle(ControlButtonStyle(prominent: true))
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+        .background(Color(hex: 0x101722), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
+        .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
+        .preferredColorScheme(.dark)
+    }
+
+    private func detailRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(.white.opacity(0.52))
+            Spacer()
+            Text(value)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+        }
+        .font(.caption)
+        .padding(10)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
