@@ -12,7 +12,9 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
     private let smokeTab = Tab(rawValue: value(after: "--ui-smoke-tab") ?? "") ?? .connect
     private let smokeShowsProvider = CommandLine.arguments.contains("--ui-smoke-provider")
     private let smokeShowsDetail = CommandLine.arguments.contains("--ui-smoke-detail")
+    private let smokeShowsReferenceDetail = CommandLine.arguments.contains("--ui-smoke-reference-detail")
     private let smokeEvidencePath = value(after: "--ui-smoke-evidence")
+    private let smokeProviderConfigPath = value(after: "--ui-smoke-provider-config")
 
     static func main() {
         if CommandLine.arguments.contains("--verify-bundled-gateway") {
@@ -27,6 +29,9 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let smokeProviderConfigPath {
+            model.providerConfigPath = smokeProviderConfigPath
+        }
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "bolt.horizontal.circle", accessibilityDescription: "RelayKit")
         statusItem.button?.imagePosition = .imageOnly
@@ -38,7 +43,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 520, height: 680)
         popover.contentViewController = NSHostingController(
-            rootView: ContentView(initialTab: smokeTab, showProviderForm: smokeShowsProvider, showCatalogDetail: smokeShowsDetail) { [weak self] section in
+            rootView: ContentView(initialTab: smokeTab, showProviderForm: smokeShowsProvider, showCatalogDetail: smokeShowsDetail, showReferenceDetail: smokeShowsReferenceDetail) { [weak self] section in
                 self?.smokeSections.insert(section)
             }
                 .environmentObject(model)
@@ -141,13 +146,19 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         let contentWindow = popover.contentViewController?.view.window
         let referenceLabels = model.localCatalog?.sourceGroups.map(\.publicLabel) ?? []
         let configuredLabels = model.configuredProviders.map(\.name)
+        let configuredModelLabels = model.configuredProviders.map(\.modelId)
         let demoModelRowsPresent = referenceLabels.contains { label in
+            label == "qwen3-coder" || label == "claude-example"
+        } || configuredLabels.contains { label in
+            label == "qwen3-coder" || label == "claude-example"
+        } || configuredModelLabels.contains { label in
             label == "qwen3-coder" || label == "claude-example"
         }
         var connectEvidence: [String: Any] = [
             "display_mode": "configured-providers-and-reference-sources",
             "configured_provider_count": model.configuredProviders.count,
             "configured_provider_labels": configuredLabels,
+            "configured_provider_model_labels": configuredModelLabels,
             "reference_row_labels": referenceLabels,
             "reference_catalog_model_count": model.localCatalog?.modelCount ?? 0,
             "reference_catalog_source_group_count": model.localCatalog?.sourceGroups.count ?? 0,
@@ -157,10 +168,15 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             "source_names_redacted": true,
             "demo_model_rows_present": demoModelRowsPresent,
             "provider_edit_opened": smokeSections.contains("provider-edit-modal"),
+            "provider_edit_row_action_invoked": smokeSections.contains("configured-provider-row-action"),
             "provider_edit_has_save": smokeSections.contains("provider-edit-mode"),
             "provider_edit_has_add_cta": false,
+            "reference_detail_opened": smokeSections.contains("reference-detail-modal"),
+            "reference_row_action_invoked": smokeSections.contains("reference-row-action"),
             "add_strip_available": smokeSections.contains("add-strip"),
             "add_strip_opens_provider_modal": smokeShowsProvider && smokeSections.contains("add-strip") && smokeSections.contains("add-strip-action") && smokeSections.contains("provider-modal"),
+            "add_form_has_save": smokeSections.contains("provider-add-mode"),
+            "add_form_has_gateway_port_control": false,
             "cli_selected": "codex",
         ]
         if let gatewayExercise {

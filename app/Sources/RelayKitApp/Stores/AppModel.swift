@@ -48,7 +48,8 @@ final class AppModel: ObservableObject {
 
     init() {
         let savedPath = UserDefaults.standard.string(forKey: "providerConfigPath")
-        providerConfigPath = savedPath == "../examples/providers.example.json" ? RelayKitPaths.providerConfigPath() : savedPath ?? RelayKitPaths.providerConfigPath()
+        let examplePaths = [RelayKitPaths.exampleProviderConfigPath(), "../examples/providers.example.json"]
+        providerConfigPath = savedPath.map { examplePaths.contains($0) ? RelayKitPaths.providerConfigPath() : $0 } ?? RelayKitPaths.providerConfigPath()
         codexTargetPath = UserDefaults.standard.string(forKey: "codexTargetPath") ?? ""
         appearanceMode = settingsStore.appearanceMode
         launchAtLoginRequested = settingsStore.launchAtLoginRequested
@@ -59,7 +60,7 @@ final class AppModel: ObservableObject {
 
     func startGateway() {
         do {
-            try gateway.start(binaryPath: gatewayBinaryPath, configPath: providerConfigPath)
+            try gateway.start(binaryPath: gatewayBinaryPath, configPath: runtimeProviderConfigPath())
             gatewayStatus = "running"
             message = "Gateway started on 127.0.0.1:19777"
         } catch {
@@ -316,6 +317,12 @@ final class AppModel: ObservableObject {
             return Data(providerConfigText.utf8)
         }
         return Data(#"{"providers":[]}"#.utf8)
+    }
+
+    private func runtimeProviderConfigPath() -> String {
+        FileManager.default.fileExists(atPath: providerConfigPath)
+            ? providerConfigPath
+            : RelayKitPaths.exampleProviderConfigPath()
     }
 
     private func refreshConfiguredProviders() {

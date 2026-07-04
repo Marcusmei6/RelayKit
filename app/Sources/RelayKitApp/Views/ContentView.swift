@@ -7,17 +7,20 @@ struct ContentView: View {
     @State private var tab = Tab.connect
     @State private var showingProviderForm = false
     @State private var editingProvider: ConfiguredProviderEntry?
+    @State private var selectedReferenceGroup: LocalModelCatalog.SourceGroup?
     @State private var showingAdvancedSettings = false
     @State private var showingUsagePath = false
     private let smokeOpensProviderFromAddStrip: Bool
     private let showCatalogDetail: Bool
+    private let showReferenceDetail: Bool
     private let smokeSectionRecorder: ((String) -> Void)?
 
-    init(initialTab: Tab = .connect, showProviderForm: Bool = false, showCatalogDetail: Bool = false, smokeSectionRecorder: ((String) -> Void)? = nil) {
+    init(initialTab: Tab = .connect, showProviderForm: Bool = false, showCatalogDetail: Bool = false, showReferenceDetail: Bool = false, smokeSectionRecorder: ((String) -> Void)? = nil) {
         _tab = State(initialValue: initialTab)
         _showingProviderForm = State(initialValue: false)
         self.smokeOpensProviderFromAddStrip = showProviderForm
         self.showCatalogDetail = showCatalogDetail
+        self.showReferenceDetail = showReferenceDetail
         self.smokeSectionRecorder = smokeSectionRecorder
     }
 
@@ -85,13 +88,27 @@ struct ContentView: View {
                 .smokeSection("credential-reference-form", recorder: smokeSectionRecorder)
                 .padding(18)
             }
+
+            if let selectedReferenceGroup {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture { self.selectedReferenceGroup = nil }
+                ReferenceGroupDetailView(group: selectedReferenceGroup) {
+                    self.selectedReferenceGroup = nil
+                }
+                .smokeSection("reference-detail-modal", recorder: smokeSectionRecorder)
+                .padding(18)
+            }
         }
         .foregroundStyle(primaryText)
         .preferredColorScheme(preferredColorScheme)
         .task {
             await model.refreshLocalCatalog()
             if showCatalogDetail, editingProvider == nil {
-                editingProvider = model.configuredProviders.first
+                openFirstConfiguredProviderFromRowAction()
+            }
+            if showReferenceDetail, selectedReferenceGroup == nil {
+                openFirstReferenceGroupFromRowAction()
             }
             if smokeOpensProviderFromAddStrip, !showingProviderForm {
                 openProviderFormFromAddStrip()
@@ -309,7 +326,7 @@ struct ContentView: View {
             } else {
                 ForEach(model.configuredProviders) { provider in
                     Button {
-                        editingProvider = provider
+                        openConfiguredProviderFromRowAction(provider)
                     } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "slider.horizontal.3")
@@ -329,6 +346,8 @@ struct ContentView: View {
                                 .foregroundStyle(Color(hex: 0x78D8FF))
                         }
                         .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                         .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(borderColor))
                     }
@@ -342,26 +361,33 @@ struct ContentView: View {
         VStack(spacing: 8) {
             if let catalog = model.localCatalog, !catalog.sourceGroups.isEmpty {
                 ForEach(catalog.sourceGroups, id: \.source) { group in
-                    HStack(spacing: 12) {
-                        Image(systemName: "server.rack")
-                            .foregroundStyle(Color(hex: 0xFFD685))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(group.publicLabel)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                            Text("\(group.count) discovered model(s) · reference only")
-                                .font(.caption)
-                                .foregroundStyle(secondaryText)
-                                .lineLimit(1)
+                    Button {
+                        openReferenceGroupFromRowAction(group)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "server.rack")
+                                .foregroundStyle(Color(hex: 0xFFD685))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(group.publicLabel)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                Text("\(group.count) discovered model(s) · reference only")
+                                    .font(.caption)
+                                    .foregroundStyle(secondaryText)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text("DISCOVERY")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundStyle(Color(hex: 0xFFD685))
                         }
-                        Spacer()
-                        Text("DISCOVERY")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(Color(hex: 0xFFD685))
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(borderColor))
                     }
-                    .padding(12)
-                    .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(borderColor))
+                    .buttonStyle(.plain)
                 }
             } else {
                 EmptyProductState(
@@ -395,6 +421,26 @@ struct ContentView: View {
     private func openProviderFormFromAddStrip() {
         smokeSectionRecorder?("add-strip-action")
         showingProviderForm = true
+    }
+
+    private func openFirstConfiguredProviderFromRowAction() {
+        guard let provider = model.configuredProviders.first else { return }
+        openConfiguredProviderFromRowAction(provider)
+    }
+
+    private func openConfiguredProviderFromRowAction(_ provider: ConfiguredProviderEntry) {
+        smokeSectionRecorder?("configured-provider-row-action")
+        editingProvider = provider
+    }
+
+    private func openFirstReferenceGroupFromRowAction() {
+        guard let group = model.localCatalog?.sourceGroups.first else { return }
+        openReferenceGroupFromRowAction(group)
+    }
+
+    private func openReferenceGroupFromRowAction(_ group: LocalModelCatalog.SourceGroup) {
+        smokeSectionRecorder?("reference-row-action")
+        selectedReferenceGroup = group
     }
 
     private var usageTab: some View {
@@ -1028,6 +1074,64 @@ private struct ProviderFormView: View {
     private func isEnvReference(_ value: String) -> Bool {
         let pattern = #"^[A-Za-z_][A-Za-z0-9_]*$"#
         return value.range(of: pattern, options: .regularExpression) != nil
+    }
+}
+
+private struct ReferenceGroupDetailView: View {
+    let group: LocalModelCatalog.SourceGroup
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(group.publicLabel)
+                        .font(.title2.weight(.semibold))
+                    Text("\(group.count) discovered model(s) · reference only")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.56))
+                }
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(ControlButtonStyle())
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                detailRow("Source", "redacted")
+                detailRow("Model IDs", "redacted")
+                detailRow("RelayKit route", "not configured")
+                detailRow("Use", "reference/import hint")
+            }
+
+            HStack {
+                Spacer()
+                Button("关闭") { onClose() }
+                    .buttonStyle(ControlButtonStyle())
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+        .background(Color(hex: 0x101722), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
+        .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
+        .preferredColorScheme(.dark)
+    }
+
+    private func detailRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(.white.opacity(0.52))
+            Spacer()
+            Text(value)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+        }
+        .font(.caption)
+        .padding(10)
+        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 

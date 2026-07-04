@@ -346,8 +346,11 @@ try expectKeychainCredentialStore()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }
-if RelayKitPaths.providerConfigPath(bundle: Bundle(for: BundleSentinel.self)) != "../examples/providers.example.json" {
-    fatalError("non-app bundle should fall back to development provider config path")
+if !RelayKitPaths.providerConfigPath(bundle: Bundle(for: BundleSentinel.self)).hasSuffix("Library/Application Support/RelayKit/providers.json") {
+    fatalError("provider config path should default to user app support")
+}
+if RelayKitPaths.exampleProviderConfigPath(bundle: Bundle(for: BundleSentinel.self)) != "../examples/providers.example.json" {
+    fatalError("non-app bundle should expose development example provider config path")
 }
 if RelayKitPaths.codexConfigSourcePath(bundle: Bundle(for: BundleSentinel.self)) != "../examples/codex.config.example.toml" {
     fatalError("non-app bundle should fall back to development Codex config source path")

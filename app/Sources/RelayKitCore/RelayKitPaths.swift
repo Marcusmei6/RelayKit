@@ -12,6 +12,16 @@ public enum RelayKitPaths {
     }
 
     public static func providerConfigPath(bundle: Bundle = .main) -> String {
+        userProviderConfigPath()
+    }
+
+    public static func userProviderConfigPath() -> String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/RelayKit/providers.json")
+            .path
+    }
+
+    public static func exampleProviderConfigPath(bundle: Bundle = .main) -> String {
         let bundled = bundle.bundleURL
             .appendingPathComponent("Contents/Resources/providers.example.json")
             .path
