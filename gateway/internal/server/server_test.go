@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestHealthz(t *testing.T) {
@@ -520,6 +522,104 @@ func TestCredentialRefEnvSetsOpenAIChatAuthorization(t *testing.T) {
 	}
 }
 
+func TestCredentialRefKeyFileSetsCustomAuthorizationHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-relay-api-key"); got != "file-token" {
+			t.Fatalf("x-relay-api-key = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":    "chatcmpl-key-file",
+			"model": "qwen3-coder",
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "OK"},
+				"finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "provider.key")
+	if err := os.WriteFile(keyPath, []byte("file-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","credential_ref":{"kind":"key_file","value":"` + keyPath + `","header":"x-relay-api-key"},"models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	body := strings.NewReader(`{"model":"qwen3-coder","input":"reply OK"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestResponsesAcceptsZstdEncodedRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id": "chatcmpl-zstd",
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "OK"},
+				"finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeTestProviderConfig(t, upstream.URL, "openai_chat", "qwen3-coder"))
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	var body bytes.Buffer
+	encoder, err := zstd.NewWriter(&body)
+	if err != nil {
+		t.Fatalf("zstd writer err = %v", err)
+	}
+	if _, err := encoder.Write([]byte(`{"model":"qwen3-coder","input":"reply OK"}`)); err != nil {
+		t.Fatalf("zstd write err = %v", err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatalf("zstd close err = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", &body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "zstd")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAnthropicRequestNormalizesUnsupportedRoles(t *testing.T) {
+	req := upstreamRequest("anthropic_messages", "m", []chatMessage{
+		{Role: "system", Content: "system"},
+		{Role: "developer", Content: "developer"},
+		{Role: "assistant", Content: "assistant"},
+	}, false)
+	messages := req["messages"].([]chatMessage)
+	if messages[0].Role != "user" || messages[1].Role != "user" || messages[2].Role != "assistant" {
+		t.Fatalf("messages = %+v", messages)
+	}
+}
+
 func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -855,6 +955,7 @@ func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		chunks := []string{
 			`event: message_start` + "\n" + `data: {"message":{"id":"msg-stream","model":"upstream-claude"}}`,
+			`event: content_block_start` + "\n" + `data: {"index":0,"content_block":{"type":"text","text":""}}`,
 			`event: content_block_delta` + "\n" + `data: {"delta":{"type":"text_delta","text":"he"}}`,
 			`event: content_block_delta` + "\n" + `data: {"delta":{"type":"text_delta","text":"llo"}}`,
 			`event: message_delta` + "\n" + `data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
@@ -888,9 +989,13 @@ func TestResponsesStreamsFakeAnthropicMessages(t *testing.T) {
 	got := rec.Body.String()
 	for _, want := range []string{
 		"event: response.created",
+		"event: response.output_item.added",
+		"event: response.content_part.added",
 		`"model":"public/claude"`,
 		`"delta":"he"`,
 		`"delta":"llo"`,
+		"event: response.content_part.done",
+		"event: response.output_item.done",
 		"event: response.completed",
 		`"finish_reason":"end_turn"`,
 		`"output_tokens":1`,

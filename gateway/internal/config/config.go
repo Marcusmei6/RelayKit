@@ -57,8 +57,9 @@ type ProviderProfile struct {
 }
 
 type CredentialRef struct {
-	Kind  string `json:"kind"`
-	Value string `json:"value"`
+	Kind   string `json:"kind"`
+	Value  string `json:"value"`
+	Header string `json:"header,omitempty"`
 }
 
 type Capabilities struct {
@@ -185,6 +186,9 @@ func validateCredentialRef(ref CredentialRef) error {
 	if containsCredentialMarker(ref.Value) {
 		return fmt.Errorf("must not contain credential-looking values")
 	}
+	if ref.Header != "" && !isSafeHeaderName(ref.Header) {
+		return fmt.Errorf("header must be a safe HTTP header name")
+	}
 	switch ref.Kind {
 	case CredentialKindEnv:
 		if !isEnvName(ref.Value) {
@@ -264,6 +268,19 @@ func isSafeReferenceName(value string) bool {
 	}
 	for _, r := range value {
 		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("._:@/-", r)) {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeHeaderName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if !(c == '-' || isASCIILetter(c) || isASCIIDigit(c)) {
 			return false
 		}
 	}

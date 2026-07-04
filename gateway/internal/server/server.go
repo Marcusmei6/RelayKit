@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"relaykit/gateway/internal/config"
 )
 
@@ -95,8 +97,17 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body, closeBody, err := requestBodyReader(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", err.Error()))
+		return
+	}
+	if closeBody != nil {
+		defer closeBody()
+	}
+
 	var req responsesRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", err.Error()))
 		return
 	}
@@ -129,14 +140,9 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if authEnv := providerAuthEnv(provider); authEnv != "" {
-		if token := os.Getenv(authEnv); token != "" {
-			if provider.APIFormat == config.APIFormatAnthropicMessages {
-				httpReq.Header.Set("x-api-key", token)
-			} else {
-				httpReq.Header.Set("Authorization", "Bearer "+token)
-			}
-		}
+	if err := applyProviderAuth(httpReq, provider); err != nil {
+		writeJSON(w, http.StatusBadGateway, errorBody("upstream_auth_error", err.Error()))
+		return
 	}
 
 	resp, err := s.client.Do(httpReq)
@@ -180,6 +186,21 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	s.recordCompletedUsage(provider.ID, req.Model, responseID(chat.ID), chatStatus(chat), false, chat.Usage, start)
 }
 
+func requestBodyReader(r *http.Request) (io.Reader, func(), error) {
+	switch strings.ToLower(r.Header.Get("Content-Encoding")) {
+	case "", "identity":
+		return r.Body, nil, nil
+	case "zstd":
+		decoder, err := zstd.NewReader(r.Body)
+		if err != nil {
+			return nil, nil, err
+		}
+		return decoder, decoder.Close, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported content encoding")
+	}
+}
+
 func upstreamPath(apiFormat string) string {
 	if apiFormat == config.APIFormatAnthropicMessages {
 		return "messages"
@@ -192,7 +213,7 @@ func upstreamRequest(apiFormat, model string, messages []chatMessage, stream boo
 		return map[string]any{
 			"model":      model,
 			"max_tokens": 1024,
-			"messages":   messages,
+			"messages":   anthropicMessages(messages),
 			"stream":     stream,
 		}
 	}
@@ -203,6 +224,17 @@ func upstreamRequest(apiFormat, model string, messages []chatMessage, stream boo
 	}
 }
 
+func anthropicMessages(messages []chatMessage) []chatMessage {
+	out := make([]chatMessage, 0, len(messages))
+	for _, message := range messages {
+		if message.Role != "assistant" {
+			message.Role = "user"
+		}
+		out = append(out, message)
+	}
+	return out
+}
+
 func providerAuthEnv(provider config.ProviderProfile) string {
 	if provider.AuthEnv != "" {
 		return provider.AuthEnv
@@ -211,6 +243,52 @@ func providerAuthEnv(provider config.ProviderProfile) string {
 		return provider.CredentialRef.Value
 	}
 	return ""
+}
+
+func applyProviderAuth(req *http.Request, provider config.ProviderProfile) error {
+	if authEnv := providerAuthEnv(provider); authEnv != "" {
+		if token := os.Getenv(authEnv); token != "" {
+			setAuthHeader(req, provider, token)
+		}
+		return nil
+	}
+	if provider.CredentialRef == nil || provider.CredentialRef.Kind != config.CredentialKindKeyFile {
+		return nil
+	}
+	path := strings.TrimPrefix(provider.CredentialRef.Value, "~/")
+	if path != provider.CredentialRef.Value {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path)
+		}
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("credential file unavailable")
+	}
+	token := strings.TrimSpace(string(body))
+	if token == "" {
+		return fmt.Errorf("credential file is empty")
+	}
+	setAuthHeader(req, provider, token)
+	return nil
+}
+
+func setAuthHeader(req *http.Request, provider config.ProviderProfile, token string) {
+	header := ""
+	if provider.CredentialRef != nil {
+		header = provider.CredentialRef.Header
+	}
+	if header == "" && provider.APIFormat == config.APIFormatAnthropicMessages {
+		header = "x-api-key"
+	}
+	if header == "" {
+		header = "Authorization"
+	}
+	if header == "Authorization" {
+		req.Header.Set(header, "Bearer "+token)
+		return
+	}
+	req.Header.Set(header, token)
 }
 
 func (s *Server) providerForModel(model string) (config.ProviderProfile, config.Model, bool) {
@@ -586,6 +664,8 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 	event := ""
 	finishReason := ""
 	id := ""
+	itemStarted := false
+	outputText := ""
 	var usage map[string]any
 	tools := map[int]*streamToolCall{}
 	var toolOrder []int
@@ -622,6 +702,35 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 				return streamResult{}
 			}
 		case "content_block_start":
+			if payload.ContentBlock != nil && payload.ContentBlock.Type == "text" && !itemStarted {
+				itemID := messageItemID(id)
+				if !writeSSE(w, "response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": 0,
+					"item": map[string]any{
+						"id":      itemID,
+						"type":    "message",
+						"status":  "in_progress",
+						"role":    "assistant",
+						"content": []map[string]any{},
+					},
+				}) {
+					return streamResult{}
+				}
+				if !writeSSE(w, "response.content_part.added", map[string]any{
+					"type":          "response.content_part.added",
+					"item_id":       itemID,
+					"output_index":  0,
+					"content_index": 0,
+					"part": map[string]any{
+						"type": "output_text",
+						"text": "",
+					},
+				}) {
+					return streamResult{}
+				}
+				itemStarted = true
+			}
 			if payload.ContentBlock != nil && payload.ContentBlock.Type == "tool_use" && payload.ContentBlock.ID != "" && payload.ContentBlock.Name != "" {
 				tools[payload.Index] = &streamToolCall{ID: payload.ContentBlock.ID, Name: payload.ContentBlock.Name}
 				toolOrder = append(toolOrder, payload.Index)
@@ -631,7 +740,14 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 			}
 		case "content_block_delta":
 			if payload.Delta != nil && payload.Delta.Text != "" {
-				if !writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "delta": payload.Delta.Text}) {
+				outputText += payload.Delta.Text
+				if !writeSSE(w, "response.output_text.delta", map[string]any{
+					"type":          "response.output_text.delta",
+					"item_id":       messageItemID(id),
+					"output_index":  0,
+					"content_index": 0,
+					"delta":         payload.Delta.Text,
+				}) {
 					return streamResult{}
 				}
 			}
@@ -664,10 +780,67 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 					return streamResult{}
 				}
 			}
-			if !writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "status": statusFromFinish(finishReason), "finish_reason": finishReason, "usage": usage}) {
+			status := statusFromFinish(finishReason)
+			responseUsage := responsesUsage(usage)
+			response := map[string]any{
+				"id":     responseID(id),
+				"object": "response",
+				"status": status,
+				"model":  requestedModel,
+				"output": []map[string]any{},
+				"usage":  responseUsage,
+			}
+			if itemStarted {
+				itemID := messageItemID(id)
+				response["output"] = []map[string]any{{
+					"id":     itemID,
+					"type":   "message",
+					"status": status,
+					"role":   "assistant",
+					"content": []map[string]string{{
+						"type": "output_text",
+						"text": outputText,
+					}},
+				}}
+				if !writeSSE(w, "response.content_part.done", map[string]any{
+					"type":          "response.content_part.done",
+					"item_id":       itemID,
+					"output_index":  0,
+					"content_index": 0,
+					"part": map[string]any{
+						"type": "output_text",
+						"text": outputText,
+					},
+				}) {
+					return streamResult{}
+				}
+				if !writeSSE(w, "response.output_item.done", map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item": map[string]any{
+						"id":     itemID,
+						"type":   "message",
+						"status": status,
+						"role":   "assistant",
+						"content": []map[string]string{{
+							"type": "output_text",
+							"text": outputText,
+						}},
+					},
+				}) {
+					return streamResult{}
+				}
+			}
+			if !writeSSE(w, "response.completed", map[string]any{
+				"type":          "response.completed",
+				"response":      response,
+				"status":        status,
+				"finish_reason": finishReason,
+				"usage":         responseUsage,
+			}) {
 				return streamResult{}
 			}
-			return streamResult{ID: responseID(id), Status: statusFromFinish(finishReason), Usage: usage}
+			return streamResult{ID: responseID(id), Status: status, Usage: usage}
 		}
 	}
 	if err := scanner.Err(); err != nil {

@@ -86,6 +86,11 @@ public enum ProviderConfigValidator {
         if containsCredentialMarker(refValue) {
             throw ProviderConfigError.invalid("credential_ref must not contain credential-looking values")
         }
+        if let header = ref["header"] as? String,
+           !header.isEmpty,
+           !isSafeHeaderName(header) {
+            throw ProviderConfigError.invalid("credential_ref header must be a safe HTTP header name")
+        }
         switch kind {
         case "env":
             if !isEnvironmentVariableName(refValue) {
@@ -190,6 +195,17 @@ public enum ProviderConfigValidator {
             .union(.lowercaseLetters)
             .union(.decimalDigits)
             .union(CharacterSet(charactersIn: "._:@/-"))
+        return value.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private static func isSafeHeaderName(_ value: String) -> Bool {
+        guard !value.isEmpty else {
+            return false
+        }
+        let allowed = CharacterSet.uppercaseLetters
+            .union(.lowercaseLetters)
+            .union(.decimalDigits)
+            .union(CharacterSet(charactersIn: "-"))
         return value.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 

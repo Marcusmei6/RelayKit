@@ -189,7 +189,8 @@ func expectCredentialRefContract() throws {
           "api_format": "openai_chat",
           "credential_ref": {
             "kind": "env",
-            "value": "RELAYKIT_PROVIDER_TOKEN"
+            "value": "RELAYKIT_PROVIDER_TOKEN",
+            "header": "x-relay-api-key"
           },
           "models": [
             {"id": "m"}
@@ -200,6 +201,7 @@ func expectCredentialRefContract() throws {
     """)
     expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "api_key", "value": "RELAYKIT_PROVIDER_TOKEN"}"#), name: "unsupported credential ref kind")
     expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "env", "value": "sk-secret-value"}"#), name: "credential ref secret-looking value")
+    expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "env", "value": "RELAYKIT_PROVIDER_TOKEN", "header": "Bad Header"}"#), name: "credential ref unsafe header")
     expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "key_file", "value": "relative.key"}"#), name: "key file ref relative path")
     expectInvalid(try json("https://example.test/v1", extraProviderField: #", "credential_ref": {"kind": "env", "value": "TOKEN_\u00E9"}"#), name: "credential ref unicode env")
 }

@@ -172,7 +172,7 @@ func TestValidationAcceptsAnthropicMessagesFormat(t *testing.T) {
 func TestValidationAcceptsPublicCredentialRefAndMetadata(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
-	body := `{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_PROVIDER_TOKEN"},"capabilities":{"streaming":true,"tools":false,"usage":true,"reasoning":false},"routing":{"source":"custom","model_prefix":"custom/","priority":100,"status":"enabled","visible":true},"catalog":{"models_url":"https://example.test/v1/models","key_header":"Authorization"},"models":[{"id":"m","upstream_model":"upstream-m"}]}]}`
+	body := `{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_PROVIDER_TOKEN","header":"x-relay-api-key"},"capabilities":{"streaming":true,"tools":false,"usage":true,"reasoning":false},"routing":{"source":"custom","model_prefix":"custom/","priority":100,"status":"enabled","visible":true},"catalog":{"models_url":"https://example.test/v1/models","key_header":"Authorization"},"models":[{"id":"m","upstream_model":"upstream-m"}]}]}`
 	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -182,6 +182,9 @@ func TestValidationAcceptsPublicCredentialRefAndMetadata(t *testing.T) {
 	}
 	if cfg.Providers[0].CredentialRef == nil || cfg.Providers[0].CredentialRef.Kind != CredentialKindEnv || cfg.Providers[0].CredentialRef.Value != "RELAYKIT_PROVIDER_TOKEN" {
 		t.Fatalf("credential_ref = %+v", cfg.Providers[0].CredentialRef)
+	}
+	if cfg.Providers[0].CredentialRef.Header != "x-relay-api-key" {
+		t.Fatalf("credential_ref header = %q", cfg.Providers[0].CredentialRef.Header)
 	}
 	if !cfg.Providers[0].Capabilities.Streaming || !cfg.Providers[0].Capabilities.Usage {
 		t.Fatalf("capabilities = %+v", cfg.Providers[0].Capabilities)
@@ -204,6 +207,7 @@ func TestValidationRejectsUnsafeCredentialRefAndMetadata(t *testing.T) {
 	}{
 		"unsupported credential kind": {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"api_key","value":"RELAYKIT_PROVIDER_TOKEN"},"models":[{"id":"m"}]}]}`, CodeValidationError},
 		"secret looking env ref":      {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"sk-secret-value"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"unsafe credential header":    {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_PROVIDER_TOKEN","header":"Bad Header"},"models":[{"id":"m"}]}]}`, CodeValidationError},
 		"relative key file":           {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"key_file","value":"relative.key"},"models":[{"id":"m"}]}]}`, CodeValidationError},
 		"capability non bool":         {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"streaming":"yes"},"models":[{"id":"m"}]}]}`, CodeParseError},
 		"unknown capability":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"batch":true},"models":[{"id":"m"}]}]}`, CodeValidationError},

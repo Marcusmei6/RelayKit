@@ -10,7 +10,8 @@ This contract extends the Phase 1 provider profile with public-safe metadata nee
 {
   "credential_ref": {
     "kind": "env",
-    "value": "RELAYKIT_PROVIDER_TOKEN"
+    "value": "RELAYKIT_PROVIDER_TOKEN",
+    "header": "Authorization"
   }
 }
 ```
@@ -19,9 +20,9 @@ Supported reference kinds:
 
 | kind | value contract | runtime status |
 | --- | --- | --- |
-| `env` | Environment variable name, matching `[A-Za-z_][A-Za-z0-9_]*`. | Implemented. Gateway reads the environment variable and injects the upstream auth header. |
+| `env` | Environment variable name, matching `[A-Za-z_][A-Za-z0-9_]*`. Optional `header` selects a safe HTTP header name. | Implemented. Gateway reads the environment variable and injects the upstream auth header. |
 | `keychain` | Local item reference using only letters, numbers, `.`, `_`, `:`, `@`, `/`, and `-`. | Contract only. Do not read Keychain until the security/product decision is made. |
-| `key_file` | Absolute path or home-relative path beginning with `/` or `~/`. | Contract only. Do not read key files until the security/product decision is made. |
+| `key_file` | Absolute path or home-relative path beginning with `/` or `~/`. Optional `header` selects a safe HTTP header name. | Implemented for local runtime. Gateway reads the file and injects only the configured upstream auth header. |
 
 `auth_env` remains supported for backwards compatibility. New app-created provider entries should prefer `credential_ref.kind = "env"`.
 
@@ -30,6 +31,7 @@ Rejected values:
 - literal API keys, bearer tokens, passwords, cookies, JWTs, or other secret-looking strings;
 - unsupported kinds such as `api_key`;
 - key-file references that are relative paths;
+- header names containing spaces, credentials, or non-token characters;
 - multi-line references.
 
 ## Capability Metadata
