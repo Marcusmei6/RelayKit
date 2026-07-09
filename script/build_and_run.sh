@@ -78,7 +78,9 @@ stop_app() {
   pkill -x "${APP_NAME}" >/dev/null 2>&1 || true
   pkill -x "${APP_PROCESS_NAME}" >/dev/null 2>&1 || true
   pkill -f "${APP_REAL_BINARY}" >/dev/null 2>&1 || true
-  pkill -f "${BUNDLED_GATEWAY}" >/dev/null 2>&1 || true
+  if [[ "${RELAYKIT_KEEP_GATEWAY:-0}" != "1" ]]; then
+    pkill -f "${BUNDLED_GATEWAY}" >/dev/null 2>&1 || true
+  fi
 }
 
 verify_bundle_launch_contract() {

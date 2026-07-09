@@ -29,11 +29,47 @@ public enum KeychainCredentialStore {
         }
     }
 
-    private static func baseQuery(service: String) -> [String: Any] {
-        [
+    public static func load(service: String) throws -> String {
+        let trimmedService = service.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedService.isEmpty else {
+            throw ProviderConfigError.invalid("Keychain item name is required.")
+        }
+        var query = baseQuery(service: trimmedService, includeAccount: true)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        if let value = lookup(query: query) {
+            return value
+        }
+        query = baseQuery(service: trimmedService, includeAccount: false)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        if let value = lookup(query: query) {
+            return value
+        }
+        throw ProviderConfigError.invalid("Keychain credential unavailable.")
+    }
+
+    private static func lookup(query: [String: Any]) -> String? {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let value = String(data: data, encoding: .utf8),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private static func baseQuery(service: String, includeAccount: Bool = true) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
         ]
+        if includeAccount {
+            query[kSecAttrAccount as String] = account
+        }
+        return query
     }
 }

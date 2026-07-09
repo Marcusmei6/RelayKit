@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -13,8 +17,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -28,8 +32,15 @@ type Server struct {
 	usageLogPath string
 }
 
+var runSecurityFindGenericPassword = func(args ...string) ([]byte, error) {
+	return exec.Command("/usr/bin/security", args...).Output()
+}
+
 var lookupKeychainCredential = func(name string) (string, error) {
-	out, err := exec.Command("/usr/bin/security", "find-generic-password", "-s", name, "-w").Output()
+	out, err := runSecurityFindGenericPassword("find-generic-password", "-s", name, "-a", "RelayKit", "-w")
+	if err != nil {
+		out, err = runSecurityFindGenericPassword("find-generic-password", "-s", name, "-w")
+	}
 	if err != nil {
 		return "", fmt.Errorf("keychain credential unavailable")
 	}
@@ -69,6 +80,7 @@ func NewWithUsageLog(configPath, usageLogPath string) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /v1/models", s.models)
+	mux.HandleFunc("GET /v1/responses", s.responsesWebSocket)
 	mux.HandleFunc("POST /v1/responses", s.responses)
 	return mux, nil
 }
@@ -97,45 +109,83 @@ func (s *Server) catalogModels() ([]map[string]any, map[string]any) {
 		entry    map[string]any
 	}
 	var candidates []catalogCandidate
+	if s.config.OfficialPassthrough != nil {
+		for _, m := range s.config.OfficialPassthrough.Models {
+			entry := map[string]any{
+				"id":       m.ID,
+				"object":   "model",
+				"created":  int64(0),
+				"owned_by": "openai",
+				"source":   "openai",
+			}
+			if m.DisplayName != "" {
+				entry["display_name"] = m.DisplayName
+			}
+			candidates = append(candidates, catalogCandidate{
+				model: m,
+				entry: entry,
+			})
+		}
+	}
 	for _, p := range s.config.Providers {
 		if !providerEnabled(p) {
 			continue
 		}
 		for _, m := range p.Models {
+			entry := map[string]any{
+				"id":       m.ID,
+				"object":   "model",
+				"created":  int64(0),
+				"owned_by": p.ID,
+			}
+			if p.Routing.Source != "" {
+				entry["source"] = p.Routing.Source
+			}
+			if p.Routing.Visible {
+				entry["visibility"] = "list"
+			}
+			if p.Routing.Priority > 0 {
+				entry["priority"] = p.Routing.Priority
+			}
+			if m.DisplayName != "" {
+				entry["display_name"] = m.DisplayName
+			}
+			if m.UpstreamModel != "" {
+				entry["upstream_model"] = m.UpstreamModel
+			}
 			candidates = append(candidates, catalogCandidate{
 				provider: p,
 				model:    m,
-				entry: map[string]any{
-					"id":       m.ID,
-					"object":   "model",
-					"created":  int64(0),
-					"owned_by": p.ID,
-				},
+				entry:    entry,
 			})
 		}
 	}
 	healthy := make([]bool, len(candidates))
+	reasons := make([]string, len(candidates))
 	probed := false
-	var wg sync.WaitGroup
 	for i, candidate := range candidates {
+		if candidate.provider.ID == "" {
+			healthy[i] = true
+			continue
+		}
 		if !shouldProbeCatalogModel(candidate.provider) {
 			healthy[i] = true
 			continue
 		}
 		probed = true
-		wg.Add(1)
-		go func(i int, candidate catalogCandidate) {
-			defer wg.Done()
-			healthy[i] = s.probeModel(candidate.provider, candidate.model)
-		}(i, candidate)
+		healthy[i], reasons[i] = s.probeModel(candidate.provider, candidate.model)
 	}
-	wg.Wait()
 
 	data := make([]map[string]any, 0, len(candidates))
 	unhealthyCount := 0
+	hidden := make([]map[string]any, 0)
 	for i, candidate := range candidates {
 		if !healthy[i] {
 			unhealthyCount++
+			hidden = append(hidden, map[string]any{
+				"id":     candidate.model.ID,
+				"reason": healthReason(reasons[i]),
+			})
 			continue
 		}
 		data = append(data, candidate.entry)
@@ -144,6 +194,7 @@ func (s *Server) catalogModels() ([]map[string]any, map[string]any) {
 		"probed":    probed,
 		"healthy":   len(data),
 		"unhealthy": unhealthyCount,
+		"hidden":    hidden,
 	}
 }
 
@@ -152,32 +203,149 @@ func shouldProbeCatalogModel(provider config.ProviderProfile) bool {
 		(provider.CredentialRef.Kind == config.CredentialKindKeyFile || provider.CredentialRef.Kind == config.CredentialKindKeychain)
 }
 
-func (s *Server) probeModel(provider config.ProviderProfile, model config.Model) bool {
+func (s *Server) probeModel(provider config.ProviderProfile, model config.Model) (bool, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	payload, err := json.Marshal(upstreamRequest(provider.APIFormat, upstreamModelName(model), []chatMessage{{Role: "user", Content: "ping"}}, false))
+
+	modelsURL, err := providerModelsURL(provider)
 	if err != nil {
-		return false
+		return false, "network failed"
 	}
-	upstreamURL, err := url.JoinPath(provider.BaseURL, upstreamPath(provider.APIFormat))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
-		return false
+		return false, "network failed"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Content-Type", "application/json")
 	if err := applyProviderAuth(req, provider); err != nil {
-		return false
+		return false, "auth failed"
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return false
+		return false, "network failed"
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode >= 200 && resp.StatusCode <= 299
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return false, "auth failed"
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return false, "unsupported model"
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return false, fmt.Sprintf("upstream non-success (HTTP %d)", resp.StatusCode)
+	}
+	if !modelListContains(body, upstreamModelName(model)) {
+		return false, "unsupported model"
+	}
+
+	probeRoute := func() (bool, string) {
+		upstreamReq := probeUpstreamRequest(provider.APIFormat, upstreamModelName(model))
+		payload, err := json.Marshal(upstreamReq)
+		if err != nil {
+			return false, "network failed"
+		}
+		upstreamURL, err := providerUpstreamURL(provider)
+		if err != nil {
+			return false, "network failed"
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
+		if err != nil {
+			return false, "network failed"
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if err := applyProviderAuth(httpReq, provider); err != nil {
+			return false, "auth failed"
+		}
+		resp, err = s.client.Do(httpReq)
+		if err != nil {
+			return false, "network failed"
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return false, "auth failed"
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			return false, "unsupported model"
+		}
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return false, fmt.Sprintf("upstream non-success (HTTP %d)", resp.StatusCode)
+		}
+		if provider.APIFormat == config.APIFormatAnthropicMessages {
+			var msg anthropicResponse
+			if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&msg); err != nil {
+				return false, "upstream decode error"
+			}
+			return true, ""
+		}
+		var chat chatResponse
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&chat); err != nil {
+			return false, "upstream decode error"
+		}
+		return true, ""
+	}
+	ok, reason := probeRoute()
+	if !ok && strings.HasPrefix(reason, "upstream non-success") {
+		time.Sleep(700 * time.Millisecond)
+		return probeRoute()
+	}
+	return ok, reason
+}
+
+func healthReason(reason string) string {
+	if strings.HasPrefix(reason, "upstream non-success") {
+		return reason
+	}
+	switch reason {
+	case "auth failed", "network failed", "upstream non-success", "unsupported model", "upstream decode error":
+		return reason
+	default:
+		return "upstream non-success"
+	}
+}
+
+func providerModelsURL(provider config.ProviderProfile) (string, error) {
+	if provider.Catalog.ModelsURL != "" {
+		return provider.Catalog.ModelsURL, nil
+	}
+	if provider.APIFormat == config.APIFormatAnthropicMessages && anthropicBaseNeedsV1(provider.BaseURL) {
+		return url.JoinPath(provider.BaseURL, "v1/models")
+	}
+	return url.JoinPath(provider.BaseURL, "models")
+}
+
+func modelListContains(body []byte, target string) bool {
+	if strings.TrimSpace(target) == "" {
+		return false
+	}
+	var root any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return false
+	}
+	return containsModelID(root, target)
+}
+
+func containsModelID(value any, target string) bool {
+	switch v := value.(type) {
+	case []any:
+		for _, item := range v {
+			if containsModelID(item, target) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"id", "slug", "model"} {
+			if id, ok := v[key].(string); ok && id == target {
+				return true
+			}
+		}
+		for _, key := range []string{"data", "models"} {
+			if containsModelID(v[key], target) {
+				return true
+			}
+		}
+	case string:
+		return v == target
+	}
+	return false
 }
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
@@ -206,14 +374,27 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", err.Error()))
 		return
 	}
-	provider, model, ok := s.providerForModel(req.Model)
-	if !ok {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "unknown model"))
-		return
-	}
 	messages, err := chatMessages(req.Input)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", err.Error()))
+		return
+	}
+	if !req.Stream {
+		result, status, body := s.completeResponse(r.Context(), req, messages, start, "responses_http")
+		if status != http.StatusOK {
+			writeJSON(w, status, body)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	if model, ok := s.officialModelForModel(req.Model); ok {
+		s.officialResponses(w, r, req, model, messages, start)
+		return
+	}
+	provider, model, ok := s.providerForModel(req.Model)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "unknown model"))
 		return
 	}
 
@@ -224,7 +405,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamURL, err := url.JoinPath(provider.BaseURL, upstreamPath(provider.APIFormat))
+	upstreamURL, err := providerUpstreamURL(provider)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", err.Error()))
 		return
@@ -255,7 +436,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	if provider.APIFormat == config.APIFormatAnthropicMessages {
 		if req.Stream {
 			result := s.streamAnthropic(w, resp.Body, req.Model)
-			s.recordCompletedUsage(provider.ID, req.Model, result.ID, result.Status, true, result.Usage, start)
+			s.recordCompletedUsage(provider.ID, req.Model, result.ID, result.Status, true, result.Usage, start, "responses_http")
 			return
 		}
 		var msg anthropicResponse
@@ -264,12 +445,12 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, responsesFromAnthropic(msg, req.Model))
-		s.recordCompletedUsage(provider.ID, req.Model, responseID(msg.ID), statusFromFinish(msg.StopReason), false, msg.Usage, start)
+		s.recordCompletedUsage(provider.ID, req.Model, responseID(msg.ID), statusFromFinish(msg.StopReason), false, msg.Usage, start, "responses_http")
 		return
 	}
 	if req.Stream {
 		result := s.streamChat(w, resp.Body, req.Model)
-		s.recordCompletedUsage(provider.ID, req.Model, result.ID, result.Status, true, result.Usage, start)
+		s.recordCompletedUsage(provider.ID, req.Model, result.ID, result.Status, true, result.Usage, start, "responses_http")
 		return
 	}
 
@@ -278,7 +459,581 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, responsesFromChat(chat, req.Model))
-	s.recordCompletedUsage(provider.ID, req.Model, responseID(chat.ID), chatStatus(chat), false, chat.Usage, start)
+	s.recordCompletedUsage(provider.ID, req.Model, responseID(chat.ID), chatStatus(chat), false, chat.Usage, start, "responses_http")
+}
+
+func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	if !isWebSocketUpgrade(r) {
+		writeJSON(w, http.StatusUpgradeRequired, errorBody("invalid_request_error", "websocket upgrade required"))
+		return
+	}
+	conn, rw, err := acceptWebSocket(w, r)
+	if err != nil {
+		log.Printf("websocket upgrade failed: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	for {
+		opcode, payload, err := readWebSocketFrame(rw.Reader)
+		if err != nil {
+			_ = writeWebSocketClose(rw.Writer)
+			return
+		}
+		switch opcode {
+		case websocketOpcodeClose:
+			return
+		case websocketOpcodePing:
+			_ = writeWebSocketFrame(rw.Writer, websocketOpcodePong, payload)
+		case websocketOpcodeText, websocketOpcodeBinary:
+			var req responsesRequest
+			if err := json.Unmarshal(payload, &req); err != nil {
+				_ = writeWebSocketJSON(rw.Writer, map[string]any{"type": "response.error", "message": "invalid websocket response request"})
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
+			messages, err := chatMessages(req.Input)
+			if err != nil {
+				_ = writeWebSocketJSON(rw.Writer, map[string]any{"type": "response.error", "message": err.Error()})
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
+			result, status, body := s.completeResponse(r.Context(), req, messages, start, "responses_websocket")
+			if status != http.StatusOK {
+				_ = writeWebSocketFailedEvent(rw.Writer, req.Model, body)
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
+			_ = writeWebSocketResponseEvents(rw.Writer, result)
+			_ = writeWebSocketClose(rw.Writer)
+			return
+		}
+	}
+}
+
+func writeWebSocketFailedEvent(w *bufio.Writer, model string, body map[string]any) error {
+	errBody := body["error"]
+	id := responseID("")
+	return writeWebSocketJSON(w, map[string]any{
+		"type": "response.failed",
+		"response": map[string]any{
+			"id":     id,
+			"object": "response",
+			"status": "failed",
+			"model":  model,
+			"output": []map[string]any{},
+			"error":  errBody,
+		},
+		"error": errBody,
+	})
+}
+
+func writeWebSocketResponseEvents(w *bufio.Writer, result map[string]any) error {
+	id := stringValue(result["id"])
+	model := stringValue(result["model"])
+	status := stringValue(result["status"])
+	if status == "" {
+		status = "completed"
+	}
+	outputText := stringValue(result["output_text"])
+	usage, _ := result["usage"].(map[string]any)
+
+	if err := writeWebSocketJSON(w, map[string]any{
+		"type": "response.created",
+		"response": map[string]any{
+			"id":     id,
+			"object": "response",
+			"model":  model,
+			"status": "in_progress",
+			"output": []map[string]any{},
+		},
+		"id":     id,
+		"model":  model,
+		"status": "in_progress",
+	}); err != nil {
+		return err
+	}
+
+	if outputText != "" {
+		itemID := messageItemID(id)
+		if err := writeWebSocketJSON(w, map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": 0,
+			"item": map[string]any{
+				"id":      itemID,
+				"type":    "message",
+				"status":  "in_progress",
+				"role":    "assistant",
+				"content": []map[string]any{},
+			},
+		}); err != nil {
+			return err
+		}
+		if err := writeWebSocketJSON(w, map[string]any{
+			"type":          "response.content_part.added",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"part": map[string]any{
+				"type": "output_text",
+				"text": "",
+			},
+		}); err != nil {
+			return err
+		}
+		if err := writeWebSocketJSON(w, map[string]any{
+			"type":          "response.output_text.delta",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"delta":         outputText,
+		}); err != nil {
+			return err
+		}
+		if err := writeWebSocketJSON(w, map[string]any{
+			"type":          "response.output_text.done",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"text":          outputText,
+		}); err != nil {
+			return err
+		}
+		if err := writeWebSocketJSON(w, map[string]any{
+			"type":          "response.content_part.done",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"part": map[string]any{
+				"type": "output_text",
+				"text": outputText,
+			},
+		}); err != nil {
+			return err
+		}
+		if err := writeWebSocketJSON(w, map[string]any{
+			"type":         "response.output_item.done",
+			"output_index": 0,
+			"item": map[string]any{
+				"id":     itemID,
+				"type":   "message",
+				"status": status,
+				"role":   "assistant",
+				"content": []map[string]string{{
+					"type": "output_text",
+					"text": outputText,
+				}},
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	if output, ok := result["output"].([]map[string]any); ok {
+		for index, item := range output {
+			if item["type"] != "function_call" {
+				continue
+			}
+			callID := stringValue(item["call_id"])
+			itemID := stringValue(item["id"])
+			if itemID == "" {
+				itemID = callID
+			}
+			name := stringValue(item["name"])
+			arguments := stringValue(item["arguments"])
+			if err := writeWebSocketJSON(w, map[string]any{
+				"type":         "response.output_item.added",
+				"output_index": index,
+				"item": map[string]any{
+					"type":      "function_call",
+					"id":        itemID,
+					"status":    "in_progress",
+					"call_id":   callID,
+					"name":      name,
+					"arguments": "",
+				},
+			}); err != nil {
+				return err
+			}
+			if err := writeWebSocketFunctionCallArguments(w, "response.function_call_arguments.delta", index, callID, arguments); err != nil {
+				return err
+			}
+			if err := writeWebSocketFunctionCallArguments(w, "response.function_call_arguments.done", index, callID, arguments); err != nil {
+				return err
+			}
+			if err := writeWebSocketJSON(w, map[string]any{
+				"type":         "response.output_item.done",
+				"output_index": index,
+				"item": map[string]any{
+					"type":      "function_call",
+					"id":        itemID,
+					"status":    "completed",
+					"call_id":   callID,
+					"name":      name,
+					"arguments": arguments,
+				},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+
+	return writeWebSocketJSON(w, map[string]any{
+		"type":     "response.completed",
+		"response": result,
+		"status":   status,
+		"usage":    usage,
+	})
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func functionCallArgumentsEvent(event string, outputIndex int, callID, arguments string) map[string]any {
+	payload := map[string]any{
+		"type":         event,
+		"item_id":      callID,
+		"output_index": outputIndex,
+	}
+	if strings.HasSuffix(event, ".delta") {
+		payload["delta"] = arguments
+	} else {
+		payload["arguments"] = arguments
+	}
+	return payload
+}
+
+func writeSSEFunctionCallArguments(w http.ResponseWriter, event string, outputIndex int, callID, arguments string) bool {
+	return writeSSE(w, event, functionCallArgumentsEvent(event, outputIndex, callID, arguments))
+}
+
+func writeWebSocketFunctionCallArguments(w *bufio.Writer, event string, outputIndex int, callID, arguments string) error {
+	return writeWebSocketJSON(w, functionCallArgumentsEvent(event, outputIndex, callID, arguments))
+}
+
+func (s *Server) completeResponse(ctx context.Context, req responsesRequest, messages []chatMessage, start time.Time, transport string) (map[string]any, int, map[string]any) {
+	if model, ok := s.officialModelForModel(req.Model); ok {
+		if officialUsesCodexHome(*s.config.OfficialPassthrough) {
+			result, err := s.completeOfficialWithCodex(ctx, *s.config.OfficialPassthrough, model, messages)
+			if err != nil {
+				s.recordFailedUsage("openai", req.Model, "auth_required", http.StatusUnauthorized, start, transport)
+				return nil, http.StatusUnauthorized, errorBody("auth_required", "RelayKit official Codex login is not connected")
+			}
+			s.recordCompletedUsage("openai", req.Model, responseID(""), "completed", false, nil, start, transport)
+			return result, http.StatusOK, nil
+		}
+		upstreamReq := upstreamRequest(config.APIFormatOpenAIChat, upstreamModelName(model), messages, false)
+		payload, err := json.Marshal(upstreamReq)
+		if err != nil {
+			s.recordFailedUsage("openai", req.Model, "server_error", http.StatusInternalServerError, start, transport)
+			return nil, http.StatusInternalServerError, errorBody("server_error", err.Error())
+		}
+		upstreamURL, err := officialUpstreamURL(*s.config.OfficialPassthrough)
+		if err != nil {
+			s.recordFailedUsage("openai", req.Model, "server_error", http.StatusInternalServerError, start, transport)
+			return nil, http.StatusInternalServerError, errorBody("server_error", err.Error())
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
+		if err != nil {
+			s.recordFailedUsage("openai", req.Model, "server_error", http.StatusInternalServerError, start, transport)
+			return nil, http.StatusInternalServerError, errorBody("server_error", err.Error())
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if err := applyOfficialAuth(httpReq, *s.config.OfficialPassthrough); err != nil {
+			s.recordFailedUsage("openai", req.Model, "auth_required", http.StatusUnauthorized, start, transport)
+			return nil, http.StatusUnauthorized, errorBody("auth_required", "RelayKit official credential is not configured")
+		}
+		resp, err := s.client.Do(httpReq)
+		if err != nil {
+			s.recordFailedUsage("openai", req.Model, "upstream_error", http.StatusBadGateway, start, transport)
+			return nil, http.StatusBadGateway, errorBody("upstream_error", "upstream request failed")
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			s.recordFailedUsage("openai", req.Model, "upstream_non_success", http.StatusBadGateway, start, transport)
+			return nil, http.StatusBadGateway, errorBody("upstream_error", fmt.Sprintf("upstream returned non-success status %d", resp.StatusCode))
+		}
+		var chat chatResponse
+		if err := json.NewDecoder(resp.Body).Decode(&chat); err != nil {
+			s.recordFailedUsage("openai", req.Model, "upstream_decode_error", http.StatusBadGateway, start, transport)
+			return nil, http.StatusBadGateway, errorBody("upstream_error", err.Error())
+		}
+		result := responsesFromChat(chat, req.Model)
+		s.recordCompletedUsage("openai", req.Model, responseID(chat.ID), chatStatus(chat), false, chat.Usage, start, transport)
+		return result, http.StatusOK, nil
+	}
+
+	provider, model, ok := s.providerForModel(req.Model)
+	if !ok {
+		s.recordFailedUsage("unknown", req.Model, "unknown_model", http.StatusBadRequest, start, transport)
+		return nil, http.StatusBadRequest, errorBody("invalid_request_error", "unknown model")
+	}
+	upstreamReq := upstreamRequest(provider.APIFormat, upstreamModelName(model), messages, false)
+	payload, err := json.Marshal(upstreamReq)
+	if err != nil {
+		s.recordFailedUsage(provider.ID, req.Model, "server_error", http.StatusInternalServerError, start, transport)
+		return nil, http.StatusInternalServerError, errorBody("server_error", err.Error())
+	}
+	upstreamURL, err := providerUpstreamURL(provider)
+	if err != nil {
+		s.recordFailedUsage(provider.ID, req.Model, "server_error", http.StatusInternalServerError, start, transport)
+		return nil, http.StatusInternalServerError, errorBody("server_error", err.Error())
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
+	if err != nil {
+		s.recordFailedUsage(provider.ID, req.Model, "server_error", http.StatusInternalServerError, start, transport)
+		return nil, http.StatusInternalServerError, errorBody("server_error", err.Error())
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := applyProviderAuth(httpReq, provider); err != nil {
+		s.recordFailedUsage(provider.ID, req.Model, "upstream_auth_error", http.StatusBadGateway, start, transport)
+		return nil, http.StatusBadGateway, errorBody("upstream_auth_error", err.Error())
+	}
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		s.recordFailedUsage(provider.ID, req.Model, "upstream_error", http.StatusBadGateway, start, transport)
+		return nil, http.StatusBadGateway, errorBody("upstream_error", "upstream request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		s.recordFailedUsage(provider.ID, req.Model, "upstream_non_success", http.StatusBadGateway, start, transport)
+		return nil, http.StatusBadGateway, errorBody("upstream_error", fmt.Sprintf("upstream returned non-success status %d", resp.StatusCode))
+	}
+	if provider.APIFormat == config.APIFormatAnthropicMessages {
+		var msg anthropicResponse
+		if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+			s.recordFailedUsage(provider.ID, req.Model, "upstream_decode_error", http.StatusBadGateway, start, transport)
+			return nil, http.StatusBadGateway, errorBody("upstream_error", err.Error())
+		}
+		result := responsesFromAnthropic(msg, req.Model)
+		s.recordCompletedUsage(provider.ID, req.Model, responseID(msg.ID), statusFromFinish(msg.StopReason), false, msg.Usage, start, transport)
+		return result, http.StatusOK, nil
+	}
+	var chat chatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chat); err != nil {
+		s.recordFailedUsage(provider.ID, req.Model, "upstream_decode_error", http.StatusBadGateway, start, transport)
+		return nil, http.StatusBadGateway, errorBody("upstream_error", err.Error())
+	}
+	result := responsesFromChat(chat, req.Model)
+	s.recordCompletedUsage(provider.ID, req.Model, responseID(chat.ID), chatStatus(chat), false, chat.Usage, start, transport)
+	return result, http.StatusOK, nil
+}
+
+func (s *Server) officialResponses(w http.ResponseWriter, r *http.Request, req responsesRequest, model config.Model, messages []chatMessage, start time.Time) {
+	if officialUsesCodexHome(*s.config.OfficialPassthrough) {
+		result, err := s.completeOfficialWithCodex(r.Context(), *s.config.OfficialPassthrough, model, messages)
+		if err != nil {
+			s.recordFailedUsage("openai", req.Model, "auth_required", http.StatusUnauthorized, start, "responses_http")
+			writeJSON(w, http.StatusUnauthorized, errorBody("auth_required", "RelayKit official Codex login is not connected"))
+			return
+		}
+		usage, _ := result["usage"].(map[string]any)
+		status := stringValue(result["status"])
+		if status == "" {
+			status = "completed"
+		}
+		s.recordCompletedUsage("openai", req.Model, responseID(stringValue(result["id"])), status, req.Stream, usage, start, "responses_http")
+		if req.Stream {
+			writeCompletedResponsesSSE(w, result)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
+	upstreamReq := upstreamRequest(config.APIFormatOpenAIChat, upstreamModelName(model), messages, req.Stream)
+	payload, err := json.Marshal(upstreamReq)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", err.Error()))
+		return
+	}
+	upstreamURL, err := officialUpstreamURL(*s.config.OfficialPassthrough)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", err.Error()))
+		return
+	}
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(payload))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", err.Error()))
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := applyOfficialAuth(httpReq, *s.config.OfficialPassthrough); err != nil {
+		s.recordFailedUsage("openai", req.Model, "auth_required", http.StatusUnauthorized, start, "responses_http")
+		writeJSON(w, http.StatusUnauthorized, errorBody("auth_required", "RelayKit official credential is not configured"))
+		return
+	}
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", "upstream request failed"))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", fmt.Sprintf("upstream returned non-success status %d", resp.StatusCode)))
+		return
+	}
+	if req.Stream {
+		result := s.streamChat(w, resp.Body, req.Model)
+		s.recordCompletedUsage("openai", req.Model, result.ID, result.Status, true, result.Usage, start, "responses_http")
+		return
+	}
+	var chat chatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chat); err != nil {
+		writeJSON(w, http.StatusBadGateway, errorBody("upstream_error", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, responsesFromChat(chat, req.Model))
+	s.recordCompletedUsage("openai", req.Model, responseID(chat.ID), chatStatus(chat), false, chat.Usage, start, "responses_http")
+}
+
+func writeCompletedResponsesSSE(w http.ResponseWriter, result map[string]any) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	id := stringValue(result["id"])
+	model := stringValue(result["model"])
+	status := stringValue(result["status"])
+	if status == "" {
+		status = "completed"
+	}
+	outputText := stringValue(result["output_text"])
+	usage, _ := result["usage"].(map[string]any)
+
+	if !writeSSE(w, "response.created", map[string]any{
+		"type": "response.created",
+		"response": map[string]any{
+			"id":     id,
+			"object": "response",
+			"model":  model,
+			"status": "in_progress",
+			"output": []map[string]any{},
+		},
+		"id":     id,
+		"model":  model,
+		"status": "in_progress",
+	}) {
+		return
+	}
+
+	if outputText != "" {
+		itemID := messageItemID(id)
+		if !writeSSE(w, "response.output_item.added", map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": 0,
+			"item": map[string]any{
+				"id":      itemID,
+				"type":    "message",
+				"status":  "in_progress",
+				"role":    "assistant",
+				"content": []map[string]any{},
+			},
+		}) {
+			return
+		}
+		if !writeSSE(w, "response.content_part.added", map[string]any{
+			"type":          "response.content_part.added",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"part": map[string]any{
+				"type": "output_text",
+				"text": "",
+			},
+		}) {
+			return
+		}
+		if !writeSSE(w, "response.output_text.delta", map[string]any{
+			"type":          "response.output_text.delta",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"delta":         outputText,
+		}) {
+			return
+		}
+		if !writeSSE(w, "response.output_text.done", map[string]any{
+			"type":          "response.output_text.done",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"text":          outputText,
+		}) {
+			return
+		}
+		if !writeSSE(w, "response.content_part.done", map[string]any{
+			"type":          "response.content_part.done",
+			"item_id":       itemID,
+			"output_index":  0,
+			"content_index": 0,
+			"part": map[string]any{
+				"type": "output_text",
+				"text": outputText,
+			},
+		}) {
+			return
+		}
+		if !writeSSE(w, "response.output_item.done", map[string]any{
+			"type":         "response.output_item.done",
+			"output_index": 0,
+			"item": map[string]any{
+				"id":     itemID,
+				"type":   "message",
+				"status": status,
+				"role":   "assistant",
+				"content": []map[string]string{{
+					"type": "output_text",
+					"text": outputText,
+				}},
+			},
+		}) {
+			return
+		}
+	}
+	if output, ok := result["output"].([]map[string]any); ok {
+		for index, item := range output {
+			if item["type"] != "function_call" {
+				continue
+			}
+			callID := stringValue(item["call_id"])
+			arguments := stringValue(item["arguments"])
+			if !writeSSE(w, "response.output_item.added", map[string]any{
+				"type":         "response.output_item.added",
+				"output_index": index,
+				"item": map[string]any{
+					"type":      "function_call",
+					"call_id":   callID,
+					"name":      stringValue(item["name"]),
+					"arguments": "",
+				},
+			}) {
+				return
+			}
+			if !writeSSEFunctionCallArguments(w, "response.function_call_arguments.delta", index, callID, arguments) {
+				return
+			}
+			if !writeSSEFunctionCallArguments(w, "response.function_call_arguments.done", index, callID, arguments) {
+				return
+			}
+			if !writeSSE(w, "response.output_item.done", map[string]any{
+				"type":         "response.output_item.done",
+				"output_index": index,
+				"item":         item,
+			}) {
+				return
+			}
+		}
+	}
+
+	_ = writeSSE(w, "response.completed", map[string]any{
+		"type":     "response.completed",
+		"response": result,
+		"status":   status,
+		"usage":    usage,
+	})
 }
 
 func requestBodyReader(r *http.Request) (io.Reader, func(), error) {
@@ -303,6 +1058,30 @@ func upstreamPath(apiFormat string) string {
 	return "chat/completions"
 }
 
+func providerUpstreamURL(provider config.ProviderProfile) (string, error) {
+	return url.JoinPath(provider.BaseURL, providerUpstreamPath(provider))
+}
+
+func officialUpstreamURL(official config.OfficialPassthrough) (string, error) {
+	return url.JoinPath(official.BaseURL, "chat/completions")
+}
+
+func providerUpstreamPath(provider config.ProviderProfile) string {
+	if provider.APIFormat == config.APIFormatAnthropicMessages && anthropicBaseNeedsV1(provider.BaseURL) {
+		return "v1/messages"
+	}
+	return upstreamPath(provider.APIFormat)
+}
+
+func anthropicBaseNeedsV1(baseURL string) bool {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	path := strings.TrimRight(parsed.EscapedPath(), "/")
+	return path != "" && !strings.HasSuffix(path, "/v1")
+}
+
 func upstreamRequest(apiFormat, model string, messages []chatMessage, stream bool) map[string]any {
 	if apiFormat == config.APIFormatAnthropicMessages {
 		return map[string]any{
@@ -317,6 +1096,13 @@ func upstreamRequest(apiFormat, model string, messages []chatMessage, stream boo
 		"messages": messages,
 		"stream":   stream,
 	}
+}
+
+func probeUpstreamRequest(apiFormat, model string) map[string]any {
+	messages := []chatMessage{{Role: "user", Content: "Return a tiny reachability confirmation."}}
+	req := upstreamRequest(apiFormat, model, messages, false)
+	req["max_tokens"] = 16
+	return req
 }
 
 func anthropicMessages(messages []chatMessage) []chatMessage {
@@ -379,6 +1165,115 @@ func applyProviderAuth(req *http.Request, provider config.ProviderProfile) error
 	return nil
 }
 
+func applyOfficialAuth(req *http.Request, official config.OfficialPassthrough) error {
+	if official.CredentialRef == nil {
+		return fmt.Errorf("official credential is not configured")
+	}
+	token, err := credentialRefToken(*official.CredentialRef)
+	if err != nil {
+		return err
+	}
+	setCredentialHeader(req, official.CredentialRef.Header, token)
+	return nil
+}
+
+func officialUsesCodexHome(official config.OfficialPassthrough) bool {
+	return official.CredentialRef != nil && official.CredentialRef.Kind == config.CredentialKindCodexHome
+}
+
+func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, messages []chatMessage) (map[string]any, error) {
+	codexHome := strings.TrimPrefix(official.CredentialRef.Value, "~/")
+	if codexHome != official.CredentialRef.Value {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		codexHome = filepath.Join(home, codexHome)
+	}
+	isolatedHome := filepath.Join(filepath.Dir(codexHome), "home")
+	if err := os.MkdirAll(isolatedHome, 0700); err != nil {
+		return nil, err
+	}
+	outDir, err := os.MkdirTemp("", "relaykit-codex-official-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(outDir)
+	outPath := filepath.Join(outDir, "last-message.txt")
+	binary := official.CodexBinary
+	if binary == "" {
+		binary = "codex"
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, binary, "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-rules", "--ignore-user-config", "--sandbox", "read-only", "--color", "never", "-m", upstreamModelName(model), "-o", outPath, "-")
+	cmd.Env = append(os.Environ(), "HOME="+isolatedHome, "CODEX_HOME="+codexHome)
+	cmd.Stdin = strings.NewReader(codexPrompt(messages))
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	body, err := os.ReadFile(outPath)
+	if err != nil {
+		return nil, err
+	}
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return nil, fmt.Errorf("empty official response")
+	}
+	return responsesFromChat(chatResponse{
+		ID: "codex-official",
+		Choices: []chatChoice{{
+			Message:      chatMessage{Role: "assistant", Content: text},
+			FinishReason: "stop",
+		}},
+	}, model.ID), nil
+}
+
+func codexPrompt(messages []chatMessage) string {
+	var b strings.Builder
+	for _, message := range messages {
+		role := message.Role
+		if role == "" {
+			role = "user"
+		}
+		fmt.Fprintf(&b, "%s: %s\n", role, message.Content)
+	}
+	return b.String()
+}
+
+func credentialRefToken(ref config.CredentialRef) (string, error) {
+	switch ref.Kind {
+	case config.CredentialKindEnv:
+		token := strings.TrimSpace(os.Getenv(ref.Value))
+		if token == "" {
+			return "", fmt.Errorf("environment credential unavailable")
+		}
+		return token, nil
+	case config.CredentialKindKeychain:
+		return lookupKeychainCredential(ref.Value)
+	case config.CredentialKindKeyFile:
+		path := strings.TrimPrefix(ref.Value, "~/")
+		if path != ref.Value {
+			if home, err := os.UserHomeDir(); err == nil {
+				path = filepath.Join(home, path)
+			}
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("credential file unavailable")
+		}
+		token := strings.TrimSpace(string(body))
+		if token == "" {
+			return "", fmt.Errorf("credential file is empty")
+		}
+		return token, nil
+	default:
+		return "", fmt.Errorf("unsupported credential kind")
+	}
+}
+
 func setAuthHeader(req *http.Request, provider config.ProviderProfile, token string) {
 	header := ""
 	if provider.CredentialRef != nil {
@@ -387,6 +1282,13 @@ func setAuthHeader(req *http.Request, provider config.ProviderProfile, token str
 	if header == "" && provider.APIFormat == config.APIFormatAnthropicMessages {
 		header = "x-api-key"
 	}
+	if header == "" {
+		header = "Authorization"
+	}
+	setCredentialHeader(req, header, token)
+}
+
+func setCredentialHeader(req *http.Request, header, token string) {
 	if header == "" {
 		header = "Authorization"
 	}
@@ -409,6 +1311,18 @@ func (s *Server) providerForModel(model string) (config.ProviderProfile, config.
 		}
 	}
 	return config.ProviderProfile{}, config.Model{}, false
+}
+
+func (s *Server) officialModelForModel(model string) (config.Model, bool) {
+	if s.config.OfficialPassthrough == nil {
+		return config.Model{}, false
+	}
+	for _, m := range s.config.OfficialPassthrough.Models {
+		if m.ID == model {
+			return m, true
+		}
+	}
+	return config.Model{}, false
 }
 
 func providerEnabled(provider config.ProviderProfile) bool {
@@ -476,9 +1390,28 @@ type responsesInputItem struct {
 	Type    string          `json:"type"`
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
+	CallID  string          `json:"call_id"`
+	Output  string          `json:"output"`
 }
 
 func (i responsesInputItem) chatMessage() (chatMessage, bool) {
+	if i.Type == "function_call_output" {
+		output := strings.TrimSpace(i.Output)
+		if output == "" {
+			var text string
+			if err := json.Unmarshal(i.Content, &text); err == nil {
+				output = strings.TrimSpace(text)
+			}
+		}
+		if output == "" {
+			return chatMessage{}, false
+		}
+		prefix := "Tool result"
+		if i.CallID != "" {
+			prefix += " " + i.CallID
+		}
+		return chatMessage{Role: "user", Content: prefix + ":\n" + output}, true
+	}
 	if i.Type != "" && i.Type != "message" {
 		return chatMessage{}, false
 	}
@@ -620,6 +1553,15 @@ func (s *Server) streamChat(w http.ResponseWriter, body io.Reader, requestedMode
 						"text": outputText,
 					}},
 				}}
+				if !writeSSE(w, "response.output_text.done", map[string]any{
+					"type":          "response.output_text.done",
+					"item_id":       itemID,
+					"output_index":  0,
+					"content_index": 0,
+					"text":          outputText,
+				}) {
+					return streamResult{}
+				}
 				if !writeSSE(w, "response.content_part.done", map[string]any{
 					"type":          "response.content_part.done",
 					"item_id":       itemID,
@@ -776,6 +1718,8 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 	var usage map[string]any
 	tools := map[int]*streamToolCall{}
 	var toolOrder []int
+	var inlineToolCalls []streamToolCall
+	xmlTextBuffer := ""
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") {
@@ -839,21 +1783,53 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 				itemStarted = true
 			}
 			if payload.ContentBlock != nil && payload.ContentBlock.Type == "tool_use" && payload.ContentBlock.ID != "" && payload.ContentBlock.Name != "" {
-				tools[payload.Index] = &streamToolCall{ID: payload.ContentBlock.ID, Name: payload.ContentBlock.Name}
+				arguments := ""
+				if len(payload.ContentBlock.Input) > 0 {
+					arguments = string(payload.ContentBlock.Input)
+					if strings.TrimSpace(arguments) == "{}" {
+						arguments = ""
+					}
+				}
+				toolName := normalizeToolName(payload.ContentBlock.Name)
+				tools[payload.Index] = &streamToolCall{ID: payload.ContentBlock.ID, Name: toolName, Arguments: arguments}
 				toolOrder = append(toolOrder, payload.Index)
-				if !writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "item": map[string]any{"type": "function_call", "call_id": payload.ContentBlock.ID, "name": payload.ContentBlock.Name, "arguments": ""}}) {
+				if !writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": payload.Index, "item": map[string]any{"type": "function_call", "id": payload.ContentBlock.ID, "status": "in_progress", "call_id": payload.ContentBlock.ID, "name": toolName, "arguments": ""}}) {
 					return streamResult{}
 				}
 			}
 		case "content_block_delta":
 			if payload.Delta != nil && payload.Delta.Text != "" {
-				outputText += payload.Delta.Text
+				cleanText, calls, pendingXML := splitClaudeXMLToolCallsFromText(xmlTextBuffer + payload.Delta.Text)
+				xmlTextBuffer = pendingXML
+				for _, call := range calls {
+					inlineToolCalls = append(inlineToolCalls, call)
+					outputIndex := len(inlineToolCalls) - 1
+					if itemStarted {
+						outputIndex++
+					}
+					if !writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": outputIndex, "item": map[string]any{"type": "function_call", "id": call.ID, "status": "in_progress", "call_id": call.ID, "name": call.Name, "arguments": ""}}) {
+						return streamResult{}
+					}
+					if !writeSSEFunctionCallArguments(w, "response.function_call_arguments.delta", outputIndex, call.ID, call.Arguments) {
+						return streamResult{}
+					}
+					if !writeSSEFunctionCallArguments(w, "response.function_call_arguments.done", outputIndex, call.ID, call.Arguments) {
+						return streamResult{}
+					}
+					if !writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": outputIndex, "item": map[string]any{"type": "function_call", "id": call.ID, "status": "completed", "call_id": call.ID, "name": call.Name, "arguments": call.Arguments}}) {
+						return streamResult{}
+					}
+				}
+				if cleanText == "" {
+					break
+				}
+				outputText += cleanText
 				if !writeSSE(w, "response.output_text.delta", map[string]any{
 					"type":          "response.output_text.delta",
 					"item_id":       messageItemID(id),
 					"output_index":  0,
 					"content_index": 0,
-					"delta":         payload.Delta.Text,
+					"delta":         cleanText,
 				}) {
 					return streamResult{}
 				}
@@ -865,6 +1841,9 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 			}
 		case "content_block_stop":
 			if tool := tools[payload.Index]; tool != nil {
+				if tool.Arguments == "" {
+					tool.Arguments = "{}"
+				}
 				tool.Done = true
 			}
 		case "message_delta":
@@ -883,24 +1862,32 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 					}
 					return streamResult{}
 				}
-				if !writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "item": map[string]any{"type": "function_call", "call_id": tool.ID, "name": tool.Name, "arguments": tool.Arguments}}) {
+				tool.Arguments = normalizeToolArguments(tool.Name, tool.Arguments)
+				if !writeSSEFunctionCallArguments(w, "response.function_call_arguments.delta", index, tool.ID, tool.Arguments) {
+					return streamResult{}
+				}
+				if !writeSSEFunctionCallArguments(w, "response.function_call_arguments.done", index, tool.ID, tool.Arguments) {
+					return streamResult{}
+				}
+				if !writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": index, "item": map[string]any{"type": "function_call", "id": tool.ID, "status": "completed", "call_id": tool.ID, "name": tool.Name, "arguments": tool.Arguments}}) {
 					return streamResult{}
 				}
 			}
 			status := statusFromFinish(finishReason)
 			responseUsage := responsesUsage(usage)
+			responseOutput := []map[string]any{}
 			response := map[string]any{
 				"id":          responseID(id),
 				"object":      "response",
 				"status":      status,
 				"model":       requestedModel,
-				"output":      []map[string]any{},
+				"output":      responseOutput,
 				"output_text": outputText,
 				"usage":       responseUsage,
 			}
 			if itemStarted {
 				itemID := messageItemID(id)
-				response["output"] = []map[string]any{{
+				responseOutput = append(responseOutput, map[string]any{
 					"id":     itemID,
 					"type":   "message",
 					"status": status,
@@ -909,7 +1896,16 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 						"type": "output_text",
 						"text": outputText,
 					}},
-				}}
+				})
+				if !writeSSE(w, "response.output_text.done", map[string]any{
+					"type":          "response.output_text.done",
+					"item_id":       itemID,
+					"output_index":  0,
+					"content_index": 0,
+					"text":          outputText,
+				}) {
+					return streamResult{}
+				}
 				if !writeSSE(w, "response.content_part.done", map[string]any{
 					"type":          "response.content_part.done",
 					"item_id":       itemID,
@@ -939,6 +1935,15 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, body io.Reader, requeste
 					return streamResult{}
 				}
 			}
+			for _, call := range inlineToolCalls {
+				responseOutput = append(responseOutput, map[string]any{
+					"type":      "function_call",
+					"call_id":   call.ID,
+					"name":      call.Name,
+					"arguments": call.Arguments,
+				})
+			}
+			response["output"] = responseOutput
 			if !writeSSE(w, "response.completed", map[string]any{
 				"type":          "response.completed",
 				"response":      response,
@@ -1015,17 +2020,32 @@ func responsesFromAnthropic(msg anthropicResponse, requestedModel string) map[st
 	output := []map[string]any{}
 	for _, block := range msg.Content {
 		if block.Type == "text" {
-			text += block.Text
+			cleanText, calls := parseClaudeXMLToolCallsFromText(block.Text)
+			text += cleanText
+			for _, call := range calls {
+				output = append(output, map[string]any{
+					"type":      "function_call",
+					"id":        call.ID,
+					"status":    "completed",
+					"call_id":   call.ID,
+					"name":      call.Name,
+					"arguments": call.Arguments,
+				})
+			}
 		}
 		if block.Type == "tool_use" {
 			arguments := "{}"
 			if len(block.Input) > 0 {
 				arguments = string(block.Input)
 			}
+			toolName := normalizeToolName(block.Name)
+			arguments = normalizeToolArguments(toolName, arguments)
 			output = append(output, map[string]any{
 				"type":      "function_call",
+				"id":        block.ID,
+				"status":    "completed",
 				"call_id":   block.ID,
-				"name":      block.Name,
+				"name":      toolName,
 				"arguments": arguments,
 			})
 		}
@@ -1053,6 +2073,194 @@ func responsesFromAnthropic(msg anthropicResponse, requestedModel string) map[st
 		"output":      output,
 		"usage":       responsesUsage(msg.Usage),
 	}
+}
+
+func parseClaudeXMLToolCallsFromText(text string) (string, []streamToolCall) {
+	clean, calls, pending := splitClaudeXMLToolCallsFromText(text)
+	if pending != "" {
+		return text, nil
+	}
+	return clean, calls
+}
+
+func splitClaudeXMLToolCallsFromText(text string) (string, []streamToolCall, string) {
+	var clean strings.Builder
+	calls := []streamToolCall{}
+	rest := text
+	for {
+		start, kind := nextClaudeToolBlockStart(rest)
+		if start < 0 {
+			clean.WriteString(rest)
+			return clean.String(), calls, ""
+		}
+		clean.WriteString(rest[:start])
+		closeTag := "</" + kind + ">"
+		closeStart := strings.Index(rest[start:], closeTag)
+		if closeStart < 0 {
+			return clean.String(), calls, rest[start:]
+		}
+		end := start + closeStart + len(closeTag)
+		block := rest[start:end]
+		blockCalls := parseClaudeXMLToolCallBlock(block)
+		if kind == "tool_call" {
+			blockCalls = parseClaudeJSONToolCallBlock(block)
+		}
+		if len(blockCalls) == 0 {
+			clean.WriteString(block)
+		} else {
+			calls = append(calls, blockCalls...)
+		}
+		rest = rest[end:]
+	}
+}
+
+var (
+	claudeInvokePattern    = regexp.MustCompile(`(?s)<invoke\b([^>]*)>(.*?)</invoke>`)
+	claudeParameterPattern = regexp.MustCompile(`(?s)<parameter\b([^>]*)>(.*?)</parameter>`)
+	claudeNameAttrPattern  = regexp.MustCompile(`\bname\s*=\s*["']([^"']+)["']`)
+)
+
+func nextClaudeToolBlockStart(text string) (int, string) {
+	start := -1
+	kind := ""
+	for _, candidate := range []struct {
+		tag  string
+		kind string
+	}{
+		{"<function_calls", "function_calls"},
+		{"<invoke", "invoke"},
+		{"<tool_call", "tool_call"},
+	} {
+		index := strings.Index(text, candidate.tag)
+		if index >= 0 && (start < 0 || index < start) {
+			start = index
+			kind = candidate.kind
+		}
+	}
+	return start, kind
+}
+
+func parseClaudeXMLToolCallBlock(block string) []streamToolCall {
+	matches := claudeInvokePattern.FindAllStringSubmatch(block, -1)
+	calls := make([]streamToolCall, 0, len(matches))
+	for _, match := range matches {
+		name := normalizeToolName(claudeXMLNameAttr(match[1]))
+		if name == "" {
+			continue
+		}
+		args := map[string]any{}
+		for _, parameter := range claudeParameterPattern.FindAllStringSubmatch(match[2], -1) {
+			paramName := claudeXMLNameAttr(parameter[1])
+			if paramName == "" {
+				continue
+			}
+			if name == "exec_command" && paramName == "command" {
+				paramName = "cmd"
+			}
+			args[paramName] = strings.TrimSpace(html.UnescapeString(parameter[2]))
+		}
+		argBytes, err := json.Marshal(args)
+		if err != nil {
+			continue
+		}
+		sum := sha1.Sum([]byte(name + "\x00" + string(argBytes)))
+		calls = append(calls, streamToolCall{
+			ID:        fmt.Sprintf("call_%x", sum[:8]),
+			Name:      name,
+			Arguments: string(argBytes),
+			Done:      true,
+		})
+	}
+	return calls
+}
+
+func parseClaudeJSONToolCallBlock(block string) []streamToolCall {
+	openEnd := strings.Index(block, ">")
+	closeStart := strings.LastIndex(block, "</tool_call>")
+	if openEnd < 0 || closeStart <= openEnd {
+		return nil
+	}
+	var raw struct {
+		Name      string `json:"name"`
+		Arguments any    `json:"arguments"`
+		Input     any    `json:"input"`
+	}
+	body := strings.TrimSpace(html.UnescapeString(block[openEnd+1 : closeStart]))
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		return nil
+	}
+	name := normalizeToolName(raw.Name)
+	if name == "" {
+		return nil
+	}
+	args := raw.Arguments
+	if args == nil {
+		args = raw.Input
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	var argBytes []byte
+	switch value := args.(type) {
+	case string:
+		if json.Valid([]byte(value)) {
+			argBytes = []byte(value)
+		} else {
+			argBytes, _ = json.Marshal(map[string]any{"command": value})
+		}
+	default:
+		var err error
+		argBytes, err = json.Marshal(value)
+		if err != nil {
+			return nil
+		}
+	}
+	arguments := normalizeToolArguments(name, string(argBytes))
+	sum := sha1.Sum([]byte(name + "\x00" + arguments))
+	return []streamToolCall{{
+		ID:        fmt.Sprintf("call_%x", sum[:8]),
+		Name:      name,
+		Arguments: arguments,
+		Done:      true,
+	}}
+}
+
+func claudeXMLNameAttr(attrs string) string {
+	match := claudeNameAttrPattern.FindStringSubmatch(attrs)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
+}
+
+func normalizeToolName(name string) string {
+	switch name {
+	case "bash", "shell", "mcp__shell__run_command":
+		return "exec_command"
+	default:
+		return name
+	}
+}
+
+func normalizeToolArguments(name string, arguments string) string {
+	if name != "exec_command" || arguments == "" {
+		return arguments
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return arguments
+	}
+	if _, ok := args["cmd"]; !ok {
+		if value, ok := args["command"]; ok {
+			args["cmd"] = value
+			delete(args, "command")
+		}
+	}
+	normalized, err := json.Marshal(args)
+	if err != nil {
+		return arguments
+	}
+	return string(normalized)
 }
 
 func responseID(id string) string {
@@ -1106,16 +2314,18 @@ type usageEvent struct {
 	ProviderID   string `json:"provider_id"`
 	Model        string `json:"model"`
 	Route        string `json:"route"`
+	Transport    string `json:"transport"`
 	Streaming    bool   `json:"streaming"`
 	Status       string `json:"status"`
 	HTTPStatus   int    `json:"http_status"`
+	ErrorType    string `json:"error_type,omitempty"`
 	InputTokens  int64  `json:"input_tokens,omitempty"`
 	OutputTokens int64  `json:"output_tokens,omitempty"`
 	TotalTokens  int64  `json:"total_tokens,omitempty"`
 	DurationMS   int64  `json:"duration_ms"`
 }
 
-func (s *Server) recordCompletedUsage(providerID, model, requestID, status string, streaming bool, usage map[string]any, start time.Time) {
+func (s *Server) recordCompletedUsage(providerID, model, requestID, status string, streaming bool, usage map[string]any, start time.Time, transport string) {
 	normalizedUsage := responsesUsage(usage)
 	s.recordUsage(usageEvent{
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
@@ -1123,6 +2333,7 @@ func (s *Server) recordCompletedUsage(providerID, model, requestID, status strin
 		ProviderID:   providerID,
 		Model:        model,
 		Route:        "/v1/responses",
+		Transport:    transport,
 		Streaming:    streaming,
 		Status:       status,
 		HTTPStatus:   http.StatusOK,
@@ -1130,6 +2341,20 @@ func (s *Server) recordCompletedUsage(providerID, model, requestID, status strin
 		InputTokens:  tokenCount(normalizedUsage, "input_tokens"),
 		OutputTokens: tokenCount(normalizedUsage, "output_tokens"),
 		TotalTokens:  tokenCount(normalizedUsage, "total_tokens"),
+	})
+}
+
+func (s *Server) recordFailedUsage(providerID, model, errorType string, httpStatus int, start time.Time, transport string) {
+	s.recordUsage(usageEvent{
+		Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
+		ProviderID: providerID,
+		Model:      model,
+		Route:      "/v1/responses",
+		Transport:  transport,
+		Status:     "failed",
+		HTTPStatus: httpStatus,
+		ErrorType:  errorType,
+		DurationMS: time.Since(start).Milliseconds(),
 	})
 }
 
@@ -1171,6 +2396,130 @@ func tokenCount(usage map[string]any, keys ...string) int64 {
 		}
 	}
 	return 0
+}
+
+const (
+	websocketOpcodeText   = 0x1
+	websocketOpcodeBinary = 0x2
+	websocketOpcodeClose  = 0x8
+	websocketOpcodePing   = 0x9
+	websocketOpcodePong   = 0xa
+)
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+func acceptWebSocket(w http.ResponseWriter, r *http.Request) (io.Closer, *bufio.ReadWriter, error) {
+	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "Sec-WebSocket-Key is required"))
+		return nil, nil, fmt.Errorf("missing websocket key")
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", "websocket hijack unavailable"))
+		return nil, nil, fmt.Errorf("hijack unavailable")
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	accept := websocketAcceptKey(key)
+	if _, err := fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	if err := rw.Flush(); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	return conn, rw, nil
+}
+
+func websocketAcceptKey(key string) string {
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func readWebSocketFrame(r *bufio.Reader) (byte, []byte, error) {
+	header, err := r.ReadByte()
+	if err != nil {
+		return 0, nil, err
+	}
+	lengthByte, err := r.ReadByte()
+	if err != nil {
+		return 0, nil, err
+	}
+	opcode := header & 0x0f
+	masked := lengthByte&0x80 != 0
+	length := uint64(lengthByte & 0x7f)
+	switch length {
+	case 126:
+		var extended [2]byte
+		if _, err := io.ReadFull(r, extended[:]); err != nil {
+			return 0, nil, err
+		}
+		length = uint64(binary.BigEndian.Uint16(extended[:]))
+	case 127:
+		var extended [8]byte
+		if _, err := io.ReadFull(r, extended[:]); err != nil {
+			return 0, nil, err
+		}
+		length = binary.BigEndian.Uint64(extended[:])
+	}
+	if length > 1<<20 {
+		return 0, nil, fmt.Errorf("websocket frame too large")
+	}
+	var mask [4]byte
+	if masked {
+		if _, err := io.ReadFull(r, mask[:]); err != nil {
+			return 0, nil, err
+		}
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return 0, nil, err
+	}
+	if masked {
+		for i := range payload {
+			payload[i] ^= mask[i%4]
+		}
+	}
+	return opcode, payload, nil
+}
+
+func writeWebSocketJSON(w *bufio.Writer, value any) error {
+	body, err := json.Marshal(value)
+	if err != nil {
+		body = []byte(`{"type":"response.error","message":"websocket_encode_error"}`)
+	}
+	return writeWebSocketFrame(w, websocketOpcodeText, body)
+}
+
+func writeWebSocketClose(w *bufio.Writer) error {
+	return writeWebSocketFrame(w, websocketOpcodeClose, nil)
+}
+
+func writeWebSocketFrame(w *bufio.Writer, opcode byte, payload []byte) error {
+	frame := []byte{0x80 | opcode}
+	switch {
+	case len(payload) < 126:
+		frame = append(frame, byte(len(payload)))
+	case len(payload) <= 65535:
+		frame = append(frame, 126, byte(len(payload)>>8), byte(len(payload)))
+	default:
+		frame = append(frame, 127)
+		var extended [8]byte
+		binary.BigEndian.PutUint64(extended[:], uint64(len(payload)))
+		frame = append(frame, extended[:]...)
+	}
+	frame = append(frame, payload...)
+	if _, err := w.Write(frame); err != nil {
+		return err
+	}
+	return w.Flush()
 }
 
 func errorBody(kind, message string) map[string]any {

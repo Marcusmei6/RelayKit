@@ -19,6 +19,7 @@ const (
 	CredentialKindEnv          = "env"
 	CredentialKindKeychain     = "keychain"
 	CredentialKindKeyFile      = "key_file"
+	CredentialKindCodexHome    = "codex_home"
 	RoutingStatusEnabled       = "enabled"
 	RoutingStatusDisabled      = "disabled"
 )
@@ -40,7 +41,15 @@ func (e *Error) Unwrap() error {
 }
 
 type Config struct {
-	Providers []ProviderProfile `json:"providers"`
+	OfficialPassthrough *OfficialPassthrough `json:"official_passthrough,omitempty"`
+	Providers           []ProviderProfile    `json:"providers"`
+}
+
+type OfficialPassthrough struct {
+	BaseURL       string         `json:"base_url"`
+	CredentialRef *CredentialRef `json:"credential_ref,omitempty"`
+	CodexBinary   string         `json:"codex_binary,omitempty"`
+	Models        []Model        `json:"models"`
 }
 
 type ProviderProfile struct {
@@ -109,15 +118,87 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(body, &cfg); err != nil {
 		return nil, &Error{Code: CodeParseError, Err: err}
 	}
+	normalizeProviderModels(&cfg)
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
 }
 
+func normalizeProviderModels(cfg *Config) {
+	for pi := range cfg.Providers {
+		prefix := strings.TrimSpace(cfg.Providers[pi].Routing.ModelPrefix)
+		if prefix == "" {
+			continue
+		}
+		for mi := range cfg.Providers[pi].Models {
+			model := &cfg.Providers[pi].Models[mi]
+			id := strings.TrimSpace(model.ID)
+			upstream := strings.TrimSpace(model.UpstreamModel)
+			if strings.HasPrefix(id, prefix) {
+				model.ID = id
+				model.UpstreamModel = upstream
+				continue
+			}
+			if upstream == "" {
+				upstream = id
+			}
+			model.ID = prefix + safeModelSlug(id)
+			model.UpstreamModel = upstream
+		}
+	}
+}
+
+func safeModelSlug(value string) string {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for i := 0; i < len(lower); i++ {
+		c := lower[i]
+		if (c >= 'a' && c <= 'z') || isASCIIDigit(c) {
+			b.WriteByte(c)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		return "model"
+	}
+	if slug[0] < 'a' || slug[0] > 'z' {
+		return "model-" + slug
+	}
+	return slug
+}
+
 func validate(cfg Config) error {
-	if len(cfg.Providers) == 0 {
+	if len(cfg.Providers) == 0 && cfg.OfficialPassthrough == nil {
 		return &Error{Code: CodeValidationError, Err: fmt.Errorf("providers required")}
+	}
+	if cfg.OfficialPassthrough != nil {
+		if cfg.OfficialPassthrough.BaseURL == "" || len(cfg.OfficialPassthrough.Models) == 0 {
+			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid official_passthrough")}
+		}
+		if err := validateBaseURL(cfg.OfficialPassthrough.BaseURL); err != nil {
+			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid official_passthrough base_url: %w", err)}
+		}
+		if cfg.OfficialPassthrough.CredentialRef != nil {
+			if err := validateOfficialCredentialRef(*cfg.OfficialPassthrough.CredentialRef); err != nil {
+				return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid official_passthrough credential_ref: %w", err)}
+			}
+		}
+		if cfg.OfficialPassthrough.CodexBinary != "" && strings.ContainsAny(cfg.OfficialPassthrough.CodexBinary, "\n\r") {
+			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid official_passthrough codex_binary")}
+		}
+		for _, m := range cfg.OfficialPassthrough.Models {
+			if m.ID == "" {
+				return &Error{Code: CodeValidationError, Err: fmt.Errorf("model id required for official_passthrough")}
+			}
+		}
 	}
 	for _, p := range cfg.Providers {
 		if p.ID == "" || p.Name == "" || p.BaseURL == "" || p.APIFormat == "" || len(p.Models) == 0 {
@@ -209,6 +290,22 @@ func validateCredentialRef(ref CredentialRef) error {
 		return fmt.Errorf("unsupported kind %q", ref.Kind)
 	}
 	return nil
+}
+
+func validateOfficialCredentialRef(ref CredentialRef) error {
+	if ref.Kind == CredentialKindCodexHome {
+		if !strings.HasPrefix(ref.Value, "~/") && !strings.HasPrefix(ref.Value, "/") {
+			return fmt.Errorf("codex_home value must be an absolute or home-relative path")
+		}
+		if strings.ContainsAny(ref.Value, "\n\r") {
+			return fmt.Errorf("codex_home value must be a single path")
+		}
+		if ref.Header != "" {
+			return fmt.Errorf("codex_home must not set a header")
+		}
+		return nil
+	}
+	return validateCredentialRef(ref)
 }
 
 func validateRouting(r Routing) error {

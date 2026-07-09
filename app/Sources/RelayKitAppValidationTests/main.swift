@@ -153,6 +153,44 @@ func expectProviderDraftWriterWithPrototypeMetadata() throws {
     }
 }
 
+func expectProviderDraftWriterNormalizesPrefixedModels() throws {
+    let draft = ProviderConfigDraft(
+        providerId: "demo",
+        providerName: "Demo Anthropic",
+        baseURL: "https://example.test/v1",
+        apiFormat: "anthropic_messages",
+        authEnv: "",
+        modelId: "claude-opus-4-6",
+        modelDisplayName: "Claude Opus 4.6",
+        contextWindow: nil,
+        source: "demo",
+        modelPrefix: "demo/",
+        credentialKind: "keychain",
+        credentialReference: "relaykit.provider.example",
+        keyHeader: "x-api-key",
+        upstreamModel: "claude-opus-4-6",
+        models: [
+            ProviderConfigDraft.ModelDraft(id: "claude-opus-4-6", displayName: "Claude Opus 4.6", upstreamModel: ""),
+            ProviderConfigDraft.ModelDraft(id: "demo/claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", upstreamModel: "claude-sonnet-4-6"),
+        ],
+        priority: 100,
+        visible: true
+    )
+    let data = try ProviderConfigDraftWriter.addProvider(draft, to: Data(validConfig.utf8))
+    let json = try JSONSerialization.jsonObject(with: data)
+    try ProviderConfigValidator.validate(json)
+    guard let root = json as? [String: Any],
+          let providers = root["providers"] as? [[String: Any]],
+          let added = providers.last,
+          let models = added["models"] as? [[String: Any]],
+          models[0]["id"] as? String == "demo/claude-opus-4-6",
+          models[0]["upstream_model"] as? String == "claude-opus-4-6",
+          models[1]["id"] as? String == "demo/claude-sonnet-4-6",
+          models[1]["upstream_model"] as? String == "claude-sonnet-4-6" else {
+        fatalError("provider draft writer did not normalize prefixed models: \(json)")
+    }
+}
+
 func expectProviderDraftWriterWithKeychainReference() throws {
     let draft = ProviderConfigDraft(
         providerId: "local-keychain",
@@ -342,6 +380,246 @@ func expectAppSettingsPersistence() {
     }
 }
 
+func expectProviderConfigPathRecoversStaleTemporaryPreference() {
+    let stale = "/tmp/relaykit-detail-debug.dead/fixture-providers.json"
+    let resolved = RelayKitPaths.resolvedProviderConfigPath(savedPath: stale) { _ in false }
+    if resolved != RelayKitPaths.providerConfigPath() {
+        fatalError("stale tmp provider config should recover to App Support: \(resolved)")
+    }
+    let existing = RelayKitPaths.resolvedProviderConfigPath(savedPath: "/tmp/relaykit-real-proof.live/providers.json") { $0 == "/tmp/relaykit-real-proof.live/providers.json" }
+    if existing != RelayKitPaths.providerConfigPath() {
+        fatalError("existing proof tmp provider config should recover to App Support: \(existing)")
+    }
+    let smoke = RelayKitPaths.resolvedProviderConfigPath(savedPath: "/tmp/relaykit-ui-smoke-config.abc/providers.json") { $0 == "/tmp/relaykit-ui-smoke-config.abc/providers.json" }
+    if smoke != RelayKitPaths.providerConfigPath() {
+        fatalError("existing smoke tmp provider config should recover to App Support: \(smoke)")
+    }
+    let unrelatedTmp = RelayKitPaths.resolvedProviderConfigPath(savedPath: "/tmp/user-selected-providers.json") { $0 == "/tmp/user-selected-providers.json" }
+    if unrelatedTmp != "/tmp/user-selected-providers.json" {
+        fatalError("unrelated tmp provider config should remain explicit: \(unrelatedTmp)")
+    }
+}
+
+func expectProviderFormPresentationLabels() {
+    if ProviderFormLabels.codexRoute != "Codex route: Responses" {
+        fatalError("Codex route label must distinguish client route")
+    }
+    if ProviderFormLabels.upstreamProtocol(apiFormat: "anthropic_messages") != "Upstream: Anthropic" {
+        fatalError("Anthropic upstream label must be explicit")
+    }
+    if ProviderFormLabels.upstreamProtocol(apiFormat: "openai_chat") != "Upstream: OpenAI Chat" {
+        fatalError("OpenAI upstream label must be explicit")
+    }
+    if ProviderFormLabels.apiKeyStatus(hasReference: true, credentialKind: "keychain") != "API key saved in Keychain" {
+        fatalError("Keychain saved state label regressed")
+    }
+    if ProviderFormLabels.apiKeyStatus(hasReference: false, credentialKind: "") != "No API key saved" {
+        fatalError("Empty API key state label regressed")
+    }
+    if ProviderFormLabels.apiKeyPlaceholder(hasReference: true) != "Paste API key" {
+        fatalError("Saved credential placeholder regressed")
+    }
+    if ProviderFormLabels.apiKeyPlaceholder(hasReference: false) != "Paste API key" {
+        fatalError("Empty credential placeholder regressed")
+    }
+    if ProviderFormLabels.apiKeyReplaceButtonVisible(hasReference: true) ||
+        ProviderFormLabels.apiKeyReplaceButtonVisible(hasReference: false) {
+        fatalError("API key replacement must use the same field, not a separate Replace button")
+    }
+    if ProviderFormLabels.savedKeyMask != "••••••••••••" {
+        fatalError("Saved key mask must not include fake saved text")
+    }
+    if ProviderFormLabels.keyUnavailableStatus != "Key unavailable, paste a new key" {
+        fatalError("Unavailable Keychain copy regressed")
+    }
+    if ProviderFormLabels.apiKeyEyeLabel(showingKey: false) != "Show API key" ||
+        ProviderFormLabels.apiKeyEyeLabel(showingKey: true) != "Hide API key" {
+        fatalError("API key eye toggle labels regressed")
+    }
+    if ProviderFormLabels.officialPrimaryActionLabel(status: "route verified") != "Route verified" ||
+        !ProviderFormLabels.officialPrimaryActionDisabled(status: "route verified", inProgress: false) {
+        fatalError("Route verified official CTA must be disabled and not invite sign-in")
+    }
+    if ProviderFormLabels.officialPrimaryActionLabel(status: "login available") != "Logged in" ||
+        !ProviderFormLabels.officialPrimaryActionDisabled(status: "login available", inProgress: false) {
+        fatalError("Logged-in official CTA must be disabled and not invite sign-in")
+    }
+    if ProviderFormLabels.officialPrimaryActionDisabled(status: "not connected", inProgress: false) {
+        fatalError("Disconnected official CTA should remain available")
+    }
+    let enabledProtocols = ProviderFormLabels.upstreamProtocolOptions.filter(\.isEnabled).map(\.id)
+    if enabledProtocols != ["anthropic_messages", "openai_chat"] {
+        fatalError("Provider Advanced protocols must match gateway support: \(enabledProtocols)")
+    }
+    let plannedProtocols = ProviderFormLabels.upstreamProtocolOptions.filter { !$0.isEnabled }.map(\.label)
+    if plannedProtocols != ["OpenAI Responses (planned)"] {
+        fatalError("Unsupported Responses provider route must be shown only as planned: \(plannedProtocols)")
+    }
+    let advancedLabels = ProviderFormLabels.ordinaryAdvancedLabels
+    let expectedAdvanced = ["Upstream protocol", "Custom models URL", "Custom auth header", "Upstream model override"]
+    if advancedLabels != expectedAdvanced {
+        fatalError("Ordinary Advanced labels regressed: \(advancedLabels)")
+    }
+    let leakedLabels = ProviderFormLabels.hiddenOrdinaryAdvancedLabels.filter { advancedLabels.contains($0) }
+    if !leakedLabels.isEmpty {
+        fatalError("Raw config labels leaked into ordinary Advanced: \(leakedLabels)")
+    }
+}
+
+func expectOfficialAuthURLSanitizer() {
+    let samples = [
+        "\u{001B}[0mhttps://auth.openai.com/codex/device\u{001B}[0m",
+        "\u{001B}]8;;https://auth.openai.com/codex/device\u{0007}https://auth.openai.com/codex/device\u{001B}]8;;\u{0007}",
+        "https://auth.openai.com/codex/device%1B%5B0m",
+        "\"https://auth.openai.com/codex/device\".",
+    ]
+    for sample in samples {
+        if ProviderFormLabels.sanitizedOfficialAuthURL(from: sample) != "https://auth.openai.com/codex/device" {
+            fatalError("official auth URL sanitizer failed for \(sample.debugDescription)")
+        }
+    }
+}
+
+func expectOfficialStatusFormatter() {
+    if ProviderFormLabels.officialRowSubtitle(status: "route verified") != "已连接 · Route verified" {
+        fatalError("route verified row should not show disconnected")
+    }
+    if ProviderFormLabels.officialRowSubtitle(status: "login available") != "已连接 · Login available" {
+        fatalError("login available row should not show disconnected")
+    }
+    if ProviderFormLabels.officialStatusTitle(status: "device login pending") != "Device login pending" {
+        fatalError("official sheet status title regressed")
+    }
+}
+
+func expectProviderConnectionLabels() {
+    if ProviderFormLabels.connectionStatusLabel(kind: "connected", listedCount: 5, reachableCount: 3, unavailableCount: 2, latencyMS: 123) != "List reachable · 5 listed · 3 reachable · 2 unavailable · 123 ms" {
+        fatalError("connected connection label regressed")
+    }
+    if ProviderFormLabels.connectionStatusLabel(kind: "auth_failed", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: nil) != "Authentication failed" {
+        fatalError("auth failed label regressed")
+    }
+    if ProviderFormLabels.connectionStatusLabel(kind: "model_list_unavailable", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: 42) != "Reachable, model list unavailable · 42 ms" {
+        fatalError("model list unavailable label regressed")
+    }
+    if ProviderFormLabels.connectionStatusLabel(kind: "network_failed", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: nil) != "Network failed" {
+        fatalError("network failed label regressed")
+    }
+}
+
+func expectProviderHealthLabels() {
+    if ProviderFormLabels.providerHealthSummary(saved: 5, available: 3, hidden: 2) != "5 saved / 3 available / 2 hidden" {
+        fatalError("provider health summary copy regressed")
+    }
+    if ProviderFormLabels.providerHiddenReason(modelId: "demo/claude-opus-4-6", reason: "upstream non-success") != "demo/claude-opus-4-6 · upstream non-success" {
+        fatalError("provider hidden reason copy regressed")
+    }
+}
+
+func expectProviderConnectionClassification() {
+    let connected = ProviderFormLabels.providerConnectionKind(
+        httpStatus: 200,
+        contentType: "application/json",
+        bodyPrefix: #"{"data":[{"id":"m"}]}"#,
+        modelCount: 1
+    )
+    if connected != "connected" {
+        fatalError("success model discovery should be connected: \(connected)")
+    }
+    let unauthorized = ProviderFormLabels.providerConnectionKind(httpStatus: 401, contentType: "application/json")
+    if unauthorized != "auth_failed" {
+        fatalError("401 should be auth_failed: \(unauthorized)")
+    }
+    let html = ProviderFormLabels.providerConnectionKind(
+        httpStatus: 200,
+        contentType: "text/html; charset=UTF-8",
+        bodyPrefix: "<html>",
+        modelCount: 0
+    )
+    if html != "model_list_unavailable" {
+        fatalError("HTML model response should be unavailable: \(html)")
+    }
+    let missing = ProviderFormLabels.providerConnectionKind(httpStatus: 404, contentType: "application/json")
+    if missing != "model_list_unavailable" {
+        fatalError("404 model response should be unavailable: \(missing)")
+    }
+    let timeout = ProviderFormLabels.providerConnectionKind(httpStatus: nil, networkFailed: true)
+    if timeout != "network_failed" {
+        fatalError("timeout/network failure should be network_failed: \(timeout)")
+    }
+}
+
+func expectUsageAnalytics() {
+    let rows = [
+        UsageSummary(day: "2026-07-09", providerId: "openai", model: "gpt-5.5", requests: 2, inputTokens: 100, outputTokens: 50, totalTokens: 150, durationMs: 1000),
+        UsageSummary(day: "2026-07-08", providerId: "demo", model: "demo/claude-sonnet-4-6", requests: 3, inputTokens: 200, outputTokens: 300, totalTokens: 500, durationMs: 2000),
+        UsageSummary(day: "2026-07-02", providerId: "demo", model: "demo/claude-opus-4-6", requests: 1, inputTokens: 40, outputTokens: 60, totalTokens: 100, durationMs: 900),
+        UsageSummary(day: "2026-06-20", providerId: "openai", model: "gpt-5.1", requests: 1, inputTokens: 10, outputTokens: 15, totalTokens: 25, durationMs: 500),
+    ]
+    let analytics = UsageAnalytics(rows, today: "2026-07-09")
+    if analytics.todayTokens != 150 || analytics.sevenDayTokens != 650 || analytics.allTimeTokens != 775 {
+        fatalError("usage token rollup regressed: \(analytics)")
+    }
+    if analytics.requestCount != 7 || analytics.activeDayCount != 4 {
+        fatalError("usage request/day rollup regressed")
+    }
+    if analytics.topModelSevenDays != "demo/claude-sonnet-4-6" {
+        fatalError("usage top model 7D regressed: \(String(describing: analytics.topModelSevenDays))")
+    }
+    let providerNames = analytics.providerRollups.map(\.name)
+    if providerNames != ["Official Codex / OpenAI", "Third-party providers"] {
+        fatalError("provider grouping regressed: \(providerNames)")
+    }
+    if analytics.providerRollups[0].tokens != 175 || analytics.providerRollups[1].tokens != 600 {
+        fatalError("provider token grouping regressed: \(analytics.providerRollups)")
+    }
+    if analytics.modelRollups.first?.model != "demo/claude-sonnet-4-6" {
+        fatalError("model rollup should sort by all-time tokens")
+    }
+    if UsageAnalytics.formatTokens(999) != "999" ||
+        UsageAnalytics.formatTokens(1_500) != "1.5K" ||
+        UsageAnalytics.formatTokens(103_912) != "103.9K" ||
+        UsageAnalytics.formatTokens(103_700_000) != "103.7M" ||
+        UsageAnalytics.formatTokens(2_500_000_000) != "2.5B" {
+        fatalError("usage token unit formatting regressed")
+    }
+    if UsageAnalytics.readableModelName("demo/claude-haiku-4-5") != "claude-haiku-4-5" ||
+        UsageAnalytics.readableModelName("demo/claude-sonnet-4-6") != "claude-sonnet-4-6" ||
+        UsageAnalytics.readableModelName("gpt-5.5") != "gpt-5.5" {
+        fatalError("top model readable label regressed")
+    }
+    let sevenDayBuckets = analytics.activityBuckets(range: .sevenDays)
+    if sevenDayBuckets.count != 14 || sevenDayBuckets.filter(\.isActive).count != 2 || analytics.activityUnitLabel(range: .sevenDays) != "7D · half-day" {
+        fatalError("7D activity buckets regressed: \(sevenDayBuckets)")
+    }
+    if analytics.activityBuckets(range: .oneMonth).count != 30 || analytics.activityUnitLabel(range: .oneMonth) != "1M · daily" {
+        fatalError("1M activity buckets regressed")
+    }
+    if analytics.activityBuckets(range: .oneYear).count != 53 || analytics.activityUnitLabel(range: .oneYear) != "1Y · weekly" {
+        fatalError("1Y activity buckets regressed")
+    }
+    if analytics.costLabel != "Cost unavailable" {
+        fatalError("usage must not invent cost")
+    }
+}
+
+func expectOfficialChannelPresentationLabels() {
+    let actions = ProviderFormLabels.officialChannelActionLabels
+    if actions != ["Connect Official", "Check status", "Disconnect"] {
+        fatalError("Official channel actions must stay product-facing: \(actions)")
+    }
+    let expectedStatus = ["Not connected", "Device login pending", "Login available", "Route verified"]
+    if ProviderFormLabels.officialChannelStatusLabels != expectedStatus {
+        fatalError("Official channel status must be based on current login plus route proof: \(ProviderFormLabels.officialChannelStatusLabels)")
+    }
+    let productText = (ProviderFormLabels.officialChannelStatusLabels + actions).joined(separator: " ")
+    for forbidden in ["Official auth not implemented", "Run isolated official passthrough check", "Open Codex Desktop", "Copy verification command", "Terminal", "manual proof"] {
+        if productText.localizedCaseInsensitiveContains(forbidden) {
+            fatalError("Official product sheet leaked debug/manual action: \(forbidden)")
+        }
+    }
+}
+
 func expectKeychainCredentialStore() throws {
     let service = "relaykit.validation.\(UUID().uuidString)"
     let query: [String: Any] = [
@@ -353,33 +631,58 @@ func expectKeychainCredentialStore() throws {
         SecItemDelete(query as CFDictionary)
     }
     try KeychainCredentialStore.save(value: "fixture-keychain-value", service: service)
-    var readQuery = query
-    readQuery[kSecReturnData as String] = true
-    readQuery[kSecMatchLimit as String] = kSecMatchLimitOne
-    var result: CFTypeRef?
-    let status = SecItemCopyMatching(readQuery as CFDictionary, &result)
-    guard status == errSecSuccess,
-          let data = result as? Data,
-          String(data: data, encoding: .utf8) == "fixture-keychain-value" else {
-        fatalError("Keychain credential store did not save expected fixture value: \(status)")
+    let value = try KeychainCredentialStore.load(service: service)
+    if value != "fixture-keychain-value" {
+        fatalError("Keychain credential store did not load expected fixture value")
+    }
+    let legacyService = "relaykit.validation.legacy.\(UUID().uuidString)"
+    let legacyQuery: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: legacyService,
+    ]
+    defer {
+        SecItemDelete(legacyQuery as CFDictionary)
+    }
+    var addLegacy = legacyQuery
+    addLegacy[kSecValueData as String] = Data("legacy-service-only-value".utf8)
+    let addStatus = SecItemAdd(addLegacy as CFDictionary, nil)
+    if addStatus != errSecSuccess {
+        fatalError("failed to add legacy service-only Keychain item: \(addStatus)")
+    }
+    let legacyValue = try KeychainCredentialStore.load(service: legacyService)
+    if legacyValue != "legacy-service-only-value" {
+        fatalError("Keychain credential store did not load service-only fallback")
     }
 }
 
 try expectValid(validConfig)
 try expectProviderDraftWriter()
 try expectProviderDraftWriterWithPrototypeMetadata()
+try expectProviderDraftWriterNormalizesPrefixedModels()
 try expectProviderDraftWriterWithKeychainReference()
 expectProviderDraftRejectsCredentialValue()
 try expectLocalCatalogSummary()
 try expectCredentialRefContract()
 try expectCapabilityContract()
 expectAppSettingsPersistence()
+expectProviderConfigPathRecoversStaleTemporaryPreference()
+expectProviderFormPresentationLabels()
+expectOfficialChannelPresentationLabels()
+expectOfficialAuthURLSanitizer()
+expectOfficialStatusFormatter()
+expectProviderConnectionLabels()
+expectProviderHealthLabels()
+expectProviderConnectionClassification()
+expectUsageAnalytics()
 try expectKeychainCredentialStore()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }
 if !RelayKitPaths.providerConfigPath(bundle: Bundle(for: BundleSentinel.self)).hasSuffix("Library/Application Support/RelayKit/providers.json") {
     fatalError("provider config path should default to user app support")
+}
+if !RelayKitPaths.officialCredentialRefPath().hasSuffix("Library/Application Support/RelayKit/OfficialProof/official-credential.json") {
+    fatalError("official credential reference should live in RelayKit App Support")
 }
 if RelayKitPaths.exampleProviderConfigPath(bundle: Bundle(for: BundleSentinel.self)) != "../examples/providers.example.json" {
     fatalError("non-app bundle should expose development example provider config path")

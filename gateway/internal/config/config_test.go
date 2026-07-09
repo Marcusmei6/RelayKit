@@ -200,24 +200,88 @@ func TestValidationAcceptsPublicCredentialRefAndMetadata(t *testing.T) {
 	}
 }
 
+func TestLoadNormalizesPrefixedProviderModelIDs(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	body := `{"providers":[{"id":"demo","name":"Demo Anthropic","base_url":"https://example.test/v1","api_format":"anthropic_messages","routing":{"model_prefix":"demo/","source":"demo","status":"enabled"},"models":[{"id":"claude-opus-4-6","display_name":"Claude Opus 4.6"},{"id":"demo/claude-sonnet-4-6","upstream_model":"claude-sonnet-4-6"}]}]}`
+	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	models := cfg.Providers[0].Models
+	if models[0].ID != "demo/claude-opus-4-6" {
+		t.Fatalf("normalized id = %q", models[0].ID)
+	}
+	if models[0].UpstreamModel != "claude-opus-4-6" {
+		t.Fatalf("upstream model = %q", models[0].UpstreamModel)
+	}
+	if models[1].ID != "demo/claude-sonnet-4-6" || models[1].UpstreamModel != "claude-sonnet-4-6" {
+		t.Fatalf("already-prefixed model changed unexpectedly: %+v", models[1])
+	}
+}
+
+func TestValidationAcceptsOfficialPassthroughCredentialRef(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	body := `{"official_passthrough":{"base_url":"https://api.openai.example/v1","credential_ref":{"kind":"keychain","value":"relaykit.official.openai"},"models":[{"id":"gpt-5.5","display_name":"GPT-5.5"}]},"providers":[]}`
+	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if cfg.OfficialPassthrough == nil {
+		t.Fatal("official_passthrough missing")
+	}
+	if cfg.OfficialPassthrough.CredentialRef == nil || cfg.OfficialPassthrough.CredentialRef.Kind != CredentialKindKeychain || cfg.OfficialPassthrough.CredentialRef.Value != "relaykit.official.openai" {
+		t.Fatalf("official credential_ref = %+v", cfg.OfficialPassthrough.CredentialRef)
+	}
+}
+
+func TestValidationAcceptsOfficialCodexHomeCredentialRef(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	body := `{"official_passthrough":{"base_url":"https://api.openai.example/v1","credential_ref":{"kind":"codex_home","value":"` + dir + `"},"codex_binary":"/usr/local/bin/codex","models":[{"id":"gpt-5.5","display_name":"GPT-5.5"}]},"providers":[]}`
+	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if cfg.OfficialPassthrough == nil || cfg.OfficialPassthrough.CredentialRef == nil {
+		t.Fatal("official codex_home credential_ref missing")
+	}
+	if cfg.OfficialPassthrough.CredentialRef.Kind != CredentialKindCodexHome || cfg.OfficialPassthrough.CodexBinary != "/usr/local/bin/codex" {
+		t.Fatalf("official passthrough = %+v", cfg.OfficialPassthrough)
+	}
+}
+
 func TestValidationRejectsUnsafeCredentialRefAndMetadata(t *testing.T) {
 	cases := map[string]struct {
 		body string
 		code string
 	}{
-		"unsupported credential kind": {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"api_key","value":"RELAYKIT_PROVIDER_TOKEN"},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"secret looking env ref":      {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"sk-secret-value"},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"unsafe credential header":    {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_PROVIDER_TOKEN","header":"Bad Header"},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"relative key file":           {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"key_file","value":"relative.key"},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"capability non bool":         {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"streaming":"yes"},"models":[{"id":"m"}]}]}`, CodeParseError},
-		"unknown capability":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"batch":true},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"unsafe source":               {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","routing":{"source":"Private Source"},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"unsupported status":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","routing":{"status":"pretend"},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"catalog query":               {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","catalog":{"models_url":"https://example.test/v1/models?token=abc"},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"catalog unsupported scheme":  {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","catalog":{"models_url":"ftp://example.test/models"},"models":[{"id":"m"}]}]}`, CodeValidationError},
-		"credential key":              {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","api_key":"abc","models":[{"id":"m"}]}]}`, CodeValidationError},
-		"credential marker value":     {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","models":[{"id":"m","display_name":"api_key=abc"}]}]}`, CodeValidationError},
-		"unicode env name":            {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"TOKEN_é"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"unsupported credential kind":  {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"api_key","value":"RELAYKIT_PROVIDER_TOKEN"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"secret looking env ref":       {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"sk-secret-value"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"unsafe credential header":     {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"RELAYKIT_PROVIDER_TOKEN","header":"Bad Header"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"relative key file":            {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"key_file","value":"relative.key"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"capability non bool":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"streaming":"yes"},"models":[{"id":"m"}]}]}`, CodeParseError},
+		"unknown capability":           {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","capabilities":{"batch":true},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"unsafe source":                {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","routing":{"source":"Private Source"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"unsupported status":           {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","routing":{"status":"pretend"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"catalog query":                {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","catalog":{"models_url":"https://example.test/v1/models?token=abc"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"catalog unsupported scheme":   {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","catalog":{"models_url":"ftp://example.test/models"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"credential key":               {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","api_key":"abc","models":[{"id":"m"}]}]}`, CodeValidationError},
+		"credential marker value":      {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","models":[{"id":"m","display_name":"api_key=abc"}]}]}`, CodeValidationError},
+		"unicode env name":             {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"TOKEN_é"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"unsafe official credential":   {`{"official_passthrough":{"base_url":"https://api.openai.example/v1","credential_ref":{"kind":"env","value":"sk-secret-value"},"models":[{"id":"gpt-5.5"}]},"providers":[]}`, CodeValidationError},
+		"provider codex home":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"codex_home","value":"/tmp/codex-home"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"relative official codex home": {`{"official_passthrough":{"base_url":"https://api.openai.example/v1","credential_ref":{"kind":"codex_home","value":"relative"},"models":[{"id":"gpt-5.5"}]},"providers":[]}`, CodeValidationError},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

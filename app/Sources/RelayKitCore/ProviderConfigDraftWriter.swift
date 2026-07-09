@@ -95,14 +95,15 @@ public enum ProviderConfigDraftWriter {
             throw ProviderConfigError.invalid("providers array is required")
         }
 
-        let models = (draft.models.isEmpty
+        let modelDrafts = (draft.models.isEmpty
             ? [ProviderConfigDraft.ModelDraft(
                 id: draft.modelId,
                 displayName: draft.modelDisplayName,
                 contextWindow: draft.contextWindow,
                 upstreamModel: draft.upstreamModel
             )]
-            : draft.models).map(modelJSON)
+            : draft.models)
+        let models = modelDrafts.map { modelJSON($0, modelPrefix: draft.modelPrefix) }
 
         var provider: [String: Any] = [
             "id": clean(draft.providerId),
@@ -177,17 +178,56 @@ public enum ProviderConfigDraftWriter {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func modelJSON(_ draft: ProviderConfigDraft.ModelDraft) -> [String: Any] {
-        var model: [String: Any] = ["id": clean(draft.id)]
+    private static func modelJSON(_ draft: ProviderConfigDraft.ModelDraft, modelPrefix: String) -> [String: Any] {
+        let prefix = clean(modelPrefix)
+        var id = clean(draft.id)
+        var upstreamModel = clean(draft.upstreamModel)
+        if !prefix.isEmpty {
+            if id.hasPrefix(prefix) {
+                if upstreamModel.isEmpty {
+                    upstreamModel = String(id.dropFirst(prefix.count))
+                }
+            } else {
+                if upstreamModel.isEmpty {
+                    upstreamModel = id
+                }
+                id = prefix + safeModelSlug(id)
+            }
+        }
+        var model: [String: Any] = ["id": id]
         if !clean(draft.displayName).isEmpty {
             model["display_name"] = clean(draft.displayName)
         }
         if let contextWindow = draft.contextWindow, contextWindow > 0 {
             model["context_window"] = contextWindow
         }
-        if !clean(draft.upstreamModel).isEmpty {
-            model["upstream_model"] = clean(draft.upstreamModel)
+        if !upstreamModel.isEmpty {
+            model["upstream_model"] = upstreamModel
         }
         return model
+    }
+
+    private static func safeModelSlug(_ value: String) -> String {
+        var result = ""
+        var lastWasDash = false
+        for scalar in value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().unicodeScalars {
+            let isLetter = scalar.value >= 97 && scalar.value <= 122
+            let isDigit = scalar.value >= 48 && scalar.value <= 57
+            if isLetter || isDigit {
+                result.unicodeScalars.append(scalar)
+                lastWasDash = false
+            } else if !lastWasDash {
+                result.append("-")
+                lastWasDash = true
+            }
+        }
+        let slug = result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        guard !slug.isEmpty else { return "model" }
+        guard let first = slug.unicodeScalars.first,
+              first.value >= 97,
+              first.value <= 122 else {
+            return "model-\(slug)"
+        }
+        return slug
     }
 }

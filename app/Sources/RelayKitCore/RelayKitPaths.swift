@@ -15,9 +15,66 @@ public enum RelayKitPaths {
         userProviderConfigPath()
     }
 
+    public static func resolvedProviderConfigPath(savedPath: String?, fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:)) -> String {
+        guard let savedPath, !savedPath.isEmpty else {
+            return providerConfigPath()
+        }
+        if savedPath == exampleProviderConfigPath() || savedPath == "../examples/providers.example.json" {
+            return providerConfigPath()
+        }
+        if isRelayKitTemporaryProviderConfigPath(savedPath) {
+            return providerConfigPath()
+        }
+        if savedPath.hasPrefix("/tmp/") && !fileExists(savedPath) {
+            return providerConfigPath()
+        }
+        return savedPath
+    }
+
+    public static func recoveredStaleTemporaryProviderConfig(savedPath: String?, fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:)) -> Bool {
+        guard let savedPath else {
+            return false
+        }
+        return resolvedProviderConfigPath(savedPath: savedPath, fileExists: fileExists) != savedPath
+    }
+
+    private static func isRelayKitTemporaryProviderConfigPath(_ path: String) -> Bool {
+        path.hasPrefix("/tmp/relaykit-") || path.hasPrefix("/private/tmp/relaykit-")
+    }
+
     public static func userProviderConfigPath() -> String {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/RelayKit/providers.json")
+            .path
+    }
+
+    public static func officialProofRoot() -> String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/RelayKit/OfficialProof")
+            .path
+    }
+
+    public static func officialCodexHomePath() -> String {
+        URL(fileURLWithPath: officialProofRoot())
+            .appendingPathComponent("codex-home", isDirectory: true)
+            .path
+    }
+
+    public static func officialCredentialRefPath() -> String {
+        URL(fileURLWithPath: officialProofRoot())
+            .appendingPathComponent("official-credential.json")
+            .path
+    }
+
+    public static func officialRouteEvidencePath() -> String {
+        URL(fileURLWithPath: officialProofRoot())
+            .appendingPathComponent("evidence.json")
+            .path
+    }
+
+    public static func officialHomePath() -> String {
+        URL(fileURLWithPath: officialProofRoot())
+            .appendingPathComponent("home", isDirectory: true)
             .path
     }
 

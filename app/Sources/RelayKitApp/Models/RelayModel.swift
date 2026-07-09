@@ -10,30 +10,31 @@ struct RelayModel: Identifiable, Decodable {
 
 struct ModelListResponse: Decodable {
     let data: [RelayModel]
-}
-
-struct UsageSummary: Identifiable, Decodable {
-    let day: String
-    let providerId: String
-    let model: String
-    let requests: Int
-    let inputTokens: Int
-    let outputTokens: Int
-    let totalTokens: Int
-    let durationMs: Int
-
-    var id: String {
-        "\(day)-\(providerId)-\(model)"
-    }
+    let modelHealth: GatewayModelHealth?
 
     private enum CodingKeys: String, CodingKey {
-        case day
-        case providerId = "provider_id"
-        case model
-        case requests
-        case inputTokens = "input_tokens"
-        case outputTokens = "output_tokens"
-        case totalTokens = "total_tokens"
-        case durationMs = "duration_ms"
+        case data
+        case modelHealth = "model_health"
     }
+}
+
+struct GatewayModelHealth: Decodable, Equatable {
+    let probed: Bool
+    let healthy: Int
+    let unhealthy: Int
+    let hidden: [GatewayHiddenModel]
+
+    static let empty = GatewayModelHealth(probed: false, healthy: 0, unhealthy: 0, hidden: [])
+
+    init(probed: Bool, healthy: Int, unhealthy: Int, hidden: [GatewayHiddenModel]) {
+        self.probed = probed
+        self.healthy = healthy
+        self.unhealthy = unhealthy
+        self.hidden = hidden
+    }
+}
+
+struct GatewayHiddenModel: Identifiable, Decodable, Equatable {
+    let id: String
+    let reason: String
 }

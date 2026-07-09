@@ -16,3 +16,8 @@ critique.json
 relaykit-gateway-popover.html
 relaykit-gateway-popover.html.artifact.json
 mr*-image.png
+local-conversation-page-*.js
+local-conversation-thread-*.js
+remote-conversation-page-*.js
+docs/private/
+scripts/private/
