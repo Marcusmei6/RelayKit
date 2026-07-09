@@ -85,6 +85,7 @@ Signing order:
 7. Staple with `xcrun stapler staple`.
 8. Validate with `xcrun stapler validate`.
 9. Gatekeeper-check with `spctl -a -vvv -t exec`.
+10. Re-extract the signed zip and repeat `codesign`, `spctl`, and `stapler validate` on the extracted app.
 
 Expected signed beta output:
 
