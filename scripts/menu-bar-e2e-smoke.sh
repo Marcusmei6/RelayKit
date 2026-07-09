@@ -2,13 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="${ROOT}/dist/RelayKitApp.app"
-APP_REAL="${ROOT}/dist/RelayKitApp.app/Contents/MacOS/RelayKitApp.bin"
-BUNDLED_RELAY="${ROOT}/dist/RelayKitApp.app/Contents/MacOS/relay"
+APP_BUNDLE="${RELAYKIT_APP_BUNDLE:-${ROOT}/dist/RelayKitApp.app}"
+APP_REAL="${APP_BUNDLE}/Contents/MacOS/RelayKitApp.bin"
+BUNDLED_RELAY="${APP_BUNDLE}/Contents/MacOS/relay"
 BUNDLE_ID="dev.relaykit.app"
 APPEARANCE_KEY="appearanceMode"
 PROVIDER_CONFIG_KEY="providerConfigPath"
-OUT="${ROOT}/dist/ui-smoke"
+OUT="${RELAYKIT_UI_SMOKE_OUT:-${ROOT}/dist/ui-smoke}"
 CATALOG_PORT="18790"
 CATALOG_URL="http://127.0.0.1:${CATALOG_PORT}/v1/models"
 APP_SUPPORT_PROVIDER_CONFIG="${HOME}/Library/Application Support/RelayKit/providers.json"
@@ -906,13 +906,23 @@ capture_real_quit_menu() {
   coords="$(/usr/bin/osascript <<'APPLESCRIPT'
 tell application "System Events"
   tell process "RelayKitApp.bin"
-    set itemPosition to position of menu bar item 1 of menu bar 1
-    set itemSize to size of menu bar item 1 of menu bar 1
-    set itemX to item 1 of itemPosition as integer
-    set itemY to item 2 of itemPosition as integer
-    set itemWidth to item 1 of itemSize as integer
-    set itemHeight to item 2 of itemSize as integer
-    return (itemX as text) & "|" & (itemY as text) & "|" & (itemWidth as text) & "|" & (itemHeight as text)
+    repeat 50 times
+      try
+        set itemPosition to position of menu bar item 1 of menu bar 1
+        set itemSize to size of menu bar item 1 of menu bar 1
+        if itemPosition is not missing value and itemSize is not missing value then
+          set itemX to item 1 of itemPosition as integer
+          set itemY to item 2 of itemPosition as integer
+          set itemWidth to item 1 of itemSize as integer
+          set itemHeight to item 2 of itemSize as integer
+          if itemWidth > 0 and itemHeight > 0 then
+            return (itemX as text) & "|" & (itemY as text) & "|" & (itemWidth as text) & "|" & (itemHeight as text)
+          end if
+        end if
+      end try
+      delay 0.1
+    end repeat
+    error "RelayKit menu bar item coordinates were not available"
   end tell
 end tell
 APPLESCRIPT
@@ -1019,7 +1029,9 @@ cd "${ROOT}"
 ORIGINAL_CODEX_CONFIG_SIGNATURE="$(file_signature "${CODEX_CONFIG_PATH}")"
 ORIGINAL_CODEX_AUTH_SIGNATURE="$(file_signature "${CODEX_AUTH_PATH}")"
 ORIGINAL_OFFICIAL_LOGIN_PIDS="$(official_login_pids)"
-./script/build_and_run.sh --verify >/dev/null
+if [[ "${RELAYKIT_SKIP_BUILD_VERIFY:-0}" != "1" ]]; then
+  ./script/build_and_run.sh --verify >/dev/null
+fi
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
 SMOKE_CONFIG_DIR="$(mktemp -d /tmp/relaykit-ui-smoke-config.XXXXXX)"

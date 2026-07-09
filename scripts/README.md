@@ -79,6 +79,34 @@ The check scans tracked files for private provider references, credential-shaped
 
 The UI smoke launches `dist/RelayKitApp.app` through LaunchServices, captures the menu-bar popover and provider sheet under `dist/ui-smoke/`, verifies redacted local catalog/source grouping, Settings state including Light appearance persistence, provider modal fields, and cleans up RelayKit-owned app/helper processes.
 
+## Local Beta Dogfood
+
+```bash
+./scripts/local-beta-dogfood-smoke.sh
+```
+
+The dogfood smoke rebuilds `dist/RelayKitApp-local.zip`, extracts it under `dist/dogfood-local-beta/install/`, launches that extracted app bundle with UI smoke arguments, and writes public-safe evidence plus screenshots under `dist/dogfood-local-beta/`. Gatekeeper rejection is expected for this local ad-hoc beta and is recorded as friction, not as signed beta success.
+
+The smoke captures the Connect, Settings, and Usage surfaces from the extracted app bundle. Deeper provider-form AX coverage remains in `./scripts/menu-bar-e2e-smoke.sh`.
+
+## Codex Desktop Manual Proof
+
+```bash
+./scripts/codex-desktop-manual-proof.sh --setup-only
+./scripts/codex-desktop-manual-proof.sh
+./scripts/codex-desktop-manual-proof.sh cleanup
+```
+
+The manual proof harness creates isolated state under `~/Library/Application Support/RelayKit/DesktopProof/`, generates an isolated `CODEX_HOME/config.toml`, starts RelayKit on a random non-18787/non-19777 loopback port, and writes redacted evidence under `dist/codex-desktop-manual-proof/`. `--setup-only` verifies merged official + demo provider picker data without opening Codex Desktop. The default mode launches an isolated Codex Desktop process and waits for the user to send real manual requests before checking fresh RelayKit usage events. It never copies global Codex auth files and must not write global `~/.codex/config.toml` or `~/.codex/auth.json`.
+
+## Diagnostics
+
+```bash
+./scripts/export-diagnostics.sh
+```
+
+The diagnostics export writes redacted aggregate state under `dist/diagnostics/`: app version, bundle id, gateway port/health, provider/model counts, usage aggregates, and recent error types. It does not export provider URLs, credentials, headers, request bodies, response bodies, copied Codex auth files, or Keychain item names.
+
 ## Direct Replacement Check
 
 ```bash

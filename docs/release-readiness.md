@@ -19,7 +19,7 @@ Expected artifact:
 
 This is a local beta package only. It is not a signed, notarized, ordinary-user distribution.
 
-The local beta uses macOS ad-hoc code signing (`codesign --sign -`) only. It is not iOS Ad Hoc distribution, does not use provisioning profiles, does not use UDIDs, and must not add `embedded.mobileprovision` or iOS-style Ad Hoc profile material.
+The local beta uses macOS ad-hoc code signing (`codesign --sign -`) only. It is not iOS Ad Hoc distribution, does not use provisioning profiles, does not use UDIDs, and must not add `embedded.mobileprovision` or iOS-style Ad Hoc profile material. It also must not add unrelated entitlements, such as virtualization, to make local beta signing appear more official.
 
 Status summary:
 
@@ -59,16 +59,18 @@ spctl -a -vvv -t exec dist/RelayKitApp.app
 xcrun stapler validate dist/RelayKitApp.app
 ```
 
-For the current local beta, ad-hoc signing or Gatekeeper rejection is expected. Do not describe this artifact as a signed beta or public release.
+For the current local beta, Gatekeeper rejection is expected because the app is ad-hoc signed and not Developer ID signed or notarized. Do not describe this artifact as a signed beta, public release, or updater-ready release.
 
-Latest local check on this machine:
+Latest local check on this machine, 2026-07-10:
 
 - `./script/package_release.sh --verify`: passed and wrote `dist/RelayKitApp-local.zip`.
 - `dist/RelayKitApp.app/Contents/_CodeSignature/CodeResources`: present.
 - `codesign --verify --deep --strict --verbose=4 dist/RelayKitApp.app`: passed; bundled `relay` is prepared and validated.
 - `codesign -dvvv --entitlements :- dist/RelayKitApp.app`: `Identifier=dev.relaykit.app`, `Signature=adhoc`, `TeamIdentifier=not set`, sealed resources present.
-- `spctl -a -vvv -t exec dist/RelayKitApp.app`: rejected, expected for local ad-hoc beta.
+- `spctl -a -vvv -t exec dist/RelayKitApp.app`: rejected with status `3`, expected for local ad-hoc beta.
 - `xcrun stapler validate dist/RelayKitApp.app`: no stapled ticket, expected until notarization.
+
+`./script/build_app_bundle.sh --verify` and `./script/package_release.sh --verify` must continue to reject local beta artifacts that are missing `_CodeSignature/CodeResources`, are not `Signature=adhoc`, have a `TeamIdentifier`, or contain iOS-style provisioning profiles.
 
 ## Signed Beta Flow
 

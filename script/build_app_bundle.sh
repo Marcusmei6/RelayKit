@@ -94,7 +94,27 @@ verify_bundle() {
     echo "Real app executable is not a Mach-O binary: ${APP_REAL_BINARY}" >&2
     exit 1
   fi
+  if [[ ! -f "${APP_CONTENTS}/_CodeSignature/CodeResources" ]]; then
+    echo "App bundle is missing _CodeSignature/CodeResources" >&2
+    exit 1
+  fi
+  local provisioning_path
+  provisioning_path="$(find "${APP_CONTENTS}" \( -name 'embedded.mobileprovision' -o -name '*.mobileprovision' -o -name '*.provisionprofile' \) -print -quit)"
+  if [[ -n "${provisioning_path}" ]]; then
+    echo "macOS local beta must not include provisioning profiles: ${provisioning_path}" >&2
+    exit 1
+  fi
   codesign --verify --deep --strict --verbose=4 "${APP_BUNDLE}" >/dev/null
+  local signing_details
+  signing_details="$(codesign -dvvv "${APP_BUNDLE}" 2>&1)"
+  if ! grep -q 'Signature=adhoc' <<<"${signing_details}"; then
+    echo "Local beta must be macOS ad-hoc signed" >&2
+    exit 1
+  fi
+  if ! grep -q 'TeamIdentifier=not set' <<<"${signing_details}"; then
+    echo "Local beta must not have a Developer ID team identifier" >&2
+    exit 1
+  fi
   "${APP_REAL_BINARY}" --verify-bundled-gateway
 }
 

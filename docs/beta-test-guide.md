@@ -41,10 +41,21 @@ Do not send the provider base URL or API key in feedback.
 
 1. Start the gateway from RelayKit.
 2. Confirm `/v1/models` lists official models and saved provider models.
-3. In an isolated Codex Desktop profile, point Codex to RelayKit's local gateway.
-4. Confirm the model picker lists the expected provider models.
-5. Send a tiny request.
-6. Open RelayKit Usage and confirm a local usage row appears.
+3. Prepare the isolated Codex Desktop proof state:
+
+   ```bash
+   ./scripts/codex-desktop-manual-proof.sh --setup-only
+   ```
+
+4. Run the manual proof harness and keep its terminal open:
+
+   ```bash
+   ./scripts/codex-desktop-manual-proof.sh
+   ```
+
+5. In the isolated Codex Desktop window, confirm the model picker lists official and demo provider models.
+6. Send one tiny request and one tool/command request.
+7. Open RelayKit Usage and confirm a fresh local usage row appears.
 
 Keep screenshots redacted. Hide provider URLs, keys, account names, local usernames, and private model names if needed.
 
@@ -59,6 +70,12 @@ Use `docs/feedback-template.md`. Good feedback includes:
 - whether tool-call display looked correct;
 - whether Usage updated;
 - where the UI stalled or confused you.
+
+Attach a redacted diagnostics bundle when possible:
+
+```bash
+./scripts/export-diagnostics.sh
+```
 
 Do not include API keys, bearer tokens, cookies, `auth.json`, raw logs, or unredacted private provider URLs.
 

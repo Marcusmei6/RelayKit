@@ -33,7 +33,24 @@ verify_package() {
   test -x "${EXTRACTED_APP}/Contents/MacOS/relay"
   test -f "${EXTRACTED_APP}/Contents/Resources/providers.example.json"
   test -f "${EXTRACTED_APP}/Contents/Resources/codex.config.example.toml"
+  test -f "${EXTRACTED_APP}/Contents/_CodeSignature/CodeResources"
+  local provisioning_path
+  provisioning_path="$(find "${EXTRACTED_APP}/Contents" \( -name 'embedded.mobileprovision' -o -name '*.mobileprovision' -o -name '*.provisionprofile' \) -print -quit)"
+  if [[ -n "${provisioning_path}" ]]; then
+    echo "macOS local beta must not include provisioning profiles: ${provisioning_path}" >&2
+    exit 1
+  fi
   codesign --verify --deep --strict --verbose=4 "${EXTRACTED_APP}" >/dev/null
+  local signing_details
+  signing_details="$(codesign -dvvv "${EXTRACTED_APP}" 2>&1)"
+  if ! grep -q 'Signature=adhoc' <<<"${signing_details}"; then
+    echo "Local beta package must be macOS ad-hoc signed" >&2
+    exit 1
+  fi
+  if ! grep -q 'TeamIdentifier=not set' <<<"${signing_details}"; then
+    echo "Local beta package must not have a Developer ID team identifier" >&2
+    exit 1
+  fi
   "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" --verify-bundled-gateway
   echo "RelayKit local release package verified: ${artifact}"
 }

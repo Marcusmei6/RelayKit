@@ -6,6 +6,7 @@
 - Codex Desktop version:
 - RelayKit build or zip name:
 - Provider type: OpenAI-compatible / Anthropic-compatible / other
+- Diagnostics bundle attached: yes / no
 
 ## Setup
 

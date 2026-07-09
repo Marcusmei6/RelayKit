@@ -14,6 +14,7 @@ assignees: ""
 - RelayKit version:
 - macOS version:
 - Package: local ad-hoc beta / signed beta
+- Diagnostics bundle attached: yes / no
 
 ## Steps To Reproduce
 
@@ -33,4 +34,5 @@ assignees: ""
 - [ ] I did not include `auth.json` contents.
 - [ ] I removed private provider names, private domains, account names, and Keychain item names.
 - [ ] I redacted request/response bodies and raw logs.
+- [ ] I attached only redacted diagnostics from `./scripts/export-diagnostics.sh`, if attached.
 - [ ] Screenshots, if attached, do not show secrets or private account/provider data.

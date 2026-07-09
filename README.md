@@ -100,6 +100,16 @@ This creates `dist/RelayKitApp-local.zip`, extracts it locally, verifies `RelayK
 
 Install and uninstall notes live in `docs/install-uninstall.md`. Privacy boundaries live in `docs/privacy.md`.
 
+For local beta dogfood, follow `docs/beta-dogfood-checklist.md` and use:
+
+```bash
+./scripts/local-beta-dogfood-smoke.sh
+./scripts/codex-desktop-manual-proof.sh --setup-only
+./scripts/export-diagnostics.sh
+```
+
+The dogfood smoke runs from an extracted `dist/RelayKitApp-local.zip` app bundle and records Gatekeeper rejection as expected local-beta friction. The manual proof harness uses isolated RelayKit/Codex state under `~/Library/Application Support/RelayKit/DesktopProof/`; it must not edit global `~/.codex/config.toml` or `~/.codex/auth.json`.
+
 ## Signed Beta Package
 
 The signed beta flow is reserved but requires external Apple credentials:
