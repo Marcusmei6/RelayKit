@@ -29,10 +29,16 @@ The helper script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist
 ## Local Release Package
 
 ```bash
+./script/build_app_bundle.sh --verify
+```
+
+The build script creates `dist/RelayKitApp.app`, ad-hoc signs the bundled `relay` helper and app bundle, verifies bundle structure and code signature, and runs the bundled gateway verifier. It does not open the GUI app.
+
+```bash
 ./script/package_release.sh --verify
 ```
 
-The package script builds the local app bundle, ad-hoc signs it for bundle integrity, writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, and verifies the extracted bundled gateway plus public demo provider and Codex config examples. It does not Developer ID sign, notarize, publish, or upload anything.
+The package script builds the local app bundle through the headless build path, writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, and verifies the extracted bundled gateway plus public demo provider and Codex config examples without opening the GUI app. It does not Developer ID sign, notarize, publish, or upload anything.
 
 ## Signed Beta Package
 
@@ -47,7 +53,7 @@ The signed package script requires external Apple distribution credentials. With
 
 When credentials are present, the script builds the complete bundle, signs the bundled `relay` helper first, signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and emits GitHub Release-ready zip plus checksum files.
 
-Auto-updater work is intentionally not part of this script. Sparkle 2/appcast support is reserved for the next phase after a real signed beta passes.
+Auto-updater runtime work is intentionally not part of this script. Sparkle 2/appcast policy is documented in `docs/update-policy.md` and remains blocked until a real signed beta passes.
 
 ## Public Boundary Check
 

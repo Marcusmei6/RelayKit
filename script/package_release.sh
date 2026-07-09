@@ -15,7 +15,7 @@ usage() {
 }
 
 package_app() {
-  "${ROOT_DIR}/script/build_and_run.sh" --verify >&2
+  "${ROOT_DIR}/script/build_app_bundle.sh" --verify >&2
   rm -f "${ZIP_PATH}"
   (
     cd "${DIST_DIR}"
@@ -33,10 +33,7 @@ verify_package() {
   test -x "${EXTRACTED_APP}/Contents/MacOS/relay"
   test -f "${EXTRACTED_APP}/Contents/Resources/providers.example.json"
   test -f "${EXTRACTED_APP}/Contents/Resources/codex.config.example.toml"
-  /usr/bin/open -n "${EXTRACTED_APP}"
-  sleep 2
-  pgrep -f "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" >/dev/null
-  pkill -f "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" >/dev/null 2>&1 || true
+  codesign --verify --deep --strict --verbose=4 "${EXTRACTED_APP}" >/dev/null
   "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" --verify-bundled-gateway
   echo "RelayKit local release package verified: ${artifact}"
 }

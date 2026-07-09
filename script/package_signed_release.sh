@@ -32,7 +32,7 @@ if missing_distribution_inputs; then
   fail_missing_distribution_inputs
 fi
 
-"${ROOT_DIR}/script/build_and_run.sh" --verify >&2
+"${ROOT_DIR}/script/build_app_bundle.sh" --verify >&2
 
 mkdir -p "${RELEASE_DIR}"
 rm -f "${SIGNED_ZIP}" "${SHA256_PATH}" "${NOTARY_ZIP}"

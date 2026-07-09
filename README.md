@@ -96,7 +96,7 @@ The bundled app uses its bundled `relay` helper. A direct SwiftPM run falls back
 ./script/package_release.sh --verify
 ```
 
-This creates `dist/RelayKitApp-local.zip`, extracts it locally, verifies `RelayKitApp.app/Contents/MacOS/relay` plus the bundled public demo provider and Codex config examples, opens the extracted app, and checks the extracted bundled gateway through `/healthz` and `/v1/models`. The package is ad-hoc signed only for local bundle integrity; it is not Developer ID signed or notarized.
+This creates `dist/RelayKitApp-local.zip`, extracts it locally, verifies `RelayKitApp.app/Contents/MacOS/relay` plus the bundled public demo provider and Codex config examples, and checks the extracted bundled gateway without opening the GUI app. The package is ad-hoc signed only for local bundle integrity; it is not Developer ID signed or notarized.
 
 Install and uninstall notes live in `docs/install-uninstall.md`. Privacy boundaries live in `docs/privacy.md`.
 
@@ -113,7 +113,7 @@ RELAYKIT_APPLE_TEAM_ID="TEAMID" \
 
 Without those values the script fails with `missing Developer ID signing identity / notarization credentials` and does not produce a misleading signed artifact. Signing runs after the full bundle is assembled, signs the bundled `relay` helper first, then signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and writes GitHub Release-ready assets under `dist/github-release/v<version>/`.
 
-`RELAYKIT_APP_VERSION` and `RELAYKIT_BUILD_NUMBER` are reserved now and flow into `CFBundleShortVersionString` and `CFBundleVersion`. Auto-updater support, including Sparkle 2/appcast work, is intentionally deferred until after a real signed beta exists.
+`RELAYKIT_APP_VERSION` and `RELAYKIT_BUILD_NUMBER` are reserved now and flow into `CFBundleShortVersionString` and `CFBundleVersion`. Auto-updater support, including Sparkle 2/appcast work, is documented in `docs/update-policy.md` and `docs/updater-readiness.md`, but intentionally not implemented until after a real signed beta exists.
 
 ## Durable Local Helper
 

@@ -19,13 +19,19 @@ Expected artifact:
 
 This is a local beta package only. It is not a signed, notarized, ordinary-user distribution.
 
+Headless build and release commands:
+
+- `./script/build_app_bundle.sh --verify` builds and verifies `dist/RelayKitApp.app` without opening the GUI app.
+- `./script/package_release.sh --verify` packages the local ad-hoc beta without opening the GUI app.
+- `./script/build_and_run.sh --verify` remains the LaunchServices GUI verification path.
+
 Reserved app metadata:
 
 - Bundle ID: `dev.relaykit.app`
 - Marketing version: `RELAYKIT_APP_VERSION`, default `0.1.0`
 - Build number: `RELAYKIT_BUILD_NUMBER`, default `1`
 
-These values are already written into `Info.plist` as `CFBundleIdentifier`, `CFBundleShortVersionString`, and `CFBundleVersion` so the later Sparkle 2 updater phase can reuse the package structure. Do not implement an updater before signed beta.
+These values are already written into `Info.plist` as `CFBundleIdentifier`, `CFBundleShortVersionString`, and `CFBundleVersion` so the later Sparkle 2 updater phase can reuse the package structure. Do not implement an updater before signed beta. See `docs/update-policy.md` and `docs/updater-readiness.md`.
 
 ## Local Checks
 
@@ -96,6 +102,8 @@ For signed beta, create a draft GitHub Release `v<version>` with:
 - release notes that state the supported macOS version, bundle id, signing/notarization status, and known beta limitations;
 - no appcast, Sparkle feed, or auto-update metadata until the signed beta path is proven.
 
+After signed beta is proven, the stable updater feed may be added as a GitHub Releases-backed Sparkle appcast. Local ad-hoc zips must never enter that feed.
+
 ## Distribution Ladder
 
 Local beta:
@@ -117,7 +125,7 @@ Public release still needs:
 - signed and notarized package;
 - signed beta tester feedback;
 - final privacy, install, uninstall, support, and security docs reviewed in public-safe form;
-- update policy after Sparkle 2 is implemented in the next phase;
+- Sparkle 2 updater implementation after signed beta, following `docs/update-policy.md`;
 - release notes and checksum.
 
 ## Do Not Fake
