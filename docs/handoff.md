@@ -57,7 +57,38 @@ Private/local real-provider proof scripts are kept out of tracked public files u
 
 `./script/build_app_bundle.sh --verify` builds and verifies the app bundle without opening the GUI. `./script/package_release.sh --verify` produces `dist/RelayKitApp-local.zip` through that headless path. This is an ad-hoc signed local beta artifact for bundle integrity only, not a Developer ID signed or notarized public release.
 
-Before ordinary user distribution, RelayKit still needs real Developer ID credentials, notarization, stapling, signed GitHub Release assets, and signed beta feedback. Versioning, install/uninstall instructions, privacy docs, updater policy, and the signed package script are now reserved in `docs/release-readiness.md`, `docs/update-policy.md`, and `docs/updater-readiness.md`.
+Current release status:
+
+- local beta: ready.
+- open-source public-safe: ready.
+- pre-signed release pipeline: ready.
+- signed beta: blocked by Apple Developer Program approval.
+- public release: not complete.
+- updater runtime: deferred until a signed and notarized artifact exists.
+
+Blocked signed beta reason: external Apple approval pending. Current evidence must be preserved:
+
+- Apple Developer Account still shows membership pending /待处理.
+- Certificates page shows Access Unavailable.
+- `security find-identity -p codesigning -v | grep "Developer ID Application"` has no output on this Mac.
+- `./script/package_signed_release.sh` exits 64 when `RELAYKIT_SIGNING_IDENTITY`, `RELAYKIT_NOTARYTOOL_PROFILE`, or `RELAYKIT_APPLE_TEAM_ID` is missing.
+- `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip`, its `.sha256`, and `dist/RelayKitApp-notary.zip` must not exist after that failure.
+
+Do not describe the local ad-hoc package as a signed beta. Do not mock notarization success.
+
+While Apple approval is pending, the active goal is `pre-signed beta readiness while Apple approval pending`: keep local beta, public-safe checks, release dry-runs, fail-fast signed packaging, GitHub Release draft structure, checksum naming, version bump documentation, and resume steps ready. Do not implement updater runtime, Sparkle, Tauri updater, Connect-page changes, gateway routing changes, or model adapter changes in this lane.
+
+Apple approval resume checklist:
+
+1. Confirm `security find-identity -p codesigning -v | grep "Developer ID Application"` finds the Developer ID Application identity.
+2. Store notarization credentials with `xcrun notarytool store-credentials` outside git.
+3. Export `RELAYKIT_SIGNING_IDENTITY`, `RELAYKIT_NOTARYTOOL_PROFILE`, `RELAYKIT_APPLE_TEAM_ID`, and `RELAYKIT_GITHUB_REPO`.
+4. Run `./script/package_signed_release.sh`.
+5. Verify `codesign --verify --deep --strict --verbose=4 dist/RelayKitApp.app`, `spctl -a -vvv -t exec dist/RelayKitApp.app`, and `xcrun stapler validate dist/RelayKitApp.app`.
+6. Install dogfood from the signed zip, not from the repo checkout.
+7. Create the GitHub Release draft with `./script/create_github_release_draft.sh`.
+
+Versioning, install/uninstall instructions, privacy docs, updater policy, and the signed package script are reserved in `docs/release-readiness.md`, `docs/update-policy.md`, and `docs/updater-readiness.md`.
 
 ## User Feedback Loop
 

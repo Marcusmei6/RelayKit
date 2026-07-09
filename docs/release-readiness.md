@@ -21,6 +21,17 @@ This is a local beta package only. It is not a signed, notarized, ordinary-user 
 
 The local beta uses macOS ad-hoc code signing (`codesign --sign -`) only. It is not iOS Ad Hoc distribution, does not use provisioning profiles, does not use UDIDs, and must not add `embedded.mobileprovision` or iOS-style Ad Hoc profile material.
 
+Status summary:
+
+- local beta: ready.
+- open-source public-safe: ready.
+- pre-signed release pipeline: ready.
+- signed beta: blocked by Apple Developer Program approval.
+- public release: not complete.
+- updater runtime: deferred until a signed and notarized artifact exists.
+
+Current signed beta blocker: external Apple approval pending. Apple Developer Account still shows membership pending /待处理, the Certificates page shows Access Unavailable, this Mac has no Developer ID Application identity, and `./script/package_signed_release.sh` correctly exits 64 without Apple signing inputs. Do not delete or overwrite this evidence, do not describe `dist/RelayKitApp-local.zip` as a signed beta, and do not mock notarization success.
+
 Headless build and release commands:
 
 - `./script/build_app_bundle.sh --verify` builds and verifies `dist/RelayKitApp.app` without opening the GUI app.
@@ -98,6 +109,34 @@ Expected signed beta output:
 
 If the credentials are missing, the script must print `missing Developer ID signing identity / notarization credentials` and must not create or reuse a signed zip.
 
+Apple approval resume checklist:
+
+1. Confirm a Developer ID Application identity:
+
+   ```bash
+   security find-identity -p codesigning -v | grep "Developer ID Application"
+   ```
+
+2. Store notarization credentials outside git:
+
+   ```bash
+   xcrun notarytool store-credentials relaykit-notary
+   ```
+
+3. Export release-only inputs outside git:
+
+   ```bash
+   export RELAYKIT_SIGNING_IDENTITY="Developer ID Application: Example Team (TEAMID)"
+   export RELAYKIT_NOTARYTOOL_PROFILE="relaykit-notary"
+   export RELAYKIT_APPLE_TEAM_ID="TEAMID"
+   export RELAYKIT_GITHUB_REPO="owner/repo"
+   ```
+
+4. Run `./script/package_signed_release.sh`.
+5. Verify `codesign`, `spctl`, and `xcrun stapler validate` on `dist/RelayKitApp.app` and on the app extracted from the signed zip.
+6. Install dogfood from the signed zip, not from the repo checkout.
+7. Create the GitHub Release draft with `./script/create_github_release_draft.sh`.
+
 ## GitHub Releases Structure
 
 For signed beta, create a draft GitHub Release `v<version>` with:
@@ -108,6 +147,16 @@ For signed beta, create a draft GitHub Release `v<version>` with:
 - no appcast, Sparkle feed, or auto-update metadata until the signed beta path is proven.
 
 Use `RELAYKIT_GITHUB_REPO=owner/repo ./script/create_github_release_draft.sh` after `package_signed_release.sh` succeeds. The draft script re-validates the signed zip before uploading assets.
+
+Version bump flow:
+
+```bash
+RELAYKIT_APP_VERSION=0.1.1 RELAYKIT_BUILD_NUMBER=2 ./script/package_release.sh --verify
+RELAYKIT_APP_VERSION=0.1.1 RELAYKIT_BUILD_NUMBER=2 ./script/package_signed_release.sh
+RELAYKIT_APP_VERSION=0.1.1 ./script/create_github_release_draft.sh
+```
+
+The checksum is always named beside the signed zip as `RelayKitApp-<version>-signed.zip.sha256`.
 
 After signed beta is proven, the stable updater feed may be added as a GitHub Releases-backed Sparkle appcast. Local ad-hoc zips must never enter that feed.
 
