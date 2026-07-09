@@ -37,7 +37,7 @@ verify_package() {
   sleep 2
   pgrep -f "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" >/dev/null
   pkill -f "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" >/dev/null 2>&1 || true
-  "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp" --verify-bundled-gateway
+  "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" --verify-bundled-gateway
   echo "RelayKit local release package verified: ${artifact}"
 }
 

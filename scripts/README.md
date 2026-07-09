@@ -32,7 +32,30 @@ The helper script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist
 ./script/package_release.sh --verify
 ```
 
-The package script builds the local app bundle, writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, and verifies the extracted bundled gateway plus public demo provider and Codex config examples. It does not sign, notarize, publish, or upload anything.
+The package script builds the local app bundle, ad-hoc signs it for bundle integrity, writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, and verifies the extracted bundled gateway plus public demo provider and Codex config examples. It does not Developer ID sign, notarize, publish, or upload anything.
+
+## Signed Beta Package
+
+```bash
+RELAYKIT_SIGNING_IDENTITY="Developer ID Application: Example Team (TEAMID)" \
+RELAYKIT_NOTARYTOOL_PROFILE="relaykit-notary" \
+RELAYKIT_APPLE_TEAM_ID="TEAMID" \
+./script/package_signed_release.sh
+```
+
+The signed package script requires external Apple distribution credentials. Without them it exits before signing with `missing Developer ID signing identity / notarization credentials` and does not create `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip`.
+
+When credentials are present, the script builds the complete bundle, signs the bundled `relay` helper first, signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and emits GitHub Release-ready zip plus checksum files.
+
+Auto-updater work is intentionally not part of this script. Sparkle 2/appcast support is reserved for the next phase after a real signed beta passes.
+
+## Public Boundary Check
+
+```bash
+./scripts/public-boundary-check.sh
+```
+
+The check scans tracked files for private provider references, credential-shaped content, auth/log artifacts, and accidentally tracked private/build paths.
 
 ## Menu-Bar UI Smoke
 

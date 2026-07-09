@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="${ROOT}/dist/RelayKitApp.app"
-APP="${ROOT}/dist/RelayKitApp.app/Contents/MacOS/RelayKitApp"
 APP_REAL="${ROOT}/dist/RelayKitApp.app/Contents/MacOS/RelayKitApp.bin"
 BUNDLED_RELAY="${ROOT}/dist/RelayKitApp.app/Contents/MacOS/relay"
 BUNDLE_ID="dev.relaykit.app"
@@ -136,7 +135,7 @@ trap 'restore_defaults; cleanup; cleanup_official_login_processes; cleanup_fake_
 file_signature() {
   local path="$1"
   if [[ -e "${path}" ]]; then
-    /usr/bin/stat -f "%m:%z" "${path}"
+    shasum -a 256 "${path}" | awk '{print $1}'
   else
     printf 'missing'
   fi

@@ -9,7 +9,7 @@ This guide is for a small local beta. RelayKit does not collect cloud telemetry;
 3. Open the RelayKit menu-bar item.
 4. Confirm Settings shows gateway port `127.0.0.1:19777`.
 
-If macOS blocks the app, this is expected for the unsigned local beta. The signed beta/public release is a later step.
+If macOS blocks the app, this is expected for the local ad-hoc beta. The signed beta/public release is a later step.
 
 ## Add An OpenAI-Compatible Provider
 

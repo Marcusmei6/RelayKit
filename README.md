@@ -2,6 +2,8 @@
 
 RelayKit is a local model routing kit for agentic coding tools. The first target is OpenAI Codex compatibility, but the project name and architecture intentionally avoid locking the product to one client.
 
+License: MIT.
+
 ## What It Is
 
 RelayKit combines:
@@ -9,6 +11,8 @@ RelayKit combines:
 - a lightweight Apple-native Mac app for profiles, status, and local control;
 - a portable local gateway helper for protocol translation and model routing;
 - safe public configuration examples that never require private infrastructure.
+
+RelayKit does not bundle private providers, does not collect cloud telemetry, and does not ask users to submit API keys, `auth.json`, raw logs, or screenshots containing private account/provider data.
 
 ## First Public Scope
 
@@ -92,7 +96,24 @@ The bundled app uses its bundled `relay` helper. A direct SwiftPM run falls back
 ./script/package_release.sh --verify
 ```
 
-This creates `dist/RelayKitApp-local.zip`, extracts it locally, verifies `RelayKitApp.app/Contents/MacOS/relay` plus the bundled public demo provider and Codex config examples, opens the extracted app, and checks the extracted bundled gateway through `/healthz` and `/v1/models`. The package is unsigned and not notarized.
+This creates `dist/RelayKitApp-local.zip`, extracts it locally, verifies `RelayKitApp.app/Contents/MacOS/relay` plus the bundled public demo provider and Codex config examples, opens the extracted app, and checks the extracted bundled gateway through `/healthz` and `/v1/models`. The package is ad-hoc signed only for local bundle integrity; it is not Developer ID signed or notarized.
+
+Install and uninstall notes live in `docs/install-uninstall.md`. Privacy boundaries live in `docs/privacy.md`.
+
+## Signed Beta Package
+
+The signed beta flow is reserved but requires external Apple credentials:
+
+```bash
+RELAYKIT_SIGNING_IDENTITY="Developer ID Application: Example Team (TEAMID)" \
+RELAYKIT_NOTARYTOOL_PROFILE="relaykit-notary" \
+RELAYKIT_APPLE_TEAM_ID="TEAMID" \
+./script/package_signed_release.sh
+```
+
+Without those values the script fails with `missing Developer ID signing identity / notarization credentials` and does not produce a misleading signed artifact. Signing runs after the full bundle is assembled, signs the bundled `relay` helper first, then signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and writes GitHub Release-ready assets under `dist/github-release/v<version>/`.
+
+`RELAYKIT_APP_VERSION` and `RELAYKIT_BUILD_NUMBER` are reserved now and flow into `CFBundleShortVersionString` and `CFBundleVersion`. Auto-updater support, including Sparkle 2/appcast work, is intentionally deferred until after a real signed beta exists.
 
 ## Durable Local Helper
 
@@ -110,4 +131,10 @@ The helper script affects only `~/Library/LaunchAgents/dev.relaykit.gateway.plis
 
 ## Public Release Readiness
 
-Before any public push or release, run `docs/public-boundary-checklist.md`. Checked-in `.codex/agents/*.toml` files use public model defaults; keep private/local routing in untracked machine-local overrides only.
+Before any public push or release:
+
+```bash
+./scripts/public-boundary-check.sh
+```
+
+Then follow `docs/public-boundary-checklist.md` and `docs/release-readiness.md`. Checked-in `.codex/agents/*.toml` files use public model defaults; keep private/local routing in untracked machine-local overrides only.

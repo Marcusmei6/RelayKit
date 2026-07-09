@@ -55,9 +55,9 @@ Private/local real-provider proof scripts are kept out of tracked public files u
 
 ## Beta Boundary
 
-`./script/package_release.sh --verify` produces `dist/RelayKitApp-local.zip`. This is an unsigned local beta artifact, not a signed or notarized public release.
+`./script/package_release.sh --verify` produces `dist/RelayKitApp-local.zip`. This is an ad-hoc signed local beta artifact for bundle integrity only, not a Developer ID signed or notarized public release.
 
-Before ordinary user distribution, RelayKit still needs Developer ID signing, hardened runtime, notarization, stapling, versioning, install/uninstall instructions, and a privacy statement. See `docs/release-readiness.md`.
+Before ordinary user distribution, RelayKit still needs real Developer ID credentials, notarization, stapling, signed GitHub Release assets, and signed beta feedback. Versioning, install/uninstall instructions, privacy docs, and the signed package script are now reserved in `docs/release-readiness.md`.
 
 ## User Feedback Loop
 

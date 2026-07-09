@@ -2,6 +2,16 @@
 
 Run this before any commit, public push, package handoff, or beta share.
 
+## Automated Gate
+
+```bash
+./scripts/public-boundary-check.sh
+```
+
+Expected: `RelayKit public boundary check passed`.
+
+The script scans tracked files only and fails on private provider/domain references, credential-shaped content, tracked auth/log/usage artifacts, or ignored private/build paths that accidentally entered git.
+
 ## Private Provider Scan
 
 ```bash
@@ -66,10 +76,28 @@ Expected: scripts use demo providers, loopback upstreams, isolated config, and `
 
 ```bash
 ./script/package_release.sh --verify
+if env -u RELAYKIT_SIGNING_IDENTITY -u RELAYKIT_NOTARYTOOL_PROFILE -u RELAYKIT_APPLE_TEAM_ID ./script/package_signed_release.sh; then
+  echo "signed package unexpectedly succeeded without credentials" >&2
+  exit 1
+fi
+test ! -f dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip
+codesign --verify --deep --strict --verbose=4 dist/RelayKitApp.app
 codesign -dvvv --entitlements :- dist/RelayKitApp.app
-spctl -a -vv dist/RelayKitApp.app
+spctl -a -vvv -t exec dist/RelayKitApp.app
+xcrun stapler validate dist/RelayKitApp.app
 ```
 
 Expected: package can be generated locally. Codesign/spctl may show ad-hoc or not notarized for local beta; that is a distribution blocker, not a local beta failure.
+
+The signed package command is expected to fail without Apple credentials and must print `missing Developer ID signing identity / notarization credentials`. It must not leave a signed artifact behind.
+
+## GitHub Release Draft Shape
+
+Signed beta release assets, once real Developer ID signing and notarization pass:
+
+- `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip`
+- `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip.sha256`
+
+Do not publish Sparkle appcast metadata or advertise auto-update until the later updater phase is implemented after signed beta.
 
 Publishing is blocked until every row has evidence.
