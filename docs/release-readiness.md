@@ -103,6 +103,8 @@ For signed beta, create a draft GitHub Release `v<version>` with:
 - release notes that state the supported macOS version, bundle id, signing/notarization status, and known beta limitations;
 - no appcast, Sparkle feed, or auto-update metadata until the signed beta path is proven.
 
+Use `RELAYKIT_GITHUB_REPO=owner/repo ./script/create_github_release_draft.sh` after `package_signed_release.sh` succeeds. The draft script re-validates the signed zip before uploading assets.
+
 After signed beta is proven, the stable updater feed may be added as a GitHub Releases-backed Sparkle appcast. Local ad-hoc zips must never enter that feed.
 
 ## Distribution Ladder

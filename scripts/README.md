@@ -55,6 +55,14 @@ When credentials are present, the script builds the complete bundle, signs the b
 
 Auto-updater runtime work is intentionally not part of this script. Sparkle 2/appcast policy is documented in `docs/update-policy.md` and remains blocked until a real signed beta passes.
 
+## GitHub Release Draft
+
+```bash
+RELAYKIT_GITHUB_REPO=owner/repo ./script/create_github_release_draft.sh
+```
+
+The draft script requires an existing signed zip and checksum from `package_signed_release.sh`. It re-extracts the zip, verifies `codesign`, `spctl`, and `stapler`, writes local release notes under `dist/github-release/v<version>/`, then creates a GitHub draft release with the signed zip and checksum. It does not publish an appcast or Sparkle feed.
+
 ## Public Boundary Check
 
 ```bash
