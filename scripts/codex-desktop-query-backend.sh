@@ -20,6 +20,7 @@ catalog_evidence="$8"
 catalog_sha256="${10}"
 artifact_sha256="${12}"
 harness="${RELAYKIT_DESKTOP_QUERY_HARNESS:-${ROOT}/scripts/codex-desktop-manual-proof.sh}"
+official_lifecycle="${RELAYKIT_DESKTOP_QUERY_OFFICIAL_LIFECYCLE:-}"
 artifact_path="${RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH:-${ROOT}/dist/RelayKitApp-local.zip}"
 
 [[ "${query_file}" = /* && -f "${query_file}" && ! -L "${query_file}" && "$(stat -f '%Lp' "${query_file}")" == "600" ]] ||
@@ -30,6 +31,9 @@ artifact_path="${RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH:-${ROOT}/dist/RelayKitApp-
 [[ "$(shasum -a 256 "${catalog_evidence}" | awk '{print $1}')" == "${catalog_sha256}" ]] || fail "catalog_evidence_stale"
 [[ -f "${artifact_path}" && ! -L "${artifact_path}" && "$(shasum -a 256 "${artifact_path}" | awk '{print $1}')" == "${artifact_sha256}" ]] || fail "artifact_evidence_stale"
 [[ -x "${harness}" ]] || fail "harness_unavailable"
+if [[ -z "${official_lifecycle}" && "${harness}" == "${ROOT}/scripts/codex-desktop-manual-proof.sh" ]]; then
+  official_lifecycle="${ROOT}/scripts/codex-desktop-query-official-once.sh"
+fi
 
 resolved_model="$(jq -ce --arg requested "${model}" '
   [(.official[]? | . + {source_type:"official"}), (.provider[]? | . + {source_type:"provider"})]
@@ -78,19 +82,32 @@ harness_stderr="${tmp}/harness.stderr"
 filtered_stderr="${tmp}/harness.filtered.stderr"
 harness_status=0
 set +e
-if [[ "${harness}" == "${ROOT}/scripts/codex-desktop-manual-proof.sh" ]]; then
+if [[ "${model_source}" == "official" && -n "${official_lifecycle}" ]]; then
+  if [[ ! -x "${official_lifecycle}" ]]; then
+    jq -nc '{status:"failed",error_code:"official_lifecycle_unavailable"}' >"${harness_stderr}"
+    harness_status=1
+  else
+    "${official_lifecycle}" \
+      --model "${model_id}" \
+      --query-file "${staged_query}" \
+      --expect "${expect}" \
+      --catalog-evidence "${catalog_evidence}" \
+      --catalog-sha256 "${catalog_sha256}" \
+      --artifact-sha256 "${artifact_sha256}" \
+      >"${harness_stdout}" 2>"${harness_stderr}"
+    harness_status=$?
+  fi
+elif [[ "${harness}" == "${ROOT}/scripts/codex-desktop-manual-proof.sh" ]]; then
   if [[ "${model_source}" == "provider" ]]; then
     provider_config="${RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG:-}"
     [[ -f "${provider_config}" ]] || fail "provider_precondition_unavailable"
     RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="${provider_config}" \
     RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="${model_id}" \
-    RELAYKIT_DESKTOP_PROOF_ROUTE_SOURCE=provider \
     RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP="${RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP:-1}" \
     RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP="${RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP:-1}" \
     RELAYKIT_DESKTOP_PROOF_INPUT_MODE=automated_ax \
       "${harness}" run-auto --scenario "${scenario}" </dev/null >"${harness_stdout}" 2>"${harness_stderr}"
   else
-    RELAYKIT_DESKTOP_PROOF_ROUTE_SOURCE=official \
     RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP="${RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP:-1}" \
     RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP="${RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP:-1}" \
     RELAYKIT_DESKTOP_PROOF_INPUT_MODE=automated_ax \
@@ -129,19 +146,23 @@ value = found[-1] if found else {}
 print(json.dumps({
     "error_code": value.get("error_code", "harness_failed"),
     "evidence_path": value.get("evidence"),
+    "submission_state": value.get("submission_state"),
 }, sort_keys=True))
 PY
 )"
   error_code="$(jq -r '.error_code' <<<"${failure_meta}")"
   evidence_path="$(jq -r '.evidence_path // empty' <<<"${failure_meta}")"
-  case "${error_code}" in
-    provider_input_missing_or_invalid|input_mode_invalid|scenario_invalid|scenario_argument_invalid|global_state_capture_failed|preflight_failed|preflight_evidence_failed|ax_driver_build_failed|desktop_catalog_labels_invalid|desktop_launch_failed|desktop_activation_failed|desktop_window_identity_invalid|desktop_initial_capture_failed|desktop_pid_invalid)
-      submission_state="not_submitted"
-      ;;
-    *)
-      submission_state="unknown_after_submit_attempt"
-      ;;
-  esac
+  submission_state="$(jq -r '.submission_state // empty' <<<"${failure_meta}")"
+  if [[ -z "${submission_state}" ]]; then
+    case "${error_code}" in
+      provider_input_missing_or_invalid|input_mode_invalid|scenario_invalid|scenario_argument_invalid|global_state_capture_failed|preflight_failed|preflight_evidence_failed|ax_driver_build_failed|desktop_catalog_labels_invalid|desktop_launch_failed|desktop_activation_failed|desktop_window_identity_invalid|desktop_initial_capture_failed|desktop_pid_invalid)
+        submission_state="not_submitted"
+        ;;
+      *)
+        submission_state="unknown_after_submit_attempt"
+        ;;
+    esac
+  fi
   jq -nc \
     --arg error_code "${error_code}" \
     --arg model "${model_id}" \
@@ -166,7 +187,7 @@ jq -c \
     status: .status,
     model: $model,
     expect: $expect,
-    submission_state: (.stages[0].submission_state // "unknown"),
+    submission_state: (.submission_state // .stages[0].submission_state // "unknown"),
     evidence_path: .evidence,
     artifact_sha256: $artifact_sha256,
     catalog_sha256: $catalog_sha256

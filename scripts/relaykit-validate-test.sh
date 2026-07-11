@@ -153,6 +153,14 @@ jq -e '(.change_classes | index("ax")) != null and .requires_live_query == true 
   fail "Desktop query backend was not classified as a targeted AX live-query leaf"
 selected desktop-query-backend live-desktop-query || fail "Desktop query backend plan omitted its targeted Skill E2E"
 
+write_fixture desktop-query-official scripts/codex-desktop-query-official-once.sh
+plan_fixture desktop-query-official --live-query
+jq -e '(.change_classes | index("ax")) != null and (.change_classes | index("harness")) != null and .requires_live_query == true and .requires_package == false and .requires_full_e2e == false' "${tmp}/desktop-query-official.json" >/dev/null ||
+  fail "targeted official lifecycle was not classified as an AX live-query leaf"
+selected desktop-query-official desktop-query-backend-contract || fail "targeted official lifecycle plan omitted backend contract tests"
+selected desktop-query-official live-desktop-query || fail "targeted official lifecycle plan omitted its explicit Skill E2E"
+not_selected desktop-query-official package-verify || fail "targeted official lifecycle plan selected package verification"
+
 write_fixture packaging script/package_release.sh
 plan_fixture packaging
 jq -e '

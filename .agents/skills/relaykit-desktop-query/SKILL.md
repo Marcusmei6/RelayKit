@@ -38,3 +38,5 @@ Accept these logical inputs:
 Keep orchestration here. Put GUI details, app launch, model selection, query entry, and submission in backend scripts.
 
 This Skill is a targeted single-query leaf. It does not choose validation scope, replace package or UI tests, aggregate a four-stage route proof, or implement the persistent session controller described in the session lifecycle design.
+
+The default backend runs official models through a one-shot App-first lifecycle with an official-only gateway config. It reuses the fixed extracted artifact and persistent isolated login/profile, submits once through the PID/window-bound AX driver, records current-run usage/rollout/screenshot evidence, then stops the owned App/Desktop/gateway. Provider models remain on the compatibility full-harness path and require the caller's ignored local provider configuration.

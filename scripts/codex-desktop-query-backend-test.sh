@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER="${ROOT}/.agents/skills/relaykit-desktop-query/scripts/run-query.sh"
 BACKEND="${ROOT}/scripts/codex-desktop-query-backend.sh"
+OFFICIAL_LIFECYCLE="${ROOT}/scripts/codex-desktop-query-official-once.sh"
 
 fail() {
   printf '%s\n' "$1" >&2
@@ -11,6 +12,26 @@ fail() {
 }
 
 [[ -x "${BACKEND}" ]] || fail "default desktop-query backend is missing"
+[[ -x "${OFFICIAL_LIFECYCLE}" ]] || fail "targeted official lifecycle is missing"
+if rg -Fq 'run_automated_proof' "${OFFICIAL_LIFECYCLE}" ||
+   rg -Fq 'prepare_automated_provider_inputs' "${OFFICIAL_LIFECYCLE}" ||
+   rg -Fq 'prepare_real_provider_config' "${OFFICIAL_LIFECYCLE}" ||
+   rg -Fq 'RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG' "${OFFICIAL_LIFECYCLE}"; then
+  fail "targeted official lifecycle still depends on full provider proof setup"
+fi
+rg -Fq 'source "${HARNESS}" --help' "${OFFICIAL_LIFECYCLE}" ||
+  fail "targeted official lifecycle does not load the established fail-closed helpers"
+rg -Fq 'providers: []' "${OFFICIAL_LIFECYCLE}" ||
+  fail "targeted official lifecycle does not generate an official-only gateway config"
+rg -Fq 'assert_global_state_unchanged' "${OFFICIAL_LIFECYCLE}" ||
+  fail "targeted official lifecycle does not guard global Codex state"
+rg -Fq 'restore_isolated_config' "${OFFICIAL_LIFECYCLE}" ||
+  fail "targeted official lifecycle does not restore isolated config"
+rg -Fq "printf '19777\\n' >\"\${PORT_FILE}\"" "${OFFICIAL_LIFECYCLE}" ||
+  fail "targeted official lifecycle does not bind cleanup to its owned gateway port"
+if rg -Fq 'package_release.sh' "${OFFICIAL_LIFECYCLE}"; then
+  fail "targeted official lifecycle may not rebuild or package"
+fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/relaykit-desktop-query-backend-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
@@ -18,6 +39,7 @@ query_file="${tmp}/query.txt"
 catalog_evidence="${tmp}/app-server.json"
 artifact="${tmp}/artifact.zip"
 fake_harness="${tmp}/fake-harness.sh"
+fake_official_lifecycle="${tmp}/fake-official-lifecycle.sh"
 capture_file="${tmp}/capture.json"
 
 printf '%s\n' 'Summarize RelayKit in one sentence.' >"${query_file}"
@@ -62,7 +84,21 @@ jq -n --arg marker "${marker}" '{status:"complete",profile:"custom_scenario",evi
 HARNESS
 chmod 700 "${fake_harness}"
 
+cat >"${fake_official_lifecycle}" <<'LIFECYCLE'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "--model" && "${2:-}" == "gpt-5.5" ]]
+[[ "${3:-}" == "--query-file" && -f "${4:-}" && "$(stat -f '%Lp' "${4}")" == "600" ]]
+[[ "${5:-}" == "--expect" && "${6:-}" == "markdown" ]]
+[[ "${7:-}" == "--catalog-evidence" && -f "${8:-}" ]]
+[[ "${9:-}" == "--catalog-sha256" && "${10:-}" =~ ^[0-9a-f]{64}$ ]]
+[[ "${11:-}" == "--artifact-sha256" && "${12:-}" =~ ^[0-9a-f]{64}$ ]]
+jq -n '{status:"complete",submission_state:"submitted",evidence:"/tmp/redacted-official-evidence.json"}'
+LIFECYCLE
+chmod 700 "${fake_official_lifecycle}"
+
 RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
+RELAYKIT_DESKTOP_QUERY_OFFICIAL_LIFECYCLE="${fake_official_lifecycle}" \
 RELAYKIT_DESKTOP_QUERY_CATALOG_EVIDENCE="${catalog_evidence}" \
 RELAYKIT_DESKTOP_QUERY_TEST_CAPTURE="${capture_file}" \
 RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
@@ -77,9 +113,11 @@ RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
 jq -e \
   --arg catalog_sha "${catalog_sha}" \
   --arg artifact_sha "${artifact_sha}" \
-  '.status == "complete" and .model == "gpt-5.5" and .expect == "markdown" and .submission_state == "submitted" and .evidence_path == "/tmp/redacted-evidence.json" and .catalog_sha256 == $catalog_sha and .artifact_sha256 == $artifact_sha and (keys | sort) == ["artifact_sha256","catalog_sha256","evidence_path","expect","model","status","submission_state"]' \
+  '.status == "complete" and .model == "gpt-5.5" and .expect == "markdown" and .submission_state == "submitted" and .evidence_path == "/tmp/redacted-official-evidence.json" and .catalog_sha256 == $catalog_sha and .artifact_sha256 == $artifact_sha and (keys | sort) == ["artifact_sha256","catalog_sha256","evidence_path","expect","model","status","submission_state"]' \
   "${tmp}/result.json" >/dev/null ||
-  fail "default backend did not complete the one-stage harness contract"
+  fail "default backend did not complete the targeted official lifecycle contract"
+[[ ! -s "${capture_file}" ]] ||
+  fail "official query invoked the full harness instead of the targeted lifecycle"
 [[ ! -s "${tmp}/stderr.txt" ]] ||
   fail "successful backend leaked harness cleanup noise"
 
@@ -90,6 +128,32 @@ if RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
   "${RUNNER}" --model 'missing-model' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
   fail "default backend accepted an unknown model"
 fi
+
+failing_official_lifecycle="${tmp}/failing-official-lifecycle.sh"
+cat >"${failing_official_lifecycle}" <<'LIFECYCLE'
+#!/usr/bin/env bash
+set -euo pipefail
+jq -nc '{status:"failed",error_code:"official_login_required",submission_state:"not_submitted",evidence:"/tmp/official-pre-submit-evidence.json"}' >&2
+exit 1
+LIFECYCLE
+chmod 700 "${failing_official_lifecycle}"
+
+official_failure_status=0
+RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
+RELAYKIT_DESKTOP_QUERY_OFFICIAL_LIFECYCLE="${failing_official_lifecycle}" \
+RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
+  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" \
+  >"${tmp}/official-failure.stdout" 2>"${tmp}/official-failure.json" || official_failure_status=$?
+[[ "${official_failure_status}" -ne 0 && ! -s "${tmp}/official-failure.stdout" ]] ||
+  fail "failed targeted official lifecycle returned success output"
+jq -e -s '
+  length == 1 and
+  .[0].status == "failed" and
+  .[0].error_code == "official_login_required" and
+  .[0].submission_state == "not_submitted" and
+  .[0].evidence_path == "/tmp/official-pre-submit-evidence.json"
+' "${tmp}/official-failure.json" >/dev/null ||
+  fail "targeted official lifecycle failure lost its pre-submit state"
 
 if RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
   RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \

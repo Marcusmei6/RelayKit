@@ -106,7 +106,7 @@ RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP=1 \
   ./scripts/codex-desktop-manual-proof.sh run-auto --scenario /absolute/path/scenario.json
 ```
 
-The project Skill `$relaykit-desktop-query` is a smaller one-query dispatcher selected only as a high-risk validation leaf. It accepts `plain`, `markdown`, or `tool`, requires caller-pinned catalog evidence plus catalog/artifact SHA-256 values, and returns redacted model/submission/evidence metadata. It does not scan stale `dist` candidates, choose validation scope, aggregate stages, or produce `automated_gui_complete` by itself.
+The project Skill `$relaykit-desktop-query` is a smaller one-query dispatcher selected only as a high-risk validation leaf. It accepts `plain`, `markdown`, or `tool`, requires caller-pinned catalog evidence plus catalog/artifact SHA-256 values, and returns redacted model/submission/evidence metadata. Official models use a targeted one-shot App-first lifecycle with an official-only temporary gateway config, so they do not require provider setup. Provider models retain the compatibility full-harness path and require an ignored local provider config. The Skill does not scan stale `dist` candidates, choose validation scope, aggregate stages, or produce `automated_gui_complete` by itself.
 
 The reuse flags are mandatory for harness/test-only reruns. The harness verifies that the existing extracted App is byte-identical to the fixed zip and still runs codesign verification; a mismatch fails closed. Record the zip SHA before and after the run and do not invoke `package_release.sh` for an evidence/assertion-only change.
 

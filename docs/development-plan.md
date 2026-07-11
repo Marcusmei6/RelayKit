@@ -236,7 +236,7 @@ Status: Gate 0 local Beta Dogfood Hardening is verified for the fixed product ca
 
 ## Phase 7.7: Validation Fast Path and Desktop Query Skill
 
-Status: implementation and focused contracts verified; the one permitted live Skill invocation failed before submission on the stale provider precondition and was not retried. Beta Dogfood Hardening evidence remains accepted and was not rerun by this phase.
+Status: selector, Skill contracts, evidence-state fix, and the post-fix live Skill E2E are verified. The default backend routes official models through a targeted one-shot App-first lifecycle with no provider precondition; provider models retain the compatibility full-harness path. The first live request exposed a cleanup defect after its GPT-5.5 response completed: the lifecycle omitted the owned `19777` port file, so the App-spawned gateway fallback was not identified. After the root fix, a fresh Skill invocation exited `0` with one Send, completed/200 usage, a unique rollout marker binding, a process-bound GUI screenshot, empty stderr, unchanged global Codex files, and both protected ports released by the helper. Beta Dogfood Hardening evidence remains accepted and was not rerun by this phase.
 
 - `scripts/relaykit-validate.sh` is the deterministic changed-file selector. Its JSON plan records files, classes, selected/skipped commands, reasons, and build/package/GUI/live/full requirements before execution.
 - Docs and workflow/Skill/harness changes stay on syntax and focused contract tests. Gateway changes select affected Go packages. Ordinary App UI selects Swift build/validation plus no-model menu smoke. Packaging inputs alone select package and extracted-App dogfood.
@@ -244,7 +244,7 @@ Status: implementation and focused contracts verified; the one permitted live Sk
 - The Skill accepts `plain`, `markdown`, or `tool`, requires explicit catalog evidence and caller-pinned catalog/artifact SHA-256 values, and does not search stale `dist` directories.
 - The Skill remains one-shot. Persistent prepare/query/status/finalize/stop lifecycle, watchdog, and finalization profiles remain the next-session design, not this phase.
 - Future manual-proof evidence reports GUI tool review as verified for both `manual_user_only` and `automated_ax` when current-run rollout, process-bound screenshot, and render evidence agree. Previously accepted artifacts are not rewritten.
-- The failed Skill invocation produced no fresh usage event and no submission state. Its root cause is fixed by an official-only setup scope with no provider requirement, but a second live invocation is intentionally deferred because this phase forbids automatic retry after failure.
+- The initial failed lifecycle remains archived at `dist/validation-fast-path/live-skill-request-evidence.json`; it records a completed request followed by `gateway_port_not_released`, not a model failure. The authoritative post-fix result is `dist/validation-fast-path/postfix-live-skill-result.json`, which points to the fresh targeted-query evidence under `dist/codex-desktop-query/`. That run exited `0` in 39 seconds and proves current-run GPT-5.5 completed/200 usage, one user/assistant marker pair, a bound Desktop screenshot, clean protocol rendering, exact cleanup, and global state preservation.
 - Group one coherent root-cause change before execution, never repeat an unchanged validation layer, and retry the same failing command at most once.
 
 ## Task Ownership

@@ -87,7 +87,7 @@ for path in files:
         classes.add("skill")
     if path.startswith("scripts/relaykit-validate"):
         classes.update(("validation", "shell"))
-    if path.startswith("scripts/codex-desktop-query-backend"):
+    if path.startswith("scripts/codex-desktop-query-backend") or path == "scripts/codex-desktop-query-official-once.sh":
         classes.update(("skill", "harness", "shell", "ax"))
     if path.startswith("scripts/codex-desktop-manual-proof"):
         classes.update(("harness", "shell"))
