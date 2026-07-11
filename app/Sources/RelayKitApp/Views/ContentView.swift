@@ -1992,7 +1992,7 @@ private struct ProviderFormView: View {
                 .foregroundStyle(Color(hex: 0x78D8FF))
                 .accessibilityLabel("provider-connection-use-reachable-visible")
                 .accessibilityIdentifier("provider-connection-use-reachable-visible")
-                .smokeSection("provider-connection-use-reachable-visible", recorder: smokeSectionRecorder)
+                .smokeRecordOnly("provider-connection-use-reachable-visible", recorder: smokeSectionRecorder)
             }
         }
         .padding(.horizontal, 9)

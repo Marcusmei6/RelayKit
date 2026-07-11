@@ -91,20 +91,49 @@ The dogfood smoke rebuilds `dist/RelayKitApp-local.zip`, extracts it under `dist
 
 The provider lane is fixture plumbing only. It verifies Keychain persistence, Detect models, Test connection, Use reachable, model filtering, actionable base URL/key/model errors, restart persistence, real right-click Quit, and bounded release of port `19777`; it does not claim real provider model compatibility. For App-owned launches, RelayKit reads referenced credentials with Security.framework and sends them once to the bundled gateway through an anonymous stdin pipe. The gateway keeps them in memory, and the harness never reads or rewrites the item with `/usr/bin/security`.
 
-## Codex Desktop Manual Proof
+## Codex Desktop Route Proof
 
 ```bash
 ./scripts/codex-desktop-manual-proof.sh --setup-only
 ./scripts/codex-desktop-manual-proof-test.sh
+```
+
+The intended standard live path is one explicitly authorized invocation of the locked harness. Its caller creates a `0700` temporary directory, writes private query and scenario files with mode `0600`, and invokes the interface with no human input:
+
+```bash
+RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP=1 \
+RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP=1 \
+  ./scripts/codex-desktop-manual-proof.sh run-auto --scenario /absolute/path/scenario.json
+```
+
+The project Skill `$relaykit-desktop-query` is a smaller one-query dispatcher. It passes one model plus one private `0600` query file to a configured backend; it does not aggregate stages and cannot produce `automated_gui_complete` by itself.
+
+The reuse flags are mandatory for harness/test-only reruns. The harness verifies that the existing extracted App is byte-identical to the fixed zip and still runs codesign verification; a mismatch fails closed. Record the zip SHA before and after the run and do not invoke `package_release.sh` for an evidence/assertion-only change.
+
+Evidence separates `product_artifact_sha256`, `harness_sha256`, and `scenario_sha256`, with before/after/unchanged fields for every mutable proof layer. The run fails closed if the zip, harness, AX driver, private scenario, or product source changes while evidence is being collected. `source_snapshot_sha256_*` covers product package inputs only; `harness_sha256` covers the proof script plus AX driver. These hashes are independent: changing the harness requires a new proof run, not a new product package.
+
+The automated path becomes accepted only after a fresh four-stage run exits `0` and its current evidence records `desktop_gui_route_proof=automated_gui_complete` plus `human_intervention_count=0`. Separate custom/diagnostic runs cannot be aggregated into that result. A single GUI stage may produce multiple upstream usage events; all matching events must be completed/200, and the unique rollout/thread/marker binding proves one GUI submission. Custom completion preserves last-route/custom evidence without replacing the reserved full-standard last-complete slot. Accessibility permission, authenticated Desktop state, and repository-external provider configuration are one-time prerequisites; after they are present, the standard run must not ask anyone to select a model, paste or type a query, click Send, or press Enter.
+
+The current accepted local result is preserved in `dist/codex-desktop-manual-proof/evidence.json`, `dist/codex-desktop-manual-proof-last-route/evidence.json`, and `dist/codex-desktop-manual-proof-last-complete/evidence.json`. All three bind product artifact `f81b7ce...`, harness `97e685f...`, and private scenario `334288c...` to one zero-human four-stage run. These ignored artifacts are current-machine evidence, not checked-in fixtures.
+
+The default manual entry remains a compatibility path:
+
+```bash
 RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="$HOME/path/to/local-providers.json" \
 RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="public/provider-model-id" \
   ./scripts/codex-desktop-manual-proof.sh
 ./scripts/codex-desktop-manual-proof.sh cleanup
 ```
 
-The manual proof harness creates isolated state under `~/Library/Application Support/RelayKit/DesktopProof/`, generates an isolated `CODEX_HOME/config.toml`, starts RelayKit on a random non-18787/non-19777 loopback port, and writes redacted evidence under `dist/codex-desktop-manual-proof/`. `--setup-only` verifies merged official + demo provider picker data without opening Codex Desktop. The default mode requires an ignored or repository-external local provider config with no inline secret plus one selected public model id, discovers Codex Desktop by bundle id `com.openai.codex`, launches it with isolated HOME/CODEX_HOME/user data under `sandbox-exec`, and waits for manual requests. It clears isolated usage at run start, binds screenshots to one verified isolated PID/window id, and derives tool-call/output plus raw-protocol checks from current-run isolated rollout files without exporting request or response bodies. Only attempts with current-run usage can replace `dist/codex-desktop-manual-proof-last-route/`, and their process-bound screenshot directory is preserved with the evidence. It never copies global Codex auth files.
+The proof harness creates isolated state under `~/Library/Application Support/RelayKit/DesktopProof/`, generates an isolated `CODEX_HOME/config.toml`, starts RelayKit on a random non-18787/non-19777 loopback port, and writes redacted evidence under `dist/codex-desktop-manual-proof/`. `--setup-only` verifies merged official + demo provider picker data without opening Codex Desktop. The compatibility mode requires an ignored or repository-external local provider config with no inline secret plus one selected public model id, discovers Codex Desktop by bundle id `com.openai.codex`, launches it with isolated HOME/CODEX_HOME/user data under `sandbox-exec`, and waits for manual requests. It clears isolated usage at run start, binds screenshots to one verified isolated PID/window id, and derives tool-call/output plus raw-protocol checks from current-run isolated rollout files without exporting request or response bodies. Only attempts with current-run usage can replace the preserved route-evidence directories, and their process-bound screenshot directory is preserved with the evidence. It never copies global Codex auth files.
 
-Unsandboxed Desktop proof is disabled and fails closed. Global config/auth signatures and SHA-256, Codex `notify`, app/gateway source snapshot, or tracked harness changes fail the run with no repair/write fallback. Dedicated DesktopProof Keychain fixtures are removed only through the extracted RelayKit App code identity, never through `/usr/bin/security`. The self-test covers sandbox policy, global config/auth guards, source/harness guards, route failure branches, current-run rollout tool evidence, and bounded cleanup when Electron ignores `SIGTERM`.
+Unsandboxed Desktop proof is disabled and fails closed. The sandbox denies writes to the physical global `.codex` tree, Codex/OpenAI Application Support directories, Codex/CUA preference files, LaunchAgents, and legacy gateway config while allowing the isolated DesktopProof tree. Global config/auth signatures and SHA-256, Codex `notify`, app/gateway source snapshot, or tracked harness changes fail the run with no repair/write fallback. Dedicated DesktopProof Keychain fixtures are removed only through the extracted RelayKit App code identity, never through `/usr/bin/security`. The self-test executes real `sandbox-exec` writes against every protected path, covers the global/source/harness guards and route failure branches, derives current-run rollout tool evidence, and verifies bounded cleanup when Electron ignores `SIGTERM`.
+
+Validation cadence is tiered:
+
+- Product inputs (`app/Sources/**`, `gateway/**`, bundled resources) get focused tests first; package and full GUI proof run once after the coherent root-cause group is complete.
+- Harness/test inputs (`scripts/codex-desktop-*`, AX driver, screenshot/evidence assertions) never rebuild the package and always reuse the fixed zip/extracted App.
+- Docs-only changes run documentation, public-boundary, and diff checks without building, packaging, or launching GUI.
 
 ## Diagnostics
 

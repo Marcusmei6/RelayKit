@@ -1117,12 +1117,17 @@ func anthropicBaseNeedsV1(baseURL string) bool {
 
 func upstreamRequest(apiFormat, model string, messages []chatMessage, stream bool) map[string]any {
 	if apiFormat == config.APIFormatAnthropicMessages {
-		return map[string]any{
+		system, anthropicInput := anthropicMessages(messages)
+		request := map[string]any{
 			"model":      model,
 			"max_tokens": 1024,
-			"messages":   anthropicMessages(messages),
+			"messages":   anthropicInput,
 			"stream":     stream,
 		}
+		if system != "" {
+			request["system"] = system
+		}
+		return request
 	}
 	return map[string]any{
 		"model":    model,
@@ -1162,15 +1167,25 @@ func probeUpstreamRequest(apiFormat, model string) map[string]any {
 	return req
 }
 
-func anthropicMessages(messages []chatMessage) []chatMessage {
+func anthropicMessages(messages []chatMessage) (string, []chatMessage) {
+	var systemParts []string
 	out := make([]chatMessage, 0, len(messages))
 	for _, message := range messages {
-		if message.Role != "assistant" {
+		switch message.Role {
+		case "system", "developer":
+			systemParts = append(systemParts, message.Content)
+			continue
+		case "assistant":
+		default:
 			message.Role = "user"
+		}
+		if len(out) > 0 && out[len(out)-1].Role == message.Role {
+			out[len(out)-1].Content += "\n\n" + message.Content
+			continue
 		}
 		out = append(out, message)
 	}
-	return out
+	return strings.Join(systemParts, "\n\n"), out
 }
 
 func providerAuthEnv(provider config.ProviderProfile) string {

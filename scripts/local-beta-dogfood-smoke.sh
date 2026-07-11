@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${ROOT}/dist/dogfood-local-beta"
@@ -43,6 +44,8 @@ GATEWAY_19777_RELEASED_AFTER_QUIT=false
 REACHABLE_MODELS_REPROBED_AFTER_REOPEN=false
 FIXTURE_KEYCHAIN_REMOVED=false
 PROVIDER_SAVE_RELOADED_RUNNING_GATEWAY=false
+CODEX_CONFIG_BEFORE=""
+CODEX_AUTH_BEFORE=""
 
 fail() {
   echo "RelayKit local beta dogfood failed: $*" >&2
@@ -233,10 +236,30 @@ cleanup() {
   fi
   restore_defaults
   restore_usage
+  rm -f "${SCREENSHOT_DIR}"/*.raw.png "${SCREENSHOT_DIR}"/*.composited.png >/dev/null 2>&1 || true
   [[ -n "${DOGFOOD_STATE_DIR}" ]] && rm -rf "${DOGFOOD_STATE_DIR}"
   [[ -n "${RUN_DIR}" ]] && rm -rf "${RUN_DIR}"
 }
-trap cleanup EXIT
+
+global_codex_state_unchanged() {
+  local config_after auth_after
+  [[ -n "${CODEX_CONFIG_BEFORE}" && -n "${CODEX_AUTH_BEFORE}" ]] || return 2
+  config_after="$(file_signature "${CODEX_CONFIG_PATH}" 2>/dev/null || printf 'unreadable\n')"
+  auth_after="$(file_signature "${CODEX_AUTH_PATH}" 2>/dev/null || printf 'unreadable\n')"
+  [[ "${CODEX_CONFIG_BEFORE}" == "${config_after}" && "${CODEX_AUTH_BEFORE}" == "${auth_after}" ]]
+}
+
+cleanup_and_verify_global_state() {
+  local exit_status=$?
+  trap - EXIT
+  cleanup
+  if [[ -n "${CODEX_CONFIG_BEFORE}" && -n "${CODEX_AUTH_BEFORE}" ]] && ! global_codex_state_unchanged; then
+    echo "RelayKit dogfood detected a global Codex config/auth change during failed cleanup" >&2
+    exit_status=1
+  fi
+  exit "${exit_status}"
+}
+trap cleanup_and_verify_global_state EXIT
 
 ax_query() {
   local operation="$1"
@@ -568,22 +591,22 @@ let candidates = windows.compactMap { window -> (Int, CGRect)? in
 guard let selected = candidates.max(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height }) else {
     exit(1)
 }
-print(selected.0)
+let bounds = selected.1.integral
+print("\(selected.0)|\(Int(bounds.minX)),\(Int(bounds.minY)),\(Int(bounds.width)),\(Int(bounds.height))")
 SWIFT
 }
 
 flatten_screenshot() {
-  local source="$1"
-  local destination="$2"
-  swift - "${source}" "${destination}" <<'SWIFT'
+  local mask_source="$1"
+  local visual_source="$2"
+  local window_bounds="$3"
+  local destination="$4"
+  swift - "${mask_source}" "${visual_source}" "${window_bounds}" "${destination}" <<'SWIFT'
 import AppKit
 import CoreGraphics
 import Foundation
 
-func cropToWindowBody(_ image: CGImage) -> CGImage {
-    let width = image.width
-    let height = image.height
-    guard width > 0, height > 0 else { return image }
+func renderRGBA(_ image: CGImage, width: Int, height: Int) -> [UInt8]? {
     var pixels = [UInt8](repeating: 0, count: width * height * 4)
     let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
         guard let context = CGContext(
@@ -600,7 +623,51 @@ func cropToWindowBody(_ image: CGImage) -> CGImage {
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         return true
     }
-    guard rendered else { return image }
+    return rendered ? pixels : nil
+}
+
+func silhouetteAlpha(_ pixels: [UInt8], width: Int, height: Int) -> [UInt8] {
+    var alpha = [UInt8](repeating: 0, count: width * height)
+    var minimumByRow = [Int?](repeating: nil, count: height)
+    var maximumByRow = [Int?](repeating: nil, count: height)
+    for y in 0..<height {
+        var minimumX = width
+        var maximumX = -1
+        for x in 0..<width where pixels[((y * width) + x) * 4 + 3] > 8 {
+            minimumX = min(minimumX, x)
+            maximumX = max(maximumX, x)
+        }
+        if maximumX >= minimumX {
+            minimumByRow[y] = minimumX
+            maximumByRow[y] = maximumX
+        }
+    }
+    for y in 0..<height {
+        var minimumX = minimumByRow[y]
+        var maximumX = maximumByRow[y]
+        if minimumX == nil || maximumX == nil {
+            let previous = stride(from: y - 1, through: 0, by: -1).first { minimumByRow[$0] != nil }
+            let next = (y + 1..<height).first { minimumByRow[$0] != nil }
+            let boundaryRows = [previous, next].compactMap { $0 }
+            minimumX = boundaryRows.compactMap { minimumByRow[$0] }.min()
+            maximumX = boundaryRows.compactMap { maximumByRow[$0] }.max()
+        }
+        guard let minimumX, let maximumX, maximumX >= minimumX else { continue }
+        for x in minimumX...maximumX {
+            let sourceAlpha = pixels[((y * width) + x) * 4 + 3]
+            let edgeAlpha = sourceAlpha > 8 ? sourceAlpha : 255
+            alpha[(y * width) + x] = (x == minimumX || x == maximumX) ? edgeAlpha : 255
+        }
+    }
+    return alpha
+}
+
+func windowBodyRect(_ image: CGImage) -> CGRect {
+    let width = image.width
+    let height = image.height
+    guard width > 0, height > 0, let pixels = renderRGBA(image, width: width, height: height) else {
+        return CGRect(x: 0, y: 0, width: width, height: height)
+    }
 
     func isOpaque(x: Int, y: Int) -> Bool {
         pixels[((y * width) + x) * 4 + 3] > 8
@@ -613,7 +680,7 @@ func cropToWindowBody(_ image: CGImage) -> CGImage {
         minimumX = min(minimumX, x)
         maximumX = max(maximumX, x)
     }
-    guard maximumX >= minimumX else { return image }
+    guard maximumX >= minimumX else { return CGRect(x: 0, y: 0, width: width, height: height) }
 
     let bodyWidth = maximumX - minimumX + 1
     var minimumY = height
@@ -628,40 +695,84 @@ func cropToWindowBody(_ image: CGImage) -> CGImage {
             maximumY = max(maximumY, y)
         }
     }
-    guard maximumY >= minimumY else { return image }
-    let body = CGRect(
+    guard maximumY >= minimumY else { return CGRect(x: 0, y: 0, width: width, height: height) }
+    return CGRect(
         x: minimumX,
         y: minimumY,
         width: bodyWidth,
         height: maximumY - minimumY + 1
     )
-    return image.cropping(to: body) ?? image
 }
 
-let source = CommandLine.arguments[1]
-let destination = CommandLine.arguments[2]
-guard let image = NSImage(contentsOfFile: source),
-      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+let maskSource = CommandLine.arguments[1]
+let visualSource = CommandLine.arguments[2]
+let windowBounds = CommandLine.arguments[3].split(separator: ",").compactMap { Double($0) }
+let destination = CommandLine.arguments[4]
+guard let maskImage = NSImage(contentsOfFile: maskSource),
+      let visualImage = NSImage(contentsOfFile: visualSource),
+      let maskCG = maskImage.cgImage(forProposedRect: nil, context: nil, hints: nil),
+      let visualCG = visualImage.cgImage(forProposedRect: nil, context: nil, hints: nil),
+      windowBounds.count == 4 else {
     exit(1)
 }
-let windowBody = cropToWindowBody(cgImage)
-guard
-      let context = CGContext(
-        data: nil,
-        width: windowBody.width,
-        height: windowBody.height,
+let displayBounds = CGDisplayBounds(CGMainDisplayID())
+let displayScaleX = CGFloat(visualCG.width) / displayBounds.width
+let displayScaleY = CGFloat(visualCG.height) / displayBounds.height
+let visualWindowRect = CGRect(
+    x: (CGFloat(windowBounds[0]) - displayBounds.minX) * displayScaleX,
+    y: (CGFloat(windowBounds[1]) - displayBounds.minY) * displayScaleY,
+    width: CGFloat(windowBounds[2]) * displayScaleX,
+    height: CGFloat(windowBounds[3]) * displayScaleY
+).integral
+guard let visualWindow = visualCG.cropping(to: visualWindowRect) else {
+    exit(2)
+}
+let maskBodyRect = windowBodyRect(maskCG)
+let visualScaleX = CGFloat(visualWindow.width) / CGFloat(maskCG.width)
+let visualScaleY = CGFloat(visualWindow.height) / CGFloat(maskCG.height)
+let visualBodyRect = CGRect(
+    x: maskBodyRect.minX * visualScaleX,
+    y: maskBodyRect.minY * visualScaleY,
+    width: maskBodyRect.width * visualScaleX,
+    height: maskBodyRect.height * visualScaleY
+).integral
+guard let maskBody = maskCG.cropping(to: maskBodyRect),
+      let visualBody = visualWindow.cropping(to: visualBodyRect) else {
+    exit(3)
+}
+let outputWidth = maskBody.width
+let outputHeight = maskBody.height
+guard let maskPixels = renderRGBA(maskBody, width: outputWidth, height: outputHeight),
+      let visualPixels = renderRGBA(visualBody, width: outputWidth, height: outputHeight) else {
+    exit(3)
+}
+let outputAlpha = silhouetteAlpha(maskPixels, width: outputWidth, height: outputHeight)
+var output = [UInt8](repeating: 0, count: outputWidth * outputHeight * 4)
+for index in stride(from: 0, to: output.count, by: 4) {
+    let alpha = Int(outputAlpha[index / 4])
+    output[index] = UInt8(Int(visualPixels[index]) * alpha / 255)
+    output[index + 1] = UInt8(Int(visualPixels[index + 1]) * alpha / 255)
+    output[index + 2] = UInt8(Int(visualPixels[index + 2]) * alpha / 255)
+    output[index + 3] = UInt8(alpha)
+}
+let data = Data(output)
+guard let provider = CGDataProvider(data: data as CFData),
+      let masked = CGImage(
+        width: outputWidth,
+        height: outputHeight,
         bitsPerComponent: 8,
-        bytesPerRow: 0,
+        bitsPerPixel: 32,
+        bytesPerRow: outputWidth * 4,
         space: CGColorSpaceCreateDeviceRGB(),
-        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: provider,
+        decode: nil,
+        shouldInterpolate: false,
+        intent: .defaultIntent
       ) else {
-    exit(1)
+    exit(4)
 }
-context.setFillColor(NSColor.white.cgColor)
-context.fill(CGRect(x: 0, y: 0, width: windowBody.width, height: windowBody.height))
-context.draw(windowBody, in: CGRect(x: 0, y: 0, width: windowBody.width, height: windowBody.height))
-guard let flattened = context.makeImage() else { exit(2) }
-let representation = NSBitmapImageRep(cgImage: flattened)
+let representation = NSBitmapImageRep(cgImage: masked)
 guard let data = representation.representation(using: .png, properties: [:]) else { exit(3) }
 try data.write(to: URL(fileURLWithPath: destination), options: .atomic)
 SWIFT
@@ -670,14 +781,19 @@ SWIFT
 capture_relaykit_window() {
   local kind="$1"
   local destination="$2"
-  local window_id raw
-  sleep 0.75 # let the popover finish its WindowServer transition
-  window_id="$(relaykit_window_id "${kind}")" || fail "RelayKit ${kind} WindowServer id unavailable"
+  local geometry window_id bounds raw composited
+  sleep 2 # let SwiftUI and WindowServer finish the popover transition
+  geometry="$(relaykit_window_id "${kind}")" || fail "RelayKit ${kind} WindowServer id unavailable"
+  IFS='|' read -r window_id bounds <<<"${geometry}"
+  [[ -n "${window_id}" && "${bounds}" =~ ^-?[0-9]+,-?[0-9]+,[0-9]+,[0-9]+$ ]] || fail "RelayKit ${kind} WindowServer bounds unavailable"
   raw="${destination}.raw.png"
+  composited="${destination}.composited.png"
   /usr/sbin/screencapture -x -l "${window_id}" -o "${raw}"
   test -s "${raw}" || fail "RelayKit ${kind} screenshot is empty"
-  flatten_screenshot "${raw}" "${destination}"
-  rm -f "${raw}"
+  /usr/sbin/screencapture -x -m "${composited}"
+  test -s "${composited}" || fail "RelayKit ${kind} composited screenshot is empty"
+  flatten_screenshot "${raw}" "${composited}" "${bounds}" "${destination}"
+  rm -f "${raw}" "${composited}"
   test -s "${destination}"
 }
 
@@ -980,6 +1096,14 @@ write_reopen_failure_evidence() {
 if [[ "${1:-}" == "--test-evidence-contract" ]]; then
   exit 0
 fi
+if [[ "${1:-}" == "--test-global-state-guard" ]]; then
+  [[ -n "${2:-}" && -n "${3:-}" && -z "${4:-}" ]] || exit 2
+  trap - EXIT
+  CODEX_CONFIG_BEFORE="$2"
+  CODEX_AUTH_BEFORE="$3"
+  global_codex_state_unchanged
+  exit
+fi
 
 if pgrep -x RelayKitApp.bin >/dev/null 2>&1; then
   fail "RelayKitApp.bin is already running; close it before isolated dogfood"
@@ -989,6 +1113,8 @@ port_free 19777 || fail "127.0.0.1:19777 is already listening; close RelayKit be
 
 codex_config_before="$(file_signature "${CODEX_CONFIG_PATH}")"
 codex_auth_before="$(file_signature "${CODEX_AUTH_PATH}")"
+CODEX_CONFIG_BEFORE="${codex_config_before}"
+CODEX_AUTH_BEFORE="${codex_auth_before}"
 real_provider_config_before="$(file_signature "${REAL_PROVIDER_CONFIG}")"
 
 cd "${ROOT}"
@@ -1150,11 +1276,10 @@ ax_press_exact "${PROVIDER_NAME}" || fail "provider edit AX click failed"
 wait_for_ax_value_exact "API key saved in Keychain" || fail "saved key state disappeared before failure checks"
 ax_set_value_exact "API key field" "wrong${FIXTURE_KEY}" || fail "bad key AX input failed"
 ax_press_exact "provider-connection-test-entry" || fail "bad key Test connection AX click failed"
-wait_for_ax_value_exact "Authentication failed · check API key" || fail "bad key error is not actionable"
-bad_key_actionable=true
-capture_popover "provider-bad-key-guidance"
+  wait_for_ax_value_exact "Authentication failed · check API key" || fail "bad key error is not actionable"
+  bad_key_actionable=true
 
-ax_set_value_exact "API key field" "${FIXTURE_KEY}" || fail "fixture key restore AX input failed"
+  ax_set_value_exact "API key field" "${FIXTURE_KEY}" || fail "fixture key restore AX input failed"
 ax_press_exact "Advanced" || fail "provider Advanced AX click failed before bad URL check"
 wait_for_ax_exact "Custom models URL field" || fail "Custom models URL field did not appear"
 ax_set_value_exact "Custom models URL field" "" || fail "Custom models URL AX clear failed"
@@ -1323,7 +1448,7 @@ jq -n \
       mock_ok_used: false
     },
     screenshot_audit: {
-      capture_kind: "relaykit_owned_window_id_current_run_content_bounds",
+      capture_kind: "relaykit_owned_window_id_mask_and_current_run_bounds_composite",
       generated_count: $screenshot_count,
       unrelated_process_windows_excluded_by_capture: true,
       keychain_authorization_prompt_excluded_by_capture: true,

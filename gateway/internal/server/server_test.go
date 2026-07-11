@@ -1813,8 +1813,33 @@ func TestAnthropicRequestNormalizesUnsupportedRoles(t *testing.T) {
 		{Role: "assistant", Content: "assistant"},
 	}, false)
 	messages := req["messages"].([]chatMessage)
-	if messages[0].Role != "user" || messages[1].Role != "user" || messages[2].Role != "assistant" {
+	if req["system"] != "system\n\ndeveloper" || len(messages) != 1 || messages[0].Role != "assistant" {
 		t.Fatalf("messages = %+v", messages)
+	}
+}
+
+func TestAnthropicRequestSeparatesCodexDeveloperContextAndPreservesLatestUserInstruction(t *testing.T) {
+	req := upstreamRequest("anthropic_messages", "m", []chatMessage{
+		{Role: "developer", Content: "Project rules and repository context."},
+		{Role: "user", Content: "Workspace context for RelayKit."},
+		{Role: "user", Content: "Render the requested Markdown and end with RELAYKIT_FORMAT_OK."},
+	}, false)
+
+	system, ok := req["system"].(string)
+	if !ok || system != "Project rules and repository context." {
+		t.Fatalf("system = %#v", req["system"])
+	}
+	messages, ok := req["messages"].([]chatMessage)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("messages = %#v", req["messages"])
+	}
+	if messages[0].Role != "user" {
+		t.Fatalf("role = %q, want user", messages[0].Role)
+	}
+	workspaceIndex := strings.Index(messages[0].Content, "Workspace context for RelayKit.")
+	latestIndex := strings.Index(messages[0].Content, "RELAYKIT_FORMAT_OK")
+	if workspaceIndex < 0 || latestIndex <= workspaceIndex {
+		t.Fatalf("latest user instruction was not preserved last: %q", messages[0].Content)
 	}
 }
 

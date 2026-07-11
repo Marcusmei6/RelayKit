@@ -14,7 +14,7 @@ The checked-in agent configs use public model names. Keep private/local model ro
 | `relaykit_worker` | `gpt-5.4` / `high` | General worker | Yes | Bounded docs/examples/small cross-cutting tasks | Broaden scope, merge/push, edit private data |
 | `relaykit_gateway` | `gpt-5.4` / `high` | Go gateway worker | Yes | Server, adapters, config, catalog, usage events | Edit app UI, copy private gateway behavior |
 | `relaykit_app` | `gpt-5.5` / `xhigh` | Apple app worker | Yes | SwiftUI/AppKit shell, Keychain, helper lifecycle, config activation | Implement protocol adapters or SSE parsing in Swift |
-| `relaykit_test` | `gpt-5.3-codex-spark` / `xhigh` | Validator | Ignored artifacts only | Focused validation, command evidence, tier adequacy | Fix code, add tests, bless unverified claims |
+| `relaykit_test` | `gpt-5.3-codex-spark` / `xhigh` | Validator | Ignored artifacts only | Focused validation, command evidence, tier adequacy, explicit Desktop live proof | Fix code, add tests, bless unverified claims, ask a human to drive Desktop proof |
 | `relaykit_cr` | `gpt-5.5` / `xhigh` | Reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files |
 | `relaykit_release` | `gpt-5.4` / `high` | Release validator | Ignored artifacts only | Packaging, signing readiness, public repo hygiene | Sign/notarize/publish without explicit user request |
 
@@ -27,6 +27,12 @@ The checked-in agent configs use public model names. Keep private/local model ro
 5. Validation goes to `relaykit_test`; review goes to `relaykit_cr`.
 6. Release/package scope also requires `relaykit_release`.
 7. Planner updates `docs/handoff.md` and relevant plan docs before final handoff.
+
+## Desktop Live Validation Gate
+
+Desktop live validation is opt-in because it can send paid requests. A single explicitly authorized query may use `$relaykit-desktop-query` with its configured backend. The four-stage route-proof gate remains the tracked `./scripts/codex-desktop-manual-proof.sh run-auto --scenario /absolute/path/scenario.json` interface and cannot be satisfied by one dispatcher result. Neither path may ask a human to select a model, paste or type a query, click Send, or press Enter.
+
+Accessibility permission, authenticated Desktop state, and repository-external provider configuration are one-time system prerequisites. A daily proof must then finish with no human intervention or fail with a bounded machine-readable auth/selector/PID/window error. Only harness exit `0` plus current evidence containing `desktop_gui_route_proof=automated_gui_complete` and `human_intervention_count=0` counts as automated Desktop success.
 
 If `relaykit_cr` fails to start, returns a provider route error, or does not return after one bounded retry, record the failure in `docs/handoff.md` and run a root-session read-only review over the same diff. Passing tests plus a clean public-boundary scan plus root review may close the lane; do not let CR provider availability become the only blocker.
 

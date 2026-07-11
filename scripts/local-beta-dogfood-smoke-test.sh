@@ -13,7 +13,16 @@ fail() {
   exit 1
 }
 
+file_signature() {
+  stat -f '%Sp|%u|%g|%z|%m' "$1"
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
 bash -n "${SCRIPT}"
+grep -Fq 'umask 077' "${SCRIPT}" ||
+  fail "dogfood screenshots and temporary state must be owner-only"
+grep -Fq 'rm -f "${SCREENSHOT_DIR}"/*.raw.png "${SCREENSHOT_DIR}"/*.composited.png' "${SCRIPT}" ||
+  fail "dogfood cleanup must remove uncropped screen frames on every exit path"
 
 termination_body="$(sed -n '/func applicationWillTerminate/,/^    }/p' "${APP_SOURCE}")"
 grep -Fq 'model.stopGateway()' <<<"${termination_body}" ||
@@ -38,6 +47,8 @@ grep -Fq 'ax_set_value_exact()' "${SCRIPT}" ||
   fail "provider fields must be written by exact AX identity"
 grep -Fq '.smokeRecordOnly("model-access-merged", recorder: smokeSectionRecorder)' "${APP_VIEW_SOURCE}" ||
   fail "model access smoke markers must preserve unique provider row AX identifiers"
+grep -Fq '.smokeRecordOnly("provider-connection-use-reachable-visible", recorder: smokeSectionRecorder)' "${APP_VIEW_SOURCE}" ||
+  fail "Use reachable smoke recording must preserve the real AXButton identifier"
 grep -Fq 'set candidateElement to contents of candidate' "${SCRIPT}" ||
   fail "provider input must dereference the AX tree item"
 grep -Fq 'set providerScroll to scroll area 1 of group 1 of pop over 1 of menu bar 1' "${SCRIPT}" ||
@@ -173,23 +184,57 @@ if grep -Fq 'fixture_gateway_keychain_acl' "${SCRIPT}"; then
 fi
 grep -Fq 'real_user_keychain_authorization_claimed: false' "${SCRIPT}" ||
   fail "dogfood must not claim a real user Keychain authorization"
+grep -Fq 'cleanup_and_verify_global_state()' "${SCRIPT}" ||
+  fail "dogfood failure and interruption cleanup must verify global Codex state"
+grep -Fq 'trap cleanup_and_verify_global_state EXIT' "${SCRIPT}" ||
+  fail "dogfood must install the fail-closed global-state cleanup trap"
+if grep -Fq 'trap cleanup EXIT' "${SCRIPT}"; then
+  fail "dogfood must not use cleanup without the global Codex state guard"
+fi
+guard_home="$(mktemp -d "${TMPDIR:-/tmp}/relaykit-dogfood-global-guard.XXXXXX")"
+mkdir -p "${guard_home}/.codex"
+printf 'model = "gpt-5.5"\n' >"${guard_home}/.codex/config.toml"
+printf '{}\n' >"${guard_home}/.codex/auth.json"
+guard_config_before="$(file_signature "${guard_home}/.codex/config.toml")"
+guard_auth_before="$(file_signature "${guard_home}/.codex/auth.json")"
+HOME="${guard_home}" "${SCRIPT}" --test-global-state-guard "${guard_config_before}" "${guard_auth_before}"
+printf '# changed\n' >>"${guard_home}/.codex/config.toml"
+if HOME="${guard_home}" "${SCRIPT}" --test-global-state-guard "${guard_config_before}" "${guard_auth_before}"; then
+  rm -rf "${guard_home}"
+  fail "dogfood global-state guard accepted a changed config"
+fi
+rm -rf "${guard_home}"
+if grep -Fq 'capture_popover "provider-bad-key-guidance"' "${SCRIPT}"; then
+  fail "dogfood must not capture the provider sheet while macOS secure-input redaction is active"
+fi
 grep -Fq 'screenshot_audit:' "${SCRIPT}" ||
   fail "tracked dogfood must generate its own screenshot audit"
 grep -Fq '/usr/sbin/screencapture -x -l "${window_id}"' "${SCRIPT}" ||
   fail "screenshots must bind to a RelayKit-owned WindowServer id"
 grep -Fq '/usr/sbin/screencapture -x -l "${window_id}" -o "${raw}"' "${SCRIPT}" ||
   fail "window screenshots must exclude the macOS shadow artifact"
-grep -Fq 'sleep 0.75 # let the popover finish its WindowServer transition' "${SCRIPT}" ||
-  fail "window screenshots must wait for the popover transition to settle"
-grep -Fq 'func cropToWindowBody(_ image: CGImage) -> CGImage' "${SCRIPT}" ||
+grep -Fq '/usr/sbin/screencapture -x -m "${composited}"' "${SCRIPT}" ||
+  fail "window screenshots must capture the main display final composition before owned-bounds cropping"
+grep -Fq 'flatten_screenshot "${raw}" "${composited}" "${bounds}" "${destination}"' "${SCRIPT}" ||
+  fail "window screenshots must mask final composition with the owned window alpha"
+grep -Fq 'sleep 2 # let SwiftUI and WindowServer finish the popover transition' "${SCRIPT}" ||
+  fail "window screenshots must wait for SwiftUI and the popover transition to settle"
+grep -Fq 'func windowBodyRect(_ image: CGImage) -> CGRect' "${SCRIPT}" ||
   fail "window screenshots must derive the main body from the WindowServer alpha mask"
-grep -Fq 'let windowBody = cropToWindowBody(cgImage)' "${SCRIPT}" ||
+grep -Fq 'let maskBodyRect = windowBodyRect(maskCG)' "${SCRIPT}" ||
   fail "window screenshots must remove popover pointers without editing content"
+grep -Fq 'func silhouetteAlpha(_ pixels: [UInt8], width: Int, height: Int) -> [UInt8]' "${SCRIPT}" ||
+  fail "window screenshots must bridge internal SwiftUI surface holes without losing the owned window outline"
+grep -Fq 'bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue' "${SCRIPT}" ||
+  fail "window screenshots must composite transparent WindowServer pixels with alpha"
+if grep -Fq 'bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue' "${SCRIPT}"; then
+  fail "window screenshot flattening must not turn transparent pixels black"
+fi
 if grep -Fq 'as? CFDictionary' "${SCRIPT}"; then
   fail "dogfood WindowServer probes must compile with the current Swift toolchain"
 fi
 if grep -Fq '/usr/sbin/screencapture -x -R' "${SCRIPT}"; then
-  fail "screenshots must not capture guessed screen regions"
+  fail "screenshots must crop the final display frame by owned bounds instead of using region capture"
 fi
 
 if grep -Eq 'launch_method: .*ui.smoke|normal_launch: false' "${SCRIPT}"; then
