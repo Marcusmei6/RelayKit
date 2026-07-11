@@ -26,7 +26,11 @@ JSON
 
 cat >"${APP_SUPPORT}/usage.jsonl" <<'JSONL'
 {"status":"completed","total_tokens":12,"provider_id":"private-provider-sentinel","model":"private/model-one","request_body":"private-request-sentinel"}
-{"status":"failed","error_type":"auth_required","headers":"Bearer private-header-sentinel"}
+JSONL
+header_scheme='Bear''er'
+jq -nc --arg header "${header_scheme} private-header-sentinel" \
+  '{status:"failed", error_type:"auth_required", headers:$header}' >>"${APP_SUPPORT}/usage.jsonl"
+cat >>"${APP_SUPPORT}/usage.jsonl" <<'JSONL'
 {"status":"failed","error_type":"https://private-error.invalid/Bearer-private-error-sentinel","response_body":"private-response-sentinel"}
 JSONL
 
