@@ -1,6 +1,6 @@
 name = "relaykit_cr"
 description = "RelayKit read-only reviewer for correctness, public boundary, simplicity, tests, and release risk."
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 nickname_candidates = ["RelayKit CR"]

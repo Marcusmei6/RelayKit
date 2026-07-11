@@ -117,6 +117,10 @@ Current Gate 0 closeout evidence:
 
 Current Validation Fast Path work:
 
+- Workflow 5.6 migration is the active pre-merge gate. The intended matrix is Planner Sol/Ultra; App, Gateway, and Worker Sol/High; Test Luna/Medium; CR Sol/xhigh; Release Terra/High. Planner is the sole delegation owner, write concurrency is capped at two disjoint lanes, Test/CR/Release run sequentially, and Backlog Expansion is disabled unless explicitly enabled by the assignment or user.
+- Static TOML and ownership checks are necessary but not runtime proof. After the workflow commit, create a fresh RelayKit task and inspect authoritative runtime `turn_context` for every role. Existing task metadata and Agent self-report are not acceptable evidence.
+- This workflow lane must not touch `app/Sources/**`, `gateway/**`, global Codex config/auth, LaunchAgents, shared gateway state, package artifacts, Desktop GUI, or model endpoints.
+
 - Beta Dogfood Hardening remains complete at artifact SHA-256 `f81b7ce1553131bb4fde3db3e6005df2e8478384e5f316828339101da093b848`; this lane does not rebuild, package, dogfood, or rerun the four-stage proof.
 - `scripts/relaykit-validate.sh` now maps changed files to focused commands before execution. Paid Skill queries and full E2E are explicit justified flags, never defaults.
 - `$relaykit-desktop-query` requires caller-pinned catalog evidence and matching catalog/artifact SHA-256 values, supports `plain`, `markdown`, and `tool`, and returns redacted machine-readable metadata without query or response bodies.

@@ -10,27 +10,27 @@ The checked-in agent configs use public model names. Keep private/local model ro
 
 | Agent | Model | Role | Writes? | Use when | Must not do |
 | --- | --- | --- | --- | --- | --- |
-| `relaykit_planner` | `gpt-5.5` / `xhigh` | Controller | Narrow docs/workflow only | Split work, assign lanes, enforce gates, maintain handoff | Implement product code, claim dispatch without evidence, handle secrets |
-| `relaykit_worker` | `gpt-5.4` / `high` | General worker | Yes | Bounded docs/examples/small cross-cutting tasks | Broaden scope, merge/push, edit private data |
-| `relaykit_gateway` | `gpt-5.4` / `high` | Go gateway worker | Yes | Server, adapters, config, catalog, usage events | Edit app UI, copy private gateway behavior |
-| `relaykit_app` | `gpt-5.5` / `xhigh` | Apple app worker | Yes | SwiftUI/AppKit shell, Keychain, helper lifecycle, config activation | Implement protocol adapters or SSE parsing in Swift |
-| `relaykit_test` | `gpt-5.3-codex-spark` / `xhigh` | Validator | Ignored artifacts only | Focused validation, command evidence, tier adequacy, explicit Desktop live proof | Fix code, add tests, bless unverified claims, ask a human to drive Desktop proof |
-| `relaykit_cr` | `gpt-5.5` / `xhigh` | Reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files |
-| `relaykit_release` | `gpt-5.4` / `high` | Release validator | Ignored artifacts only | Packaging, signing readiness, public repo hygiene | Sign/notarize/publish without explicit user request |
+| `relaykit_planner` | `gpt-5.6-sol` / `ultra` | Controller and sole delegation owner | Planning/handoff only | Split work, assign at most two disjoint write lanes, enforce gates, converge evidence | Implement product code, auto-expand backlog, claim runtime metadata from self-report |
+| `relaykit_gateway` | `gpt-5.6-sol` / `high` | Go gateway specialist | `gateway/**` only | Protocols, routes, config, catalog, usage events, gateway tests | Edit App/docs/Agent config, delegate, copy private gateway behavior |
+| `relaykit_app` | `gpt-5.6-sol` / `high` | Apple app specialist | `app/**` only | SwiftUI/AppKit, Keychain, helper lifecycle, config activation | Edit gateway/docs/Agent config, delegate, implement protocol adapters in Swift |
+| `relaykit_worker` | `gpt-5.6-sol` / `high` | Bounded project worker | Assigned docs/examples/config/tooling only | `docs/**`, `examples/**`, `.codex/**`, `.agents/**`, ordinary scripts | Edit App/Gateway, act as a cross-product generalist, delegate, merge/push |
+| `relaykit_test` | `gpt-5.6-luna` / `medium` | Read-only validator | No | Execute only selector-selected commands and return pass/fail/unavailable | Fix source/tests, add unplanned commands, delegate, drive live GUI manually |
+| `relaykit_cr` | `gpt-5.6-sol` / `xhigh` | Read-only reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files or delegate |
+| `relaykit_release` | `gpt-5.6-terra` / `high` | Release specialist | Assigned release/package paths only | Packaging, signing/notarization readiness, release docs | Edit product business code, delegate, sign/publish without authorization |
 
 ## Default Flow
 
 1. Root session starts `relaykit_planner` for non-trivial project work.
 2. Planner builds a dispatch board with plan id, branch/worktree, owned paths, blocked paths, dependencies, tiers, validators, and stop conditions.
-3. If planner cannot spawn specialists, it outputs `PARENT DISPATCH REQUIRED`; root launches the listed agents and returns results to planner.
-4. Implementation lanes go to `relaykit_gateway`, `relaykit_app`, or `relaykit_worker`.
-5. Validation goes to `relaykit_test`; review goes to `relaykit_cr`.
-6. Release/package scope also requires `relaykit_release`.
+3. Planner is the only project role that decides delegation. It may authorize at most two concurrent write lanes, and their owned paths must not overlap.
+4. Project role selection is root-mediated. Planner outputs `PARENT DISPATCH REQUIRED`; root mechanically launches only those exact registered roles and returns results to Planner. Planner must not use nested generic `spawn_agent(task_name=...)`, because that inherits Planner model/effort instead of loading the specialist config.
+5. Implementation lanes go to `relaykit_gateway`, `relaykit_app`, or `relaykit_worker`. Cross-App/Gateway work is always split into two specialist lanes.
+6. Close implementation lanes, then run `relaykit_test`, then `relaykit_cr`, then `relaykit_release` when release scope exists. These gates never run concurrently.
 7. Planner updates `docs/handoff.md` and relevant plan docs before final handoff.
 
 ## Desktop Live Validation Gate
 
-Every validation lane starts with `./scripts/relaykit-validate.sh --base <commit> --head <commit> --plan-only`. The changed-file selector, not a generic tier label, decides whether the lane needs syntax, focused contracts, Swift/Go work, UI smoke, package, a live query, or full E2E. Execute the plan only after one coherent root-cause group is ready; do not repeat unchanged layers. Any command added after planning needs a recorded reason. The same failure may be retried once, then must be preserved and reported.
+Every validation lane starts with `./scripts/relaykit-validate.sh --base <commit> --head <commit> --plan-only`. The changed-file selector, not a generic tier label, decides whether the lane needs syntax, focused contracts, Swift/Go work, UI smoke, package, a live query, or full E2E. Execute the plan only after one coherent root-cause group is ready; do not repeat unchanged layers. Safe, side-effect-free local failures may be retried once. Live and full commands execute once and are never retried.
 
 Desktop live validation is opt-in because it can send paid requests. A single explicitly authorized query may use `$relaykit-desktop-query` only when the plan selects `live-desktop-query`. The caller supplies explicit current catalog evidence plus catalog and artifact hashes; the Skill never chooses the first available `dist` catalog. The four-stage route-proof gate remains the tracked `./scripts/codex-desktop-manual-proof.sh run-auto --scenario /absolute/path/scenario.json` interface and cannot be satisfied by one dispatcher result. Neither path may ask a human to select a model, paste or type a query, click Send, or press Enter.
 
@@ -40,14 +40,14 @@ If `relaykit_cr` fails to start, returns a provider route error, or does not ret
 
 ## Continuation Gate
 
-Planner must not stop just because one slice or commit is complete. After every clean commit or parked blocker, it must re-read `docs/development-plan.md` and `docs/handoff.md`, rebuild the dispatch board, and continue to the next safe P0/P1 item when all of these are true:
+Planner continues only inside the supplied plan. After every clean commit or parked blocker, it re-reads `docs/development-plan.md` and `docs/handoff.md`, rebuilds the dispatch board, and continues to the next assigned item when all of these are true:
 
 - `main` is clean and validation for the previous slice passed;
 - the next item has clear owned paths and no dependency on real credentials, signing, publishing, private providers, hosted telemetry, or destructive operations;
-- the work can stay inside the current milestone or the next listed milestone in `docs/development-plan.md`;
+- the work stays inside the current assignment and does not require Backlog Expansion;
 - a specialist lane can own the work without overlapping another writer.
 
-Planner may stop only when the current milestone and the next safe milestone item are both complete, blocked, or require a human/product decision. The final response must name the next candidate item and why it did not start.
+Planner stops when the supplied plan is complete, blocked, or requires a human/product decision. It must not dispatch the next milestone merely because it is listed in `docs/development-plan.md`; that requires explicit Backlog Expansion opt-in.
 
 ## Spec Gap Repair Gate
 
@@ -57,9 +57,9 @@ Do not ask for human input for small local defaults when the conservative choice
 
 ## Backlog Expansion Gate
 
-If the dispatch board has fewer than two ready safe lanes, planner must expand the backlog before stopping. Read `docs/development-plan.md`, `docs/handoff.md`, `README.md`, `app/README.md`, `gateway/README.md`, and `docs/public-boundary-checklist.md`; add or refine P0/P1 items only when scope is local, reversible, public-safe, and has clear owned paths and validation.
+Backlog expansion is disabled by default. Planner may enable it only when the user explicitly asks or the assignment header contains `BACKLOG EXPANSION: enabled`. Without that opt-in, the current plan is the complete work boundary and Planner must not invent follow-on items merely to keep lanes busy.
 
-After expansion, rebuild the dispatch board. If one safe lane remains, run it. Stop only when no safe lane remains, or the next lane needs real credentials, private providers, signing, publishing, hosted telemetry, destructive operations, public API/security posture changes, or irreversible user data behavior.
+When explicitly enabled, read the existing plan and handoff sources, add only local, reversible, public-safe items with clear ownership and validation, then rebuild the dispatch board. The two-write-lane limit and App/Gateway ownership split still apply.
 
 ## Assignment Header
 
