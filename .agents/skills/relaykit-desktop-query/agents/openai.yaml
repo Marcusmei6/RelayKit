@@ -1,7 +1,7 @@
 interface:
   display_name: "RelayKit Desktop Query"
-  short_description: "Send a model and query through desktop automation"
-  default_prompt: "Use $relaykit-desktop-query to send this query with the requested Codex Desktop model."
+  short_description: "Run one planned Desktop model validation query"
+  default_prompt: "Use $relaykit-desktop-query only when RelayKit's validation plan selects live-desktop-query, with explicit current catalog and artifact hashes."
 
 policy:
   allow_implicit_invocation: false

@@ -234,6 +234,19 @@ Status: Gate 0 local Beta Dogfood Hardening is verified for the fixed product ca
 - Fresh Swift, Go, proof self-tests, extracted-App dogfood, menu AX smoke, public-safe acceptance, diagnostics redaction, public-boundary, shell syntax, and diff checks passed. Build/package verification remains bound to the fixed product artifact and was intentionally not repeated after harness-only changes.
 - Do not add signing, notarization, updater runtime, publishing, shared port `18787` takeover, global Codex config/auth mutation, or LaunchAgent control to this phase.
 
+## Phase 7.7: Validation Fast Path and Desktop Query Skill
+
+Status: implementation and focused contracts verified; the one permitted live Skill invocation failed before submission on the stale provider precondition and was not retried. Beta Dogfood Hardening evidence remains accepted and was not rerun by this phase.
+
+- `scripts/relaykit-validate.sh` is the deterministic changed-file selector. Its JSON plan records files, classes, selected/skipped commands, reasons, and build/package/GUI/live/full requirements before execution.
+- Docs and workflow/Skill/harness changes stay on syntax and focused contract tests. Gateway changes select affected Go packages. Ordinary App UI selects Swift build/validation plus no-model menu smoke. Packaging inputs alone select package and extracted-App dogfood.
+- A single paid `$relaykit-desktop-query` request is an explicit high-risk leaf selected with `--live-query`; it is never the default validation entry. Full four-stage proof requires `--full` and is not part of this phase's execution.
+- The Skill accepts `plain`, `markdown`, or `tool`, requires explicit catalog evidence and caller-pinned catalog/artifact SHA-256 values, and does not search stale `dist` directories.
+- The Skill remains one-shot. Persistent prepare/query/status/finalize/stop lifecycle, watchdog, and finalization profiles remain the next-session design, not this phase.
+- Future manual-proof evidence reports GUI tool review as verified for both `manual_user_only` and `automated_ax` when current-run rollout, process-bound screenshot, and render evidence agree. Previously accepted artifacts are not rewritten.
+- The failed Skill invocation produced no fresh usage event and no submission state. Its root cause is fixed by an official-only setup scope with no provider requirement, but a second live invocation is intentionally deferred because this phase forbids automatic retry after failure.
+- Group one coherent root-cause change before execution, never repeat an unchanged validation layer, and retry the same failing command at most once.
+
 ## Task Ownership
 
 - `relaykit_planner` owns roadmap, dispatch, review/validation gates, release gates, and public boundary.

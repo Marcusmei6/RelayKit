@@ -713,6 +713,14 @@ for evidence_field in gpt56_gui_completed official_picker_has_spark official_pic
   grep -Fq "${evidence_field}:" "${PROOF_SCRIPT}" ||
     fail "manual proof evidence is missing ${evidence_field}"
 done
+
+test "$("${PROOF_SCRIPT}" --test-tool-ui-review-status automated_ax true true)" = "derived_from_current_run_rollout_and_process_bound_screenshot"
+test "$("${PROOF_SCRIPT}" --test-tool-ui-review-status manual_user_only true true)" = "derived_from_current_run_rollout_and_process_bound_screenshot"
+test "$("${PROOF_SCRIPT}" --test-tool-ui-review-status isolated_codex_cli_fallback true true)" = "rollout_verified_gui_display_not_verified"
+test "$("${PROOF_SCRIPT}" --test-tool-ui-review-status automated_ax true false)" = "rollout_verified_gui_display_not_verified"
+test "$("${PROOF_SCRIPT}" --test-tool-ui-review-status automated_ax false true)" = "not_verified"
+test "$("${PROOF_SCRIPT}" --test-automated-finalization-mode standard_four_stage_dogfood)" = "standard_render_aggregation"
+test "$("${PROOF_SCRIPT}" --test-automated-finalization-mode custom_scenario)" = "stage_evidence_only"
 grep -Fq -- '--arg input_mode "${PROOF_INPUT_MODE}"' "${PROOF_SCRIPT}" ||
   fail "manual proof evidence must record the actual input mode"
 grep -Fq 'and $input_mode == "manual_user_only"' "${PROOF_SCRIPT}" ||
@@ -752,6 +760,20 @@ JSON
 chmod 600 "${scenario_file}"
 "${PROOF_SCRIPT}" --test-auto-scenario "${scenario_file}" >"${scenario_dir}/normalized.json"
 jq -e '.version == 1 and (.stages | length) == 1 and .stages[0].id == "route-check"' "${scenario_dir}/normalized.json" >/dev/null
+
+official_scenario="${scenario_dir}/official-only.json"
+jq '.stages[0].model_id = "gpt-5.5" | .stages[0].model_label = "GPT-5.5"' "${scenario_file}" >"${official_scenario}"
+chmod 600 "${official_scenario}"
+test "$(env -u RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG -u RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID HOME="${config_home}" "${PROOF_SCRIPT}" --test-automated-provider-inputs "${official_scenario}")" = "official"
+
+provider_scenario="${scenario_dir}/provider-only.json"
+cp "${scenario_file}" "${provider_scenario}"
+chmod 600 "${provider_scenario}"
+expect_failure "provider scenario accepted missing provider preconditions" env -u RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG -u RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID HOME="${config_home}" "${PROOF_SCRIPT}" --test-automated-provider-inputs "${provider_scenario}"
+
+official_provider_config="${scenario_dir}/official-provider.json"
+HOME="${config_home}" "${PROOF_SCRIPT}" --test-write-official-provider-config "${official_provider_config}"
+jq -e '.providers == [] and .official_passthrough.credential_ref.kind == "codex_home" and (.official_passthrough.codex_binary | startswith("/"))' "${official_provider_config}" >/dev/null
 
 scenario_guard_file="${scenario_dir}/scenario-guard.json"
 cp "${scenario_file}" "${scenario_guard_file}"
@@ -1332,6 +1354,10 @@ cat >"${gateway_config}" <<'JSON'
   "providers": []
 }
 JSON
+official_only_catalog="${tmp_dir}/official-only-catalog.json"
+"${PROOF_SCRIPT}" --test-merge-model-catalog \
+  "${projected_catalog}" "${gateway_config}" "official_only_route" "${official_only_catalog}"
+jq -e --slurpfile official "${projected_catalog}" '.models == $official[0].models' "${official_only_catalog}" >/dev/null
 bundled_codex_binary="/Applications/ChatGPT.app/Contents/Resources/codex"
 "${PROOF_SCRIPT}" --test-sync-official-models "${projected_catalog}" "${gateway_config}" "${bundled_codex_binary}"
 jq -e '

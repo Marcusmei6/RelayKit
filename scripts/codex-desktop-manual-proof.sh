@@ -92,6 +92,7 @@ SOURCE_GUARD_ARMED=false
 HUMAN_INTERVENTION_COUNT=0
 AUTO_ERROR_CODE="automated_proof_failed"
 AUTOMATED_PROFILE="not_automated"
+AUTOMATED_SETUP_SCOPE="real"
 
 usage() {
   cat >&2 <<'EOF'
@@ -659,8 +660,30 @@ PY
 
 prepare_automated_provider_inputs() {
   local scenario_path="$1"
-  local scenario_provider_model default_config
-  scenario_provider_model="$(jq -r '[.stages[] | select(.expect == "markdown" or .expect == "tool") | .model_id] | unique | if length == 1 then .[0] else "" end' "${scenario_path}")" || return 1
+  local scenario_provider_model default_config route_source
+  route_source="${RELAYKIT_DESKTOP_PROOF_ROUTE_SOURCE:-auto}"
+  case "${route_source}" in
+    official)
+      scenario_provider_model=""
+      ;;
+    provider)
+      scenario_provider_model="$(jq -r '[.stages[].model_id] | unique | if length == 1 then .[0] else "" end' "${scenario_path}")" || return 1
+      ;;
+    auto)
+      scenario_provider_model="$(jq -r '[.stages[] | select((.model_id | startswith("gpt-") | not)) | .model_id] | unique | if length == 1 then .[0] else "" end' "${scenario_path}")" || return 1
+      ;;
+    *)
+      echo "unsupported automated route source" >&2
+      return 1
+      ;;
+  esac
+  if [[ -z "${scenario_provider_model}" ]]; then
+    PROOF_PROVIDER_MODEL_ID=""
+    PROOF_SCOPE="official_only_route"
+    AUTOMATED_SETUP_SCOPE="official"
+    return 0
+  fi
+  AUTOMATED_SETUP_SCOPE="real"
   if [[ -z "${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID:-}" && -n "${scenario_provider_model}" ]]; then
     RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="${scenario_provider_model}"
   fi
@@ -736,6 +759,27 @@ driver_failure_code() {
     printf '%s\n' "${code}"
   else
     printf '%s\n' "${fallback}"
+  fi
+}
+
+desktop_gui_tool_ui_review_status() {
+  local input_mode="$1"
+  local tool_proof_found="$2"
+  local tool_gui_verified="$3"
+  if [[ "${tool_proof_found}" != "true" ]]; then
+    printf 'not_verified\n'
+  elif [[ "${tool_gui_verified}" == "true" && ( "${input_mode}" == "manual_user_only" || "${input_mode}" == "automated_ax" ) ]]; then
+    printf 'derived_from_current_run_rollout_and_process_bound_screenshot\n'
+  else
+    printf 'rollout_verified_gui_display_not_verified\n'
+  fi
+}
+
+automated_finalization_mode() {
+  if [[ "$1" == "standard_four_stage_dogfood" ]]; then
+    printf 'standard_render_aggregation\n'
+  else
+    printf 'stage_evidence_only\n'
   fi
 }
 
@@ -969,6 +1013,23 @@ write_provider_config() {
 JSON
 }
 
+write_official_only_provider_config() {
+  cat >"${PROVIDER_CONFIG}" <<JSON
+{
+  "official_passthrough": {
+    "base_url": "https://api.openai.example/v1",
+    "credential_ref": { "kind": "codex_home", "value": "${APP_OFFICIAL_CODEX_HOME}" },
+    "codex_binary": "${CODEX_CLI_BINARY}",
+    "models": [
+      { "id": "gpt-5.5", "display_name": "GPT-5.5" }
+    ]
+  },
+  "providers": []
+}
+JSON
+  chmod 600 "${PROVIDER_CONFIG}"
+}
+
 validate_real_provider_policy() {
   local source_config="${RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG:-}"
   local public_model="${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID:-}"
@@ -1114,7 +1175,9 @@ const providerModels = (configured.providers || []).flatMap(provider =>
     };
   })
 );
-if (providerModels.length === 0) throw new Error("provider config contains no models");
+if (providerModels.length === 0 && proofScope !== "official_only_route") {
+  throw new Error("provider config contains no models");
+}
 const providerIds = new Set();
 for (const model of providerModels) {
   if (providerIds.has(model.slug)) throw new Error(`duplicate provider model: ${model.slug}`);
@@ -2190,7 +2253,7 @@ write_evidence() {
   local source_snapshot_hash_after harness_hash_after ax_driver_hash_after harness_snapshot_hash_after scenario_hash_after product_artifact_hash_after
   local source_snapshot_unchanged harness_unchanged ax_driver_unchanged harness_snapshot_unchanged scenario_unchanged product_artifact_unchanged
   local sandbox_status desktopproof_refs global_guard_passed app_screenshot_sha
-  local last_route_evidence official_codex_binary
+  local last_route_evidence official_codex_binary tool_ui_review_status
   config_after="$(file_signature "${GLOBAL_CODEX_CONFIG}")"
   auth_after="$(file_signature "${GLOBAL_CODEX_AUTH}")"
   config_hash_after="$(file_hash "${GLOBAL_CODEX_CONFIG}")"
@@ -2218,6 +2281,10 @@ write_evidence() {
   last_route_evidence=""
   [[ -f "${LAST_ROUTE_OUT}/evidence.json" ]] && last_route_evidence="${LAST_ROUTE_OUT}/evidence.json"
   official_codex_binary="$(jq -r '.official_passthrough.codex_binary // ""' "${PROVIDER_CONFIG}" 2>/dev/null || true)"
+  tool_ui_review_status="$(desktop_gui_tool_ui_review_status \
+    "${PROOF_INPUT_MODE}" \
+    "$(jq -r '.proof_found // false' "${DESKTOP_TOOL_EVIDENCE}")" \
+    "$(jq -r '.tool_gui_verified // false' "${DESKTOP_RENDER_EVIDENCE}")")"
   sandbox_status="$(cat "${DESKTOP_SANDBOX_STATUS_FILE}" 2>/dev/null || printf disabled)"
   app_screenshot_sha=""
   [[ -s "${APP_SCREENSHOT}" ]] && app_screenshot_sha="$(/usr/bin/shasum -a 256 "${APP_SCREENSHOT}" | awk '{print $1}')"
@@ -2269,6 +2336,7 @@ write_evidence() {
     --arg automated_profile "${AUTOMATED_PROFILE}" \
     --arg provider_model "${PROOF_PROVIDER_MODEL_ID}" \
     --arg official_codex_binary "${official_codex_binary}" \
+    --arg tool_ui_review_status "${tool_ui_review_status}" \
     --arg desktop_codex_binary "${CODEX_CLI_BINARY}" \
     --arg last_route_evidence "${last_route_evidence}" \
     --arg current_zip_sha256 "${APP_ZIP_SHA256}" \
@@ -2401,12 +2469,7 @@ write_evidence() {
       tool_output_visible: (($tool[0].function_call_output_found // false) and ($tool[0].process_exited_zero // false)),
       raw_xml_absent: (($tool[0].xml_leak_found != true) and ($render[0].raw_protocol_absent // false)),
       raw_function_calls_absent: (($tool[0].raw_function_calls_found != true) and ($render[0].raw_protocol_absent // false)),
-      desktop_gui_tool_ui_review: (
-        if ($tool[0].proof_found // false) and ($render[0].tool_gui_verified // false) and $input_mode == "manual_user_only" then "derived_from_current_run_rollout_and_process_bound_screenshot"
-        elif ($tool[0].proof_found // false) then "rollout_verified_gui_display_not_verified"
-        else "not_verified"
-        end
-      ),
+      desktop_gui_tool_ui_review: $tool_ui_review_status,
       mock_ok_used: false,
       old_usage_evidence_used: false,
       public_fixture_route_proof_allowed: false,
@@ -2455,7 +2518,7 @@ setup_preflight() {
   prepare_extracted_app
 
   local provider_port="" gateway_port
-  if [[ "${setup_scope}" == "real" ]]; then
+  if [[ "${setup_scope}" == "real" || "${setup_scope}" == "official" ]]; then
     gateway_port=19777
   else
     gateway_port="$(free_port)"
@@ -2465,6 +2528,11 @@ setup_preflight() {
   if [[ "${setup_scope}" == "real" ]]; then
     rm -f "${PROVIDER_PORT_FILE}"
     prepare_real_provider_config
+  elif [[ "${setup_scope}" == "official" ]]; then
+    rm -f "${PROVIDER_PORT_FILE}"
+    PROOF_SCOPE="official_only_route"
+    PROOF_PROVIDER_MODEL_ID=""
+    write_official_only_provider_config
   else
     PROOF_SCOPE="fixture_plumbing_preflight"
     PROOF_PROVIDER_MODEL_ID="desktop-proof-demo/claude-haiku-4-5"
@@ -2478,7 +2546,7 @@ setup_preflight() {
   fi
   write_catalog
   write_codex_config "${gateway_port}"
-  if [[ "${setup_scope}" == "real" ]]; then
+  if [[ "${setup_scope}" == "real" || "${setup_scope}" == "official" ]]; then
     launch_isolated_relaykit_app
   else
     start_gateway "${gateway_port}"
@@ -2491,6 +2559,13 @@ setup_preflight() {
       ([.models[].slug] | index("gpt-5.6-luna")) != null and
       ([.models[].slug] | index("gpt-5.3-codex-spark")) != null and
       ([.models[].slug] | index($provider_model)) != null and
+      ([.models[].slug] | index("gpt-5.2")) == null
+    ' "${OUT}/codex-debug-models.json" >/dev/null
+  elif [[ "${setup_scope}" == "official" ]]; then
+    jq -e '
+      ([.models[].slug] | index("gpt-5.5")) != null and
+      ([.models[].slug] | index("gpt-5.6-luna")) != null and
+      ([.models[].slug] | index("gpt-5.3-codex-spark")) != null and
       ([.models[].slug] | index("gpt-5.2")) == null
     ' "${OUT}/codex-debug-models.json" >/dev/null
   else
@@ -2506,6 +2581,15 @@ setup_preflight() {
       ([.official[].model] | index("gpt-5.2")) == null and
       ([.provider[].model] | index($provider_model)) != null
     ' "${OUT}/app-server.json" >/dev/null
+  elif [[ "${setup_scope}" == "official" ]]; then
+    jq -e '
+      .config.model == "gpt-5.5" and
+      ([.official[].model] | index("gpt-5.5")) != null and
+      ([.official[].model] | index("gpt-5.6-luna")) != null and
+      ([.official[].model] | index("gpt-5.3-codex-spark")) != null and
+      ([.official[].model] | index("gpt-5.2")) == null and
+      (.provider | length) == 0
+    ' "${OUT}/app-server.json" >/dev/null
   else
     jq -e --arg provider_model "${PROOF_PROVIDER_MODEL_ID}" '.config.model == "gpt-5.5" and ([.official[].model] | index("gpt-5.5")) and ([.provider[].model] | index($provider_model))' "${OUT}/app-server.json" >/dev/null
   fi
@@ -2520,6 +2604,13 @@ setup_preflight() {
       ([.data[].id] | index("gpt-5.6-luna")) != null and
       ([.data[].id] | index("gpt-5.3-codex-spark")) != null and
       ([.data[].id] | index($provider_model)) != null and
+      ([.data[].id] | index("gpt-5.2")) == null
+    ' "${OUT}/gateway-models.json" >/dev/null
+  elif [[ "${setup_scope}" == "official" ]]; then
+    jq -e '
+      ([.data[].id] | index("gpt-5.5")) != null and
+      ([.data[].id] | index("gpt-5.6-luna")) != null and
+      ([.data[].id] | index("gpt-5.3-codex-spark")) != null and
       ([.data[].id] | index("gpt-5.2")) == null
     ' "${OUT}/gateway-models.json" >/dev/null
   else
@@ -3222,7 +3313,7 @@ run_automated_proof() {
   AUTO_ERROR_CODE="global_state_capture_failed"
   capture_global_state
   AUTO_ERROR_CODE="preflight_failed"
-  setup_preflight real
+  setup_preflight "${AUTOMATED_SETUP_SCOPE}"
   AUTOMATED_PROFILE="$(automated_profile_for_scenario "${AUTOMATED_SCENARIO_NORMALIZED}" "${PROOF_PROVIDER_MODEL_ID}")" || {
     AUTO_ERROR_CODE="scenario_profile_invalid"
     return 1
@@ -3334,17 +3425,17 @@ run_automated_proof() {
     AUTO_ERROR_CODE="scenario_stage_completion_mismatch"
     return 1
   fi
-  gpt55_marker="$(jq -er '.stages[] | select(.evidence_role == "gpt55-response" and .model_id == "gpt-5.5") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || {
-    AUTO_ERROR_CODE="gpt55_marker_missing"
-    return 1
-  }
-  gpt56_marker="$(jq -er '.stages[] | select(.evidence_role == "gpt56-response" and .model_id == "gpt-5.6-luna") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || {
-    AUTO_ERROR_CODE="gpt56_marker_missing"
-    return 1
-  }
-  AUTO_ERROR_CODE="render_evidence_failed"
-  write_desktop_render_evidence "${overall_since}" "${PROOF_PROVIDER_MODEL_ID}" "${SCREENSHOT_EVIDENCE}" "${gpt55_marker}" "${gpt56_marker}"
-  if [[ "${AUTOMATED_PROFILE}" == "standard_four_stage_dogfood" ]]; then
+  if [[ "$(automated_finalization_mode "${AUTOMATED_PROFILE}")" == "standard_render_aggregation" ]]; then
+    gpt55_marker="$(jq -er '.stages[] | select(.evidence_role == "gpt55-response" and .model_id == "gpt-5.5") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || {
+      AUTO_ERROR_CODE="gpt55_marker_missing"
+      return 1
+    }
+    gpt56_marker="$(jq -er '.stages[] | select(.evidence_role == "gpt56-response" and .model_id == "gpt-5.6-luna") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || {
+      AUTO_ERROR_CODE="gpt56_marker_missing"
+      return 1
+    }
+    AUTO_ERROR_CODE="render_evidence_failed"
+    write_desktop_render_evidence "${overall_since}" "${PROOF_PROVIDER_MODEL_ID}" "${SCREENSHOT_EVIDENCE}" "${gpt55_marker}" "${gpt56_marker}"
     standard_route_status="$(route_outcome_from_usage_file "${OUT}/usage-events.json" "${PROOF_PROVIDER_MODEL_ID}" "${DESKTOP_TOOL_EVIDENCE}" "${SCREENSHOT_EVIDENCE}" "${DESKTOP_RENDER_EVIDENCE}")" || {
       AUTO_ERROR_CODE="standard_route_evaluation_failed"
       return 1
@@ -3634,12 +3725,32 @@ EOF
   --test-input-mode)
     validate_input_mode
     ;;
+  --test-tool-ui-review-status)
+    [[ -n "${4:-}" && -z "${5:-}" ]] || exit 2
+    desktop_gui_tool_ui_review_status "$2" "$3" "$4"
+    ;;
+  --test-automated-finalization-mode)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    automated_finalization_mode "$2"
+    ;;
   --test-automated-input-mode)
     validate_automated_input_mode
     ;;
   --test-auto-scenario)
     [[ -n "${2:-}" ]] || exit 2
     validate_auto_scenario "$2"
+    ;;
+  --test-automated-provider-inputs)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    prepare_automated_provider_inputs "$2"
+    printf '%s\n' "${AUTOMATED_SETUP_SCOPE}"
+    ;;
+  --test-write-official-provider-config)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    PROVIDER_CONFIG="$2"
+    CODEX_APP_BINARY="$(resolve_codex_app_binary)"
+    CODEX_CLI_BINARY="$(resolve_codex_cli_binary)"
+    write_official_only_provider_config
     ;;
   --test-fresh-stage-usage)
     [[ -n "${4:-}" ]] || exit 2

@@ -115,6 +115,15 @@ Current Gate 0 closeout evidence:
 - The fresh validation matrix passed: public-safe Desktop acceptance, menu-bar AX smoke, Swift validation, extracted-App dogfood and its contract tests, manual-proof and AX-driver self-tests, Go tests, `go vet`, `gofmt -l`, diagnostics redaction, public-boundary, shell syntax, and `git diff --check`. Build/package verification belongs to the already fixed product artifact and was intentionally not repeated after harness-only changes.
 - Ports `18787` and `19777` were listener-free after the final run. Signed beta remains a separate Apple-approval blocker and updater runtime remains deferred.
 
+Current Validation Fast Path work:
+
+- Beta Dogfood Hardening remains complete at artifact SHA-256 `f81b7ce1553131bb4fde3db3e6005df2e8478384e5f316828339101da093b848`; this lane does not rebuild, package, dogfood, or rerun the four-stage proof.
+- `scripts/relaykit-validate.sh` now maps changed files to focused commands before execution. Paid Skill queries and full E2E are explicit justified flags, never defaults.
+- `$relaykit-desktop-query` requires caller-pinned catalog evidence and matching catalog/artifact SHA-256 values, supports `plain`, `markdown`, and `tool`, and returns redacted machine-readable metadata without query or response bodies.
+- Official model selection no longer causes the backend itself to demand a provider configuration; provider preconditions are applied only to models resolved from the provider catalog.
+- The accepted four-stage evidence files are preserved byte-for-byte. Their `desktop_gui_tool_ui_review=rollout_verified_gui_display_not_verified` value is a historical schema inconsistency: the same evidence already has current-run tool proof, a process-bound screenshot, and `tool_gui_verified=true`. Future `automated_ax` evidence uses `derived_from_current_run_rollout_and_process_bound_screenshot` without rewriting the accepted artifact.
+- The single authorized Skill E2E invocation is recorded under `dist/validation-fast-path/`. It failed before App/Desktop launch and before Send with `provider_input_missing_or_invalid`; current-run usage remained empty, no paid model request occurred, and no automatic retry was made. The harness now has a fixture-tested `official_only_route` setup that does not require provider configuration, but another live invocation needs a separately authorized future validation turn.
+
 Current Desktop setup evidence:
 
 - `dist/codex-desktop-acceptance/evidence.json` is current setup/plumbing evidence only. It proves a public-safe merged catalog, isolated app-server model listing, official/provider loopback routing contracts, unchanged global Codex signatures, and released `18787`/`19777`; its `acceptance_scope` is `public_safe_headless` and both Desktop GUI proof fields remain `not_attempted`.

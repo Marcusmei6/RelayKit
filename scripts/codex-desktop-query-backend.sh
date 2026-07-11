@@ -8,40 +8,38 @@ fail() {
   exit 1
 }
 
-[[ "${1:-}" == "--model" && -n "${2:-}" && "${3:-}" == "--query-file" && -n "${4:-}" && -z "${5:-}" ]] ||
+[[ "${1:-}" == "--model" && -n "${2:-}" && "${3:-}" == "--query-file" && -n "${4:-}" &&
+   "${5:-}" == "--expect" && -n "${6:-}" && "${7:-}" == "--catalog-evidence" && -n "${8:-}" &&
+   "${9:-}" == "--catalog-sha256" && -n "${10:-}" && "${11:-}" == "--artifact-sha256" && -n "${12:-}" && -z "${13:-}" ]] ||
   fail "invalid_arguments"
 
 model="$2"
 query_file="$4"
+expect="$6"
+catalog_evidence="$8"
+catalog_sha256="${10}"
+artifact_sha256="${12}"
 harness="${RELAYKIT_DESKTOP_QUERY_HARNESS:-${ROOT}/scripts/codex-desktop-manual-proof.sh}"
-catalog_evidence="${RELAYKIT_DESKTOP_QUERY_CATALOG_EVIDENCE:-}"
+artifact_path="${RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH:-${ROOT}/dist/RelayKitApp-local.zip}"
 
 [[ "${query_file}" = /* && -f "${query_file}" && ! -L "${query_file}" && "$(stat -f '%Lp' "${query_file}")" == "600" ]] ||
   fail "query_file_invalid"
+[[ "${expect}" == "plain" || "${expect}" == "markdown" || "${expect}" == "tool" ]] || fail "expect_invalid"
+[[ "${catalog_evidence}" = /* && -f "${catalog_evidence}" && ! -L "${catalog_evidence}" ]] || fail "catalog_evidence_unavailable"
+[[ "${catalog_sha256}" =~ ^[0-9a-f]{64}$ && "${artifact_sha256}" =~ ^[0-9a-f]{64}$ ]] || fail "evidence_hash_invalid"
+[[ "$(shasum -a 256 "${catalog_evidence}" | awk '{print $1}')" == "${catalog_sha256}" ]] || fail "catalog_evidence_stale"
+[[ -f "${artifact_path}" && ! -L "${artifact_path}" && "$(shasum -a 256 "${artifact_path}" | awk '{print $1}')" == "${artifact_sha256}" ]] || fail "artifact_evidence_stale"
 [[ -x "${harness}" ]] || fail "harness_unavailable"
 
-if [[ -z "${catalog_evidence}" ]]; then
-  for candidate in \
-    "${ROOT}/dist/codex-desktop-automated-provider-complete/app-server.json" \
-    "${ROOT}/dist/codex-desktop-manual-proof-last-custom-complete/app-server.json" \
-    "${ROOT}/dist/codex-desktop-manual-proof/app-server.json" \
-    "${ROOT}/dist/codex-desktop-manual-proof-last-route/app-server.json"; do
-    if [[ -f "${candidate}" ]]; then
-      catalog_evidence="${candidate}"
-      break
-    fi
-  done
-fi
-[[ -f "${catalog_evidence}" ]] || fail "catalog_evidence_unavailable"
-
 resolved_model="$(jq -ce --arg requested "${model}" '
-  [.official[]?, .provider[]?]
+  [(.official[]? | . + {source_type:"official"}), (.provider[]? | . + {source_type:"provider"})]
   | map(select(.model == $requested or .displayName == $requested))
   | select(length == 1)
   | .[0]
 ' "${catalog_evidence}" 2>/dev/null)" || fail "model_not_unique_or_missing"
 model_id="$(jq -er '.model' <<<"${resolved_model}")"
 model_label="$(jq -er '.displayName' <<<"${resolved_model}")"
+model_source="$(jq -er '.source_type' <<<"${resolved_model}")"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/relaykit-desktop-query-backend.XXXXXX")"
 chmod 700 "${tmp}"
@@ -70,9 +68,9 @@ jq -n \
       query_file: $query_file,
       response_marker: $marker,
       evidence_role: "desktop-query-response",
-      expect: "plain"
+      expect: $expect
     }]
-  }' >"${scenario}"
+  }' --arg expect "${expect}" >"${scenario}"
 chmod 600 "${scenario}"
 
 harness_stdout="${tmp}/harness.stdout"
@@ -81,17 +79,23 @@ filtered_stderr="${tmp}/harness.filtered.stderr"
 harness_status=0
 set +e
 if [[ "${harness}" == "${ROOT}/scripts/codex-desktop-manual-proof.sh" ]]; then
-  provider_config="${RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG:-${HOME}/Library/Application Support/RelayKit/DesktopProof/real-provider-input.json}"
-  provider_model="${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID:-}"
-  if [[ -z "${provider_model}" ]]; then
-    provider_model="$(jq -r '.provider[0].model // empty' "${catalog_evidence}")"
+  if [[ "${model_source}" == "provider" ]]; then
+    provider_config="${RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG:-}"
+    [[ -f "${provider_config}" ]] || fail "provider_precondition_unavailable"
+    RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="${provider_config}" \
+    RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="${model_id}" \
+    RELAYKIT_DESKTOP_PROOF_ROUTE_SOURCE=provider \
+    RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP="${RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP:-1}" \
+    RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP="${RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP:-1}" \
+    RELAYKIT_DESKTOP_PROOF_INPUT_MODE=automated_ax \
+      "${harness}" run-auto --scenario "${scenario}" </dev/null >"${harness_stdout}" 2>"${harness_stderr}"
+  else
+    RELAYKIT_DESKTOP_PROOF_ROUTE_SOURCE=official \
+    RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP="${RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP:-1}" \
+    RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP="${RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP:-1}" \
+    RELAYKIT_DESKTOP_PROOF_INPUT_MODE=automated_ax \
+      "${harness}" run-auto --scenario "${scenario}" </dev/null >"${harness_stdout}" 2>"${harness_stderr}"
   fi
-  [[ -f "${provider_config}" && -n "${provider_model}" ]] || fail "provider_precondition_unavailable"
-  RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="${provider_config}" \
-  RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="${provider_model}" \
-  RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP="${RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP:-1}" \
-  RELAYKIT_DESKTOP_PROOF_INPUT_MODE=automated_ax \
-    "${harness}" run-auto --scenario "${scenario}" </dev/null >"${harness_stdout}" 2>"${harness_stderr}"
   harness_status=$?
 else
   "${harness}" run-auto --scenario "${scenario}" </dev/null >"${harness_stdout}" 2>"${harness_stderr}"
@@ -101,12 +105,69 @@ set -e
 
 grep -Ev 'Terminated: 15.*sandbox-exec' "${harness_stderr}" >"${filtered_stderr}" || true
 if [[ "${harness_status}" -ne 0 ]]; then
-  [[ -s "${filtered_stderr}" ]] && cat "${filtered_stderr}" >&2
-  [[ -s "${harness_stdout}" ]] && cat "${harness_stdout}" >&2
+  failure_meta="$(python3 - "${filtered_stderr}" "${harness_stdout}" <<'PY'
+import json
+import sys
+
+found = []
+decoder = json.JSONDecoder()
+for path in sys.argv[1:]:
+    try:
+        text = open(path, errors="replace").read()
+    except OSError:
+        continue
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("error_code"), str):
+            found.append(value)
+value = found[-1] if found else {}
+print(json.dumps({
+    "error_code": value.get("error_code", "harness_failed"),
+    "evidence_path": value.get("evidence"),
+}, sort_keys=True))
+PY
+)"
+  error_code="$(jq -r '.error_code' <<<"${failure_meta}")"
+  evidence_path="$(jq -r '.evidence_path // empty' <<<"${failure_meta}")"
+  case "${error_code}" in
+    provider_input_missing_or_invalid|input_mode_invalid|scenario_invalid|scenario_argument_invalid|global_state_capture_failed|preflight_failed|preflight_evidence_failed|ax_driver_build_failed|desktop_catalog_labels_invalid|desktop_launch_failed|desktop_activation_failed|desktop_window_identity_invalid|desktop_initial_capture_failed|desktop_pid_invalid)
+      submission_state="not_submitted"
+      ;;
+    *)
+      submission_state="unknown_after_submit_attempt"
+      ;;
+  esac
+  jq -nc \
+    --arg error_code "${error_code}" \
+    --arg model "${model_id}" \
+    --arg expect "${expect}" \
+    --arg submission_state "${submission_state}" \
+    --arg evidence_path "${evidence_path}" \
+    --arg artifact_sha256 "${artifact_sha256}" \
+    --arg catalog_sha256 "${catalog_sha256}" \
+    '{status:"failed",error_code:$error_code,model:$model,expect:$expect,submission_state:$submission_state,evidence_path:(if $evidence_path == "" then null else $evidence_path end),artifact_sha256:$artifact_sha256,catalog_sha256:$catalog_sha256}' >&2
   exit "${harness_status}"
 fi
 
 jq -e -s 'length == 1 and (.[0] | type == "object")' "${harness_stdout}" >/dev/null ||
   fail "harness_result_invalid"
 [[ -s "${filtered_stderr}" ]] && cat "${filtered_stderr}" >&2
-cat "${harness_stdout}"
+jq -c \
+  --arg model "${model_id}" \
+  --arg expect "${expect}" \
+  --arg catalog_sha256 "${catalog_sha256}" \
+  --arg artifact_sha256 "${artifact_sha256}" \
+  '{
+    status: .status,
+    model: $model,
+    expect: $expect,
+    submission_state: (.stages[0].submission_state // "unknown"),
+    evidence_path: .evidence,
+    artifact_sha256: $artifact_sha256,
+    catalog_sha256: $catalog_sha256
+  }' "${harness_stdout}"

@@ -11,13 +11,15 @@ Start by validating the assignment header: WORKTREE, BRANCH, PLAN, OWNED PATHS, 
 
 Read AGENTS.md, docs/agents/README.md, docs/development-plan.md, docs/open-source-boundary.md, and changed-file context.
 
-For an assignment that explicitly authorizes a paid Codex Desktop request, explicitly invoke `$relaykit-desktop-query` with the requested `model` and `query`. The Skill writes the query to a private temporary file and delegates GUI behavior to its configured backend script. Do not ask a human to select the model, type the query, click Send, or press Enter; return the backend's machine-readable result.
+Before running tests, generate a machine-readable changed-file plan with `./scripts/relaykit-validate.sh --base <commit> --head <commit> --plan-only`. Execute only selected commands. If an extra command becomes necessary, record its reason beside the plan before running it. Do not rerun an unchanged validation layer. A failed command may be retried once; if the same failure repeats, preserve evidence and stop that command instead of looping.
+
+Invoke `$relaykit-desktop-query` only when the validation plan explicitly selects `live-desktop-query` and the assignment authorizes a paid request. Pass the requested model, expectation, private query file, explicit current catalog path and SHA, and product artifact SHA. Do not ask a human to select the model, type the query, click Send, or press Enter; return the backend's redacted machine-readable result. A Skill result is one-query evidence, not full route proof.
 
 Validation tiers:
 - Tier 0: docs-only. Run `git diff --check` and a consistency/private-string scan.
 - Tier 1: workflow/config/docs/examples. Run `git diff --check`, relevant JSON/TOML syntax checks when available, and private-string scan.
-- Tier 2: gateway/app code. Run focused tests plus `go test ./...` for gateway changes or the app build/test command once app tooling exists.
-- Tier 3: secrets, Keychain, helper lifecycle, config activation, release packaging, or external network boundaries. Run focused tests, security-sensitive review checks, and release/app smoke when tooling exists.
+- Tier 2: gateway/app code. Run the selector's focused Go package tests or one Swift build/validation plus the corresponding no-model UI smoke.
+- Tier 3: secrets, Keychain, helper lifecycle, config activation, release packaging, or external network boundaries. Run only the selector's targeted integration checks. Package, dogfood, live query, and full E2E require their explicit plan flags.
 
 Report exact commands and pass/fail evidence. Finish with `git status --short`.
 """
