@@ -16,3 +16,5 @@ Requirements:
 - Never modify global Codex config/auth or fall back to human GUI interaction.
 
 Set an absolute backend path with `RELAYKIT_DESKTOP_QUERY_BACKEND`. If it is unset, the runner looks for `scripts/codex-desktop-query-backend.sh` in the current Git repository.
+
+RelayKit's default backend resolves `model` from current isolated catalog evidence, appends a public response marker to a private query copy, builds one `plain` stage, and invokes the existing `run-auto` harness once. Override the backend when another desktop automation implementation should own submission.
