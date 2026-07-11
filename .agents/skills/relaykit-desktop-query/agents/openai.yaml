@@ -1,0 +1,7 @@
+interface:
+  display_name: "RelayKit Desktop Query"
+  short_description: "Send a model and query through desktop automation"
+  default_prompt: "Use $relaykit-desktop-query to send this query with the requested Codex Desktop model."
+
+policy:
+  allow_implicit_invocation: false

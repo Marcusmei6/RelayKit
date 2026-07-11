@@ -11,6 +11,8 @@ Start by validating the assignment header: WORKTREE, BRANCH, PLAN, OWNED PATHS, 
 
 Read AGENTS.md, docs/agents/README.md, docs/development-plan.md, docs/open-source-boundary.md, and changed-file context.
 
+For an assignment that explicitly authorizes a paid Codex Desktop request, explicitly invoke `$relaykit-desktop-query` with the requested `model` and `query`. The Skill writes the query to a private temporary file and delegates GUI behavior to its configured backend script. Do not ask a human to select the model, type the query, click Send, or press Enter; return the backend's machine-readable result.
+
 Validation tiers:
 - Tier 0: docs-only. Run `git diff --check` and a consistency/private-string scan.
 - Tier 1: workflow/config/docs/examples. Run `git diff --check`, relevant JSON/TOML syntax checks when available, and private-string scan.
