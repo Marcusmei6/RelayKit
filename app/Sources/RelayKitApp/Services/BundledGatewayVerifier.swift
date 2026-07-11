@@ -6,7 +6,15 @@ enum BundledGatewayVerifier {
         let gateway = GatewayProcess()
         let configPath = value(after: "--provider-config", in: arguments) ?? RelayKitPaths.exampleProviderConfigPath()
         do {
-            try gateway.start(binaryPath: RelayKitPaths.gatewayBinaryPath(), configPath: configPath)
+            let configData = try Data(contentsOf: URL(fileURLWithPath: configPath))
+            let credentialHandoff = try GatewayCredentialHandoff.encode(configData: configData) { reference in
+                try KeychainCredentialStore.load(service: reference)
+            }
+            try gateway.start(
+                binaryPath: RelayKitPaths.gatewayBinaryPath(),
+                configPath: configPath,
+                credentialHandoff: credentialHandoff
+            )
             defer { gateway.stop() }
             let health = try fetch("http://127.0.0.1:19777/healthz")
             guard String(data: health, encoding: .utf8)?.contains(#""status":"ok""#) == true else {

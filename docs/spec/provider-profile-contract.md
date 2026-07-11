@@ -21,7 +21,7 @@ Supported reference kinds:
 | kind | value contract | runtime status |
 | --- | --- | --- |
 | `env` | Environment variable name, matching `[A-Za-z_][A-Za-z0-9_]*`. Optional `header` selects a safe HTTP header name. | Implemented. Gateway reads the environment variable and injects the upstream auth header. |
-| `keychain` | Local generic-password item service name using only letters, numbers, `.`, `_`, `:`, `@`, `/`, and `-`. Optional `header` selects a safe HTTP header name. | Implemented for local macOS runtime. The app writes the credential value to Keychain; provider JSON stores only this reference. Gateway reads the item and injects only the configured upstream auth header. |
+| `keychain` | Local generic-password item service name using only letters, numbers, `.`, `_`, `:`, `@`, `/`, and `-`. Optional `header` selects a safe HTTP header name. | Implemented for local macOS runtime. The app writes the value to Keychain and provider JSON stores only this reference. App-owned launches resolve referenced items with Security.framework and send them once through an anonymous stdin pipe; the gateway keeps them in memory and injects only the configured upstream auth header. Standalone launches retain the local Keychain fallback. |
 | `key_file` | Absolute path or home-relative path beginning with `/` or `~/`. Optional `header` selects a safe HTTP header name. | Implemented for local runtime. Gateway reads the file and injects only the configured upstream auth header. |
 
 `auth_env` remains supported for backwards compatibility. New app-created provider entries should prefer `credential_ref.kind = "env"`.

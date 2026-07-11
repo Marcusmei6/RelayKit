@@ -39,7 +39,25 @@ if [[ -f "${USAGE_PATH}" ]]; then
   usage_events="$(jq -s 'length' "${USAGE_PATH}" 2>/dev/null || echo 0)"
   usage_total_tokens="$(jq -s '[.[].total_tokens // 0] | add // 0' "${USAGE_PATH}" 2>/dev/null || echo 0)"
   usage_failed_events="$(jq -s '[.[] | select((.status // "") != "completed")] | length' "${USAGE_PATH}" 2>/dev/null || echo 0)"
-  recent_error_types="$(tail -n 100 "${USAGE_PATH}" | jq -s '[.[].error_type // empty] | unique | sort' 2>/dev/null || echo '[]')"
+  recent_error_types="$(tail -n 100 "${USAGE_PATH}" | jq -s '
+    def safe_error_type:
+      if . == "auth_required" or
+         . == "model_not_supported" or
+         . == "unknown_model" or
+         . == "official_timeout" or
+         . == "official_request_failed" or
+         . == "server_error" or
+         . == "upstream_auth_error" or
+         . == "upstream_error" or
+         . == "upstream_non_success" or
+         . == "upstream_decode_error" or
+         . == "refresh_token_revoked" or
+         . == "token_revoked"
+      then .
+      else "other"
+      end;
+    [.[].error_type? | select(type == "string" and length > 0) | safe_error_type] | unique | sort
+  ' 2>/dev/null || echo '[]')"
 fi
 
 jq -n \
@@ -81,6 +99,7 @@ jq -n \
 
 forbidden='(sk-[A-Za-z0-9_-]{10,}|Bearer[[:space:]]+|Authorization|api[_-]?key|auth\.json|base_url|models_url|credential_ref|keychain|https?://|request_body|response_body|headers)'
 if LC_ALL=C grep -Eiq "${forbidden}" "${DIAGNOSTICS_JSON}"; then
+  rm -f "${DIAGNOSTICS_JSON}"
   jq -n '{passed:false, reason:"forbidden diagnostic content pattern found"}' >"${SCAN_JSON}"
   echo "diagnostics redaction scan failed: ${DIAGNOSTICS_JSON}" >&2
   exit 1

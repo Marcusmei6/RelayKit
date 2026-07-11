@@ -30,6 +30,12 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--verify-bundled-gateway") {
             exit(BundledGatewayVerifier.run(arguments: CommandLine.arguments))
         }
+        if let service = value(after: "--delete-dogfood-keychain") {
+            exit(deleteFixtureKeychain(service: service, requiredPrefix: "relaykit.provider.dogfood"))
+        }
+        if let service = value(after: "--delete-desktop-proof-keychain") {
+            exit(deleteFixtureKeychain(service: service, requiredPrefix: "relaykit.desktop-proof.provider-"))
+        }
         let app = NSApplication.shared
         let delegate = RelayKitApp()
         app.delegate = delegate
@@ -105,6 +111,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        model.stopGateway()
         model.stopOfficialAuthProcessForShutdown()
     }
 
@@ -144,6 +151,21 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             return nil
         }
         return CommandLine.arguments[index + 1]
+    }
+
+    private static func deleteFixtureKeychain(service: String, requiredPrefix: String) -> Int32 {
+        guard service.hasPrefix(requiredPrefix),
+              !service.contains("\n"),
+              !service.contains("\r") else {
+            return 2
+        }
+        do {
+            try KeychainCredentialStore.delete(service: service)
+            return 0
+        } catch {
+            FileHandle.standardError.write(Data("RelayKit fixture Keychain cleanup failed\n".utf8))
+            return 1
+        }
     }
 
     private func seedSmokeKeychainCredentialIfNeeded() {

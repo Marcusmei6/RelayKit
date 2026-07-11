@@ -1,5 +1,13 @@
 # RelayKit Beta Feedback
 
+Generate the redacted diagnostics file before reporting:
+
+```bash
+./scripts/export-diagnostics.sh
+```
+
+Attach only `dist/diagnostics/diagnostics.json`. Do not attach provider config, Keychain exports, Codex auth files, or raw gateway logs.
+
 ## Environment
 
 - macOS version:

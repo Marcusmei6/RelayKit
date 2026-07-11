@@ -40,6 +40,8 @@ The build script creates `dist/RelayKitApp.app`, ad-hoc signs the bundled `relay
 
 The package script builds the local app bundle through the headless build path, writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, and verifies the extracted bundled gateway plus public demo provider and Codex config examples without opening the GUI app. It does not Developer ID sign, notarize, publish, or upload anything.
 
+When sequencing zip dogfood and Desktop route proof against one artifact, set `RELAYKIT_DOGFOOD_REUSE_CURRENT_ZIP=1` for `scripts/local-beta-dogfood-smoke.sh` after the zip has already been built and verified. The default remains `0`, which rebuilds the package; unsupported values fail closed.
+
 ## Signed Beta Package
 
 ```bash
@@ -85,27 +87,33 @@ The UI smoke launches `dist/RelayKitApp.app` through LaunchServices, captures th
 ./scripts/local-beta-dogfood-smoke.sh
 ```
 
-The dogfood smoke rebuilds `dist/RelayKitApp-local.zip`, extracts it under `dist/dogfood-local-beta/install/`, launches that extracted app bundle with UI smoke arguments, and writes public-safe evidence plus screenshots under `dist/dogfood-local-beta/`. Gatekeeper rejection is expected for this local ad-hoc beta and is recorded as friction, not as signed beta success.
+The dogfood smoke rebuilds `dist/RelayKitApp-local.zip`, extracts it under `dist/dogfood-local-beta/install/`, and launches that extracted app through LaunchServices with its normal lifecycle. It records the current zip hash/build time/extracted path, drives Connect/Settings/Usage/provider setup through exact AX identities, reopens the same extracted app, re-probes the saved provider, and captures RelayKit-owned WindowServer windows under `dist/dogfood-local-beta/`. Gatekeeper rejection is expected for this local ad-hoc beta and is recorded as friction, not as signed beta success.
 
-The smoke captures the Connect, Settings, and Usage surfaces from the extracted app bundle. Deeper provider-form AX coverage remains in `./scripts/menu-bar-e2e-smoke.sh`.
+The provider lane is fixture plumbing only. It verifies Keychain persistence, Detect models, Test connection, Use reachable, model filtering, actionable base URL/key/model errors, restart persistence, real right-click Quit, and bounded release of port `19777`; it does not claim real provider model compatibility. For App-owned launches, RelayKit reads referenced credentials with Security.framework and sends them once to the bundled gateway through an anonymous stdin pipe. The gateway keeps them in memory, and the harness never reads or rewrites the item with `/usr/bin/security`.
 
 ## Codex Desktop Manual Proof
 
 ```bash
 ./scripts/codex-desktop-manual-proof.sh --setup-only
-./scripts/codex-desktop-manual-proof.sh
+./scripts/codex-desktop-manual-proof-test.sh
+RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="$HOME/path/to/local-providers.json" \
+RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="public/provider-model-id" \
+  ./scripts/codex-desktop-manual-proof.sh
 ./scripts/codex-desktop-manual-proof.sh cleanup
 ```
 
-The manual proof harness creates isolated state under `~/Library/Application Support/RelayKit/DesktopProof/`, generates an isolated `CODEX_HOME/config.toml`, starts RelayKit on a random non-18787/non-19777 loopback port, and writes redacted evidence under `dist/codex-desktop-manual-proof/`. `--setup-only` verifies merged official + demo provider picker data without opening Codex Desktop. The default mode launches an isolated Codex Desktop process and waits for the user to send real manual requests before checking fresh RelayKit usage events. It never copies global Codex auth files and must not write global `~/.codex/config.toml` or `~/.codex/auth.json`.
+The manual proof harness creates isolated state under `~/Library/Application Support/RelayKit/DesktopProof/`, generates an isolated `CODEX_HOME/config.toml`, starts RelayKit on a random non-18787/non-19777 loopback port, and writes redacted evidence under `dist/codex-desktop-manual-proof/`. `--setup-only` verifies merged official + demo provider picker data without opening Codex Desktop. The default mode requires an ignored or repository-external local provider config with no inline secret plus one selected public model id, discovers Codex Desktop by bundle id `com.openai.codex`, launches it with isolated HOME/CODEX_HOME/user data under `sandbox-exec`, and waits for manual requests. It clears isolated usage at run start, binds screenshots to one verified isolated PID/window id, and derives tool-call/output plus raw-protocol checks from current-run isolated rollout files without exporting request or response bodies. Only attempts with current-run usage can replace `dist/codex-desktop-manual-proof-last-route/`, and their process-bound screenshot directory is preserved with the evidence. It never copies global Codex auth files.
+
+Unsandboxed Desktop proof is disabled and fails closed. Global config/auth signatures and SHA-256, Codex `notify`, app/gateway source snapshot, or tracked harness changes fail the run with no repair/write fallback. Dedicated DesktopProof Keychain fixtures are removed only through the extracted RelayKit App code identity, never through `/usr/bin/security`. The self-test covers sandbox policy, global config/auth guards, source/harness guards, route failure branches, current-run rollout tool evidence, and bounded cleanup when Electron ignores `SIGTERM`.
 
 ## Diagnostics
 
 ```bash
 ./scripts/export-diagnostics.sh
+./scripts/export-diagnostics-test.sh
 ```
 
-The diagnostics export writes redacted aggregate state under `dist/diagnostics/`: app version, bundle id, gateway port/health, provider/model counts, usage aggregates, and recent error types. It does not export provider URLs, credentials, headers, request bodies, response bodies, copied Codex auth files, or Keychain item names.
+The diagnostics export writes redacted aggregate state under `dist/diagnostics/`: app version, bundle id, gateway port/health, provider/model counts, usage aggregates, and allowlisted recent error types. Unknown labels become `other`, and a failed sensitive-content scan removes the diagnostics payload. The self-test injects private URL, Keychain, header, request/response, provider, and error-label sentinels and proves none are exported.
 
 ## Direct Replacement Check
 

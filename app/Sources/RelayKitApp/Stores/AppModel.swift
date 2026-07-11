@@ -119,7 +119,17 @@ final class AppModel: ObservableObject {
 
     func startGateway() {
         do {
-            try gateway.start(binaryPath: gatewayBinaryPath, configPath: runtimeProviderConfigPath())
+            let configPath = runtimeProviderConfigPath()
+            let configData = try Data(contentsOf: URL(fileURLWithPath: configPath))
+            let credentialHandoff = try GatewayCredentialHandoff.encode(configData: configData) { reference in
+                try KeychainCredentialStore.load(service: reference)
+            }
+            try gateway.start(
+                binaryPath: gatewayBinaryPath,
+                configPath: configPath,
+                usageLogPath: usageLogPath,
+                credentialHandoff: credentialHandoff
+            )
             gatewayStatus = "running"
             message = "Gateway started on 127.0.0.1:19777"
         } catch {
@@ -145,7 +155,7 @@ final class AppModel: ObservableObject {
             message = "Gateway health ok"
         } catch {
             gatewayStatus = gateway.isRunning ? "starting/error" : "stopped"
-            message = error.localizedDescription
+            message = gateway.isRunning ? error.localizedDescription : ProviderFormLabels.gatewayStoppedGuidance
         }
     }
 
@@ -160,7 +170,7 @@ final class AppModel: ObservableObject {
             gatewayModelHealth = response.modelHealth ?? .empty
             message = "Loaded \(models.count) model(s)"
         } catch {
-            message = error.localizedDescription
+            message = gateway.isRunning ? error.localizedDescription : ProviderFormLabels.gatewayStoppedGuidance
         }
     }
 
@@ -396,20 +406,16 @@ final class AppModel: ObservableObject {
             let json = try JSONSerialization.jsonObject(with: data)
             try ProviderConfigValidator.validate(json)
             let pretty = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-            var backupPath: String?
+            var backupCreated = false
             if FileManager.default.fileExists(atPath: providerConfigPath) {
                 let backup = providerConfigPath + ".bak." + UUID().uuidString
                 try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
-                backupPath = backup
+                backupCreated = true
             }
             try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? providerConfigText
             refreshConfiguredProviders(from: pretty)
-            if let backupPath {
-                message = "Saved provider config; backup: \(backupPath)"
-            } else {
-                message = "Saved provider config"
-            }
+            message = ProviderFormLabels.providerConfigSavedMessage(backupCreated: backupCreated)
         } catch {
             message = error.localizedDescription
         }
@@ -429,24 +435,20 @@ final class AppModel: ObservableObject {
             if draft.credentialKind == "keychain" && !keychainCredential.isEmpty {
                 try KeychainCredentialStore.save(value: keychainCredential, service: draft.credentialReference)
             }
-            var backupPath: String?
+            var backupCreated = false
             if FileManager.default.fileExists(atPath: providerConfigPath) {
                 let backup = providerConfigPath + ".bak." + UUID().uuidString
                 try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
-                backupPath = backup
+                backupCreated = true
             }
             try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
             refreshConfiguredProviders(from: pretty)
-            if let backupPath {
-                message = draft.credentialKind == "keychain" && !keychainCredential.isEmpty
-                    ? "Stored Keychain credential; added provider; backup: \(backupPath)"
-                    : "Added provider; backup: \(backupPath)"
-            } else {
-                message = draft.credentialKind == "keychain" && !keychainCredential.isEmpty
-                    ? "Stored Keychain credential; added provider"
-                    : "Added provider"
-            }
+            let confirmation = ProviderFormLabels.providerAddedMessage(
+                storedKey: draft.credentialKind == "keychain" && !keychainCredential.isEmpty,
+                backupCreated: backupCreated
+            )
+            reloadGatewayAfterProviderSave(confirmation: confirmation)
             return true
         } catch {
             message = error.localizedDescription
@@ -468,21 +470,33 @@ final class AppModel: ObservableObject {
             if draft.credentialKind == "keychain" && !keychainCredential.isEmpty {
                 try KeychainCredentialStore.save(value: keychainCredential, service: draft.credentialReference)
             }
-            var backupPath: String?
+            var backupCreated = false
             if FileManager.default.fileExists(atPath: providerConfigPath) {
                 let backup = providerConfigPath + ".bak." + UUID().uuidString
                 try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
-                backupPath = backup
+                backupCreated = true
             }
             try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
             refreshConfiguredProviders(from: pretty)
-            message = backupPath.map { "Saved provider; backup: \($0)" } ?? "Saved provider"
+            let confirmation = ProviderFormLabels.providerUpdatedMessage(backupCreated: backupCreated)
+            reloadGatewayAfterProviderSave(confirmation: confirmation)
             return true
         } catch {
             message = error.localizedDescription
             return false
         }
+    }
+
+    private func reloadGatewayAfterProviderSave(confirmation: String) {
+        guard gateway.isRunning else {
+            message = confirmation
+            return
+        }
+        restartGateway()
+        message = gateway.isRunning
+            ? "\(confirmation); gateway reloaded"
+            : "\(confirmation); gateway reload failed: open Settings and restart gateway"
     }
 
     func refreshUsageSummary() async {

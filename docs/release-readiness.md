@@ -25,7 +25,8 @@ Status summary:
 
 - local beta: ready.
 - open-source public-safe: ready.
-- pre-signed release pipeline: ready.
+- local beta packaging pipeline: ready.
+- signed beta scaffolding: present, blocked until real Apple distribution inputs exist.
 - signed beta: blocked by Apple Developer Program approval.
 - public release: not complete.
 - updater runtime: deferred until a signed and notarized artifact exists.

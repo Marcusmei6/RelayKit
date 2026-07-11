@@ -14,15 +14,32 @@ final class GatewayProcess {
         return process.processIdentifier
     }
 
-    func start(binaryPath: String, configPath: String) throws {
+    func start(
+        binaryPath: String,
+        configPath: String,
+        usageLogPath: String? = nil,
+        credentialHandoff: Data
+    ) throws {
         if isRunning {
             return
         }
-        let process = makeStartProcess(binaryPath: binaryPath, configPath: configPath)
+        let process = makeStartProcess(binaryPath: binaryPath, configPath: configPath, usageLogPath: usageLogPath)
+        let credentialPipe = Pipe()
+        process.standardInput = credentialPipe
         process.standardOutput = Pipe()
         let errors = Pipe()
         process.standardError = errors
-        try process.run()
+        do {
+            try process.run()
+            try credentialPipe.fileHandleForWriting.write(contentsOf: credentialHandoff)
+            try credentialPipe.fileHandleForWriting.close()
+        } catch {
+            try? credentialPipe.fileHandleForWriting.close()
+            if process.isRunning {
+                process.terminate()
+            }
+            throw GatewayProcessError.commandFailed("gateway credential handoff failed")
+        }
         Thread.sleep(forTimeInterval: 0.2)
         if !process.isRunning {
             let stderr = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -31,10 +48,13 @@ final class GatewayProcess {
         self.process = process
     }
 
-    func makeStartProcess(binaryPath: String, configPath: String) -> Process {
+    func makeStartProcess(binaryPath: String, configPath: String, usageLogPath: String? = nil) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath, relativeTo: appDirectory()).standardized
-        process.arguments = ["-listen", "127.0.0.1:19777", "-config", configPath]
+        process.arguments = ["-listen", "127.0.0.1:19777", "-config", configPath, "-credential-stdin"]
+        if let usageLogPath, !usageLogPath.isEmpty {
+            process.arguments?.append(contentsOf: ["-usage-log", usageLogPath])
+        }
         return process
     }
 

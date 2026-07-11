@@ -11,6 +11,8 @@ RelayKit is local-first.
 
 Provider API keys belong in the macOS Keychain. RelayKit provider JSON must store only the Keychain reference, never the real key.
 
+When the RelayKit App starts its bundled gateway, the App resolves only the referenced Keychain items and sends them once through an anonymous stdin pipe. The gateway retains those values in memory for that process lifetime. Credential values are not placed in command-line arguments, environment variables, provider JSON, usage events, diagnostics, or evidence files.
+
 ## What RelayKit Does Not Collect
 
 - No cloud telemetry.

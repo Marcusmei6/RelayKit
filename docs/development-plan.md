@@ -174,10 +174,10 @@ Minimal streaming tool-use contract:
 Status: README refreshed and agent model routes scrubbed to public defaults.
 
 - Made README install/run commands match the current local alpha.
-- Added unsigned local zip packaging with extraction and bundled-gateway verification.
+- Added macOS ad-hoc local zip packaging with extraction and bundled-gateway verification.
 - Run `docs/public-boundary-checklist.md`.
 - Scrubbed `.codex/agents/*.toml` to public model defaults.
-- Keep signing, notarization, publishing, and GitHub push out of scope until explicitly requested.
+- Keep Developer ID signing, notarization, publishing, and GitHub push out of scope until explicitly requested.
 
 ## Phase 7: P0 Menu-Bar Control Center
 
@@ -210,6 +210,21 @@ Status: public-safe contract implemented for env, Keychain, and key-file referen
 - Direct Keychain and key-file providers are probed during `/v1/models` with a bounded local timeout. Unhealthy models are omitted from the ready catalog and only redacted aggregate health counts are returned.
 - The app provider form writes source/prefix/protocol/base/catalog/model-mapping metadata and credential references through `credential_ref`; optional Keychain credential input is written only to macOS Keychain.
 - Remaining work that requires explicit selection: credential migration UI, public provider presets, and richer capability discovery/import.
+
+## Phase 7.6: Beta Dogfood Hardening
+
+Status: Stage A verified and ready for closeout; signed beta remains blocked by Apple approval.
+
+- Accept dogfood only from the current `dist/RelayKitApp-local.zip` extracted app and a normal LaunchServices lifecycle.
+- Public demo providers prove setup, Keychain, catalog, filtering, and actionable error plumbing only. Real route compatibility requires an ignored local provider input.
+- Real Desktop setup projects the official picker from the isolated account model cache, not the stale bundled fallback alone. The current contract includes GPT-5.6 variants, GPT-5.5, and GPT-5.3 Codex Spark, excludes GPT-5.2 from the picker, and still keeps a typed unsupported-model gateway error as defensive behavior.
+- Isolated Desktop route success requires fresh completed Official and provider usage, a real function call plus output, process-bound current-run screenshots, and no raw XML/`function_calls` display.
+- The GUI route sequence is GPT-5.5, GPT-5.6 Luna, provider Markdown, and provider shell/tool. GPT-5.2 is not a GUI acceptance stage.
+- Manual proof evidence must bind the current zip, app/gateway source snapshot, and tracked harness hashes and fail closed if either source layer changes while a run is active.
+- Setup-only evidence, old usage, fixed mock replies, manually post-processed evidence, and requests that appear in the development thread are not route proof.
+- Current same-zip evidence binds zip dogfood and completed isolated Desktop GUI proof to SHA-256 `10a0c25dd351c888f18f4476cc573e0f91f356ed6b7c4e4d4f7f46100cfc8b45`. The GUI run proves GPT-5.5, GPT-5.6 Luna, provider rich Markdown, and a matching provider function call/output with exit code 0; global Codex config/auth and ports `18787`/`19777` remain unchanged/free.
+- Regenerate redacted diagnostics after the final diff, then run the full verification matrix followed by independent Test and CR before committing a clean Stage A closeout.
+- Do not add signing, notarization, updater runtime, publishing, shared port `18787` takeover, global Codex config/auth mutation, or LaunchAgent control to this phase.
 
 ## Task Ownership
 

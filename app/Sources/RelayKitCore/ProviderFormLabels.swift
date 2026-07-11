@@ -46,6 +46,20 @@ public enum ProviderFormLabels {
         "Check status",
         "Disconnect",
     ]
+    public static let gatewayStoppedGuidance = "Gateway is stopped · test a provider connection or start it in Settings"
+
+    public static func providerAddedMessage(storedKey: Bool, backupCreated: Bool) -> String {
+        let base = storedKey ? "Stored Keychain credential; added provider" : "Added provider"
+        return backupCreated ? base + "; backup created" : base
+    }
+
+    public static func providerUpdatedMessage(backupCreated: Bool) -> String {
+        backupCreated ? "Saved provider; backup created" : "Saved provider"
+    }
+
+    public static func providerConfigSavedMessage(backupCreated: Bool) -> String {
+        backupCreated ? "Saved provider config; backup created" : "Saved provider config"
+    }
 
     public static func upstreamProtocol(apiFormat: String) -> String {
         apiFormat == "anthropic_messages" ? "Upstream: Anthropic" : "Upstream: OpenAI Chat"
@@ -137,11 +151,11 @@ public enum ProviderFormLabels {
         case "reachable":
             return "Reachable\(latency)"
         case "auth_failed":
-            return "Authentication failed"
+            return "Authentication failed · check API key"
         case "model_list_unavailable":
-            return "Reachable, model list unavailable\(latency)"
+            return "Model list unavailable · check models URL or model ID\(latency)"
         case "network_failed":
-            return "Network failed"
+            return "Network failed · check API base URL"
         default:
             return "Not tested"
         }

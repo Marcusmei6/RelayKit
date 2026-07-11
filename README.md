@@ -104,11 +104,15 @@ For local beta dogfood, follow `docs/beta-dogfood-checklist.md` and use:
 
 ```bash
 ./scripts/local-beta-dogfood-smoke.sh
-./scripts/codex-desktop-manual-proof.sh --setup-only
+./scripts/codex-desktop-acceptance.sh
+./scripts/codex-desktop-manual-proof-test.sh
+RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="$HOME/path/to/local-providers.json" \
+RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="public/provider-model-id" \
+  ./scripts/codex-desktop-manual-proof.sh
 ./scripts/export-diagnostics.sh
 ```
 
-The dogfood smoke runs from an extracted `dist/RelayKitApp-local.zip` app bundle and records Gatekeeper rejection as expected local-beta friction. The manual proof harness uses isolated RelayKit/Codex state under `~/Library/Application Support/RelayKit/DesktopProof/`; it must not edit global `~/.codex/config.toml` or `~/.codex/auth.json`.
+The dogfood smoke runs from an extracted `dist/RelayKitApp-local.zip` app bundle and records Gatekeeper rejection as expected local-beta friction. Public-safe acceptance proves catalog and picker plumbing only. The full manual proof harness uses isolated RelayKit/Codex state under `~/Library/Application Support/RelayKit/DesktopProof/`; it must not edit global `~/.codex/config.toml` or `~/.codex/auth.json`, and it requires fresh completed Official and real locally configured provider requests plus a real tool call.
 
 ## Signed Beta Package
 

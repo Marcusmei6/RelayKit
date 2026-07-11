@@ -48,10 +48,21 @@ public enum RelayKitPaths {
             .path
     }
 
-    public static func officialProofRoot() -> String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/RelayKit/OfficialProof")
-            .path
+    public static func officialProofRoot(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> String {
+        let relayKitRoot = homeDirectory
+            .appendingPathComponent("Library/Application Support/RelayKit", isDirectory: true)
+            .standardizedFileURL
+        if let override = environment["RELAYKIT_OFFICIAL_PROOF_ROOT"],
+           (override as NSString).isAbsolutePath {
+            let candidate = URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
+            if candidate.path.hasPrefix(relayKitRoot.path + "/") {
+                return candidate.path
+            }
+        }
+        return relayKitRoot.appendingPathComponent("OfficialProof", isDirectory: true).path
     }
 
     public static func officialCodexHomePath() -> String {

@@ -12,9 +12,12 @@ assignees: ""
 ## Environment
 
 - RelayKit version:
+- Local zip SHA-256, if known:
 - macOS version:
+- Codex Desktop version, if involved:
 - Package: local ad-hoc beta / signed beta
 - Diagnostics bundle attached: yes / no
+- Affected area: launch / Connect / provider setup / Keychain / gateway / Usage / isolated Codex / diagnostics
 
 ## Steps To Reproduce
 
@@ -27,6 +30,13 @@ assignees: ""
 
 ## Actual Behavior
 
+
+## Redacted Runtime Result
+
+- Test connection status, if involved:
+- Public model id, if safe to share:
+- HTTP status or redacted error type:
+- Did a fresh Usage event appear: yes / no / not applicable
 
 ## Redaction Checklist
 

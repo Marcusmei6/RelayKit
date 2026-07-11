@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -31,7 +32,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "summarize-usage" {
 		return summarizeUsage(args[1:], stdout, stderr)
 	}
-	if err := runServer(args, stderr); err != nil {
+	if err := runServer(args, os.Stdin, stderr); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
@@ -164,17 +165,65 @@ func activateCodexConfig(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runServer(args []string, stderr io.Writer) error {
+const maximumCredentialHandoffBytes = 1 << 20
+
+type credentialHandoff struct {
+	Version     int               `json:"version"`
+	Credentials map[string]string `json:"credentials"`
+}
+
+func readCredentialHandoff(reader io.Reader) (map[string]string, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, maximumCredentialHandoffBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read credential handoff failed")
+	}
+	if len(body) > maximumCredentialHandoffBytes {
+		return nil, fmt.Errorf("credential handoff exceeds size limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var payload credentialHandoff
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("invalid credential handoff")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("invalid credential handoff")
+	}
+	if payload.Version != 1 || payload.Credentials == nil {
+		return nil, fmt.Errorf("unsupported credential handoff")
+	}
+	credentials := make(map[string]string, len(payload.Credentials))
+	for reference, value := range payload.Credentials {
+		if reference == "" || value == "" {
+			return nil, fmt.Errorf("invalid credential handoff entry")
+		}
+		credentials[reference] = value
+	}
+	return credentials, nil
+}
+
+func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", "127.0.0.1:19777", "loopback listen address")
 	configPath := fs.String("config", "../examples/providers.example.json", "provider profile JSON path")
 	usageLogPath := fs.String("usage-log", defaultUsageLogPath(), "local usage JSONL path")
+	credentialStdin := fs.Bool("credential-stdin", false, "read App-provided credentials from standard input")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	handler, err := server.NewWithUsageLog(*configPath, *usageLogPath)
+	var handler http.Handler
+	var err error
+	if *credentialStdin {
+		credentials, readErr := readCredentialHandoff(stdin)
+		if readErr != nil {
+			return readErr
+		}
+		handler, err = server.NewWithUsageLogAndCredentials(*configPath, *usageLogPath, credentials)
+	} else {
+		handler, err = server.NewWithUsageLog(*configPath, *usageLogPath)
+	}
 	if err != nil {
 		return fmt.Errorf("gateway config failed: %w", err)
 	}

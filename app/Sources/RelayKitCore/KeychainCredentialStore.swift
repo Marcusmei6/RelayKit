@@ -50,6 +50,17 @@ public enum KeychainCredentialStore {
         throw ProviderConfigError.invalid("Keychain credential unavailable.")
     }
 
+    public static func delete(service: String) throws {
+        let trimmedService = service.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedService.isEmpty else {
+            throw ProviderConfigError.invalid("Keychain item name is required.")
+        }
+        let status = SecItemDelete(baseQuery(service: trimmedService) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ProviderConfigError.invalid("Keychain delete failed: \(status)")
+        }
+    }
+
     private static func lookup(query: [String: Any]) -> String? {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)

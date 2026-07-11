@@ -70,7 +70,7 @@ From the repository root:
 ./script/package_release.sh --verify
 ```
 
-This writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, confirms the extracted app contains `Contents/MacOS/relay` plus the bundled public demo provider and Codex config examples, opens the extracted app, and verifies the extracted bundled gateway. It does not sign, notarize, publish, or write a real Codex config.
+This writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, confirms the extracted app contains `Contents/MacOS/relay` plus the bundled public demo provider and Codex config examples, verifies the extracted bundled gateway, and keeps the bundle macOS ad-hoc signed for local beta integrity only. It does not Developer ID sign, notarize, publish, or write a real Codex config.
 
 ## Durable Local Helper
 
@@ -91,6 +91,6 @@ The script writes only `~/Library/LaunchAgents/dev.relaykit.gateway.plist`, requ
 
 ## Not In This Slice
 
-- Keychain credential storage;
-- executable Keychain/key-file credential resolution;
 - signing, notarization, or public distribution.
+
+Provider keys are stored in macOS Keychain. For App-owned gateway launches, the App resolves referenced items with Security.framework and transfers a versioned credential map once over an anonymous stdin pipe; provider JSON still stores references only. Standalone gateway launches retain env, key-file, and local Keychain reference resolution.

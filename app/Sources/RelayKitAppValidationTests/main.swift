@@ -400,6 +400,22 @@ func expectProviderConfigPathRecoversStaleTemporaryPreference() {
     }
 }
 
+func expectOfficialProofRootOverride() {
+    let home = URL(fileURLWithPath: "/Users/relaykit-proof-user", isDirectory: true)
+    let defaultRoot = "/Users/relaykit-proof-user/Library/Application Support/RelayKit/OfficialProof"
+    let isolatedRoot = "/Users/relaykit-proof-user/Library/Application Support/RelayKit/DesktopProof/official-proof"
+    let environment = ["RELAYKIT_OFFICIAL_PROOF_ROOT": isolatedRoot]
+    if RelayKitPaths.officialProofRoot(environment: environment, homeDirectory: home) != isolatedRoot {
+        fatalError("manual proof official auth root override was not honored")
+    }
+    if RelayKitPaths.officialProofRoot(environment: ["RELAYKIT_OFFICIAL_PROOF_ROOT": "/tmp/outside-relaykit"], homeDirectory: home) != defaultRoot {
+        fatalError("official auth root override escaped RelayKit App Support")
+    }
+    if RelayKitPaths.officialProofRoot(environment: ["RELAYKIT_OFFICIAL_PROOF_ROOT": "relative/path"], homeDirectory: home) != defaultRoot {
+        fatalError("official auth root override accepted a relative path")
+    }
+}
+
 func expectProviderFormPresentationLabels() {
     if ProviderFormLabels.codexRoute != "Codex route: Responses" {
         fatalError("Codex route label must distinguish client route")
@@ -466,6 +482,24 @@ func expectProviderFormPresentationLabels() {
     }
 }
 
+func expectRedactedProviderSaveAndGatewayGuidance() {
+    if ProviderFormLabels.gatewayStoppedGuidance != "Gateway is stopped · test a provider connection or start it in Settings" {
+        fatalError("stopped gateway guidance regressed")
+    }
+    let added = ProviderFormLabels.providerAddedMessage(storedKey: true, backupCreated: true)
+    if added != "Stored Keychain credential; added provider; backup created" || added.contains("/") {
+        fatalError("provider add confirmation must not expose a backup path: \(added)")
+    }
+    let updated = ProviderFormLabels.providerUpdatedMessage(backupCreated: true)
+    if updated != "Saved provider; backup created" || updated.contains("/") {
+        fatalError("provider update confirmation must not expose a backup path: \(updated)")
+    }
+    let config = ProviderFormLabels.providerConfigSavedMessage(backupCreated: true)
+    if config != "Saved provider config; backup created" || config.contains("/") {
+        fatalError("provider config confirmation must not expose a backup path: \(config)")
+    }
+}
+
 func expectOfficialAuthURLSanitizer() {
     let samples = [
         "\u{001B}[0mhttps://auth.openai.com/codex/device\u{001B}[0m",
@@ -496,14 +530,14 @@ func expectProviderConnectionLabels() {
     if ProviderFormLabels.connectionStatusLabel(kind: "connected", listedCount: 5, reachableCount: 3, unavailableCount: 2, latencyMS: 123) != "List reachable · 5 listed · 3 reachable · 2 unavailable · 123 ms" {
         fatalError("connected connection label regressed")
     }
-    if ProviderFormLabels.connectionStatusLabel(kind: "auth_failed", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: nil) != "Authentication failed" {
-        fatalError("auth failed label regressed")
+    if ProviderFormLabels.connectionStatusLabel(kind: "auth_failed", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: nil) != "Authentication failed · check API key" {
+        fatalError("auth failed label must tell the user what to fix")
     }
-    if ProviderFormLabels.connectionStatusLabel(kind: "model_list_unavailable", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: 42) != "Reachable, model list unavailable · 42 ms" {
-        fatalError("model list unavailable label regressed")
+    if ProviderFormLabels.connectionStatusLabel(kind: "model_list_unavailable", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: 42) != "Model list unavailable · check models URL or model ID · 42 ms" {
+        fatalError("model list unavailable label must tell the user what to fix")
     }
-    if ProviderFormLabels.connectionStatusLabel(kind: "network_failed", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: nil) != "Network failed" {
-        fatalError("network failed label regressed")
+    if ProviderFormLabels.connectionStatusLabel(kind: "network_failed", listedCount: 0, reachableCount: 0, unavailableCount: 0, latencyMS: nil) != "Network failed · check API base URL" {
+        fatalError("network failed label must tell the user what to fix")
     }
 }
 
@@ -635,6 +669,12 @@ func expectKeychainCredentialStore() throws {
     if value != "fixture-keychain-value" {
         fatalError("Keychain credential store did not load expected fixture value")
     }
+    try KeychainCredentialStore.delete(service: service)
+    do {
+        _ = try KeychainCredentialStore.load(service: service)
+        fatalError("deleted Keychain credential remained readable")
+    } catch ProviderConfigError.invalid {
+    }
     let legacyService = "relaykit.validation.legacy.\(UUID().uuidString)"
     let legacyQuery: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
@@ -655,6 +695,40 @@ func expectKeychainCredentialStore() throws {
     }
 }
 
+func expectGatewayCredentialHandoff() throws {
+    let config = Data(#"""
+    {
+      "providers": [
+        {"credential_ref":{"kind":"keychain","value":"relaykit.provider.one"}},
+        {"credential_ref":{"kind":"env","value":"RELAYKIT_ENV_KEY"}},
+        {"credential_ref":{"kind":"keychain","value":"relaykit.provider.one"}},
+        {"credential_ref":{"kind":"keychain","value":"relaykit.provider.missing"}}
+      ]
+    }
+    """#.utf8)
+    var loadedReferences: [String] = []
+    let handoff = try GatewayCredentialHandoff.encode(configData: config) { reference in
+        loadedReferences.append(reference)
+        if reference == "relaykit.provider.missing" {
+            throw ProviderConfigError.invalid("missing fixture")
+        }
+        return "fixture-value"
+    }
+    let object = try JSONSerialization.jsonObject(with: handoff)
+    guard let root = object as? [String: Any],
+          root["version"] as? Int == 1,
+          let credentials = root["credentials"] as? [String: String],
+          credentials == ["relaykit.provider.one": "fixture-value"] else {
+        fatalError("gateway credential handoff payload is incorrect")
+    }
+    if loadedReferences != ["relaykit.provider.missing", "relaykit.provider.one"] {
+        fatalError("gateway credential handoff must load each Keychain reference once in stable order: \(loadedReferences)")
+    }
+    if String(data: handoff, encoding: .utf8)?.contains("RELAYKIT_ENV_KEY") == true {
+        fatalError("gateway credential handoff must not include non-Keychain references")
+    }
+}
+
 try expectValid(validConfig)
 try expectProviderDraftWriter()
 try expectProviderDraftWriterWithPrototypeMetadata()
@@ -666,7 +740,9 @@ try expectCredentialRefContract()
 try expectCapabilityContract()
 expectAppSettingsPersistence()
 expectProviderConfigPathRecoversStaleTemporaryPreference()
+expectOfficialProofRootOverride()
 expectProviderFormPresentationLabels()
+expectRedactedProviderSaveAndGatewayGuidance()
 expectOfficialChannelPresentationLabels()
 expectOfficialAuthURLSanitizer()
 expectOfficialStatusFormatter()
@@ -675,6 +751,7 @@ expectProviderHealthLabels()
 expectProviderConnectionClassification()
 expectUsageAnalytics()
 try expectKeychainCredentialStore()
+try expectGatewayCredentialHandoff()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }

@@ -27,9 +27,11 @@ import (
 )
 
 type Server struct {
-	config       *config.Config
-	client       *http.Client
-	usageLogPath string
+	config                   *config.Config
+	client                   *http.Client
+	usageLogPath             string
+	keychainCredentials      map[string]string
+	allowKeychainCLIFallback bool
 }
 
 var runSecurityFindGenericPassword = func(args ...string) ([]byte, error) {
@@ -56,7 +58,23 @@ func New(configPath string) (http.Handler, error) {
 }
 
 func NewWithUsageLog(configPath, usageLogPath string) (http.Handler, error) {
-	s := &Server{client: http.DefaultClient}
+	return newServer(configPath, usageLogPath, nil, true)
+}
+
+func NewWithUsageLogAndCredentials(configPath, usageLogPath string, credentials map[string]string) (http.Handler, error) {
+	return newServer(configPath, usageLogPath, credentials, false)
+}
+
+func newServer(configPath, usageLogPath string, credentials map[string]string, allowKeychainCLIFallback bool) (http.Handler, error) {
+	credentialCopy := make(map[string]string, len(credentials))
+	for reference, value := range credentials {
+		credentialCopy[reference] = value
+	}
+	s := &Server{
+		client:                   http.DefaultClient,
+		keychainCredentials:      credentialCopy,
+		allowKeychainCLIFallback: allowKeychainCLIFallback,
+	}
 	s.usageLogPath = usageLogPath
 	if configPath != "" {
 		cfg, err := config.Load(configPath)
@@ -86,9 +104,20 @@ func NewWithUsageLog(configPath, usageLogPath string) (http.Handler, error) {
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"service": "relaykit",
-		"status":  "ok",
+	configuredModelCount := 0
+	for _, provider := range s.config.Providers {
+		configuredModelCount += len(provider.Models)
+	}
+	officialModelCount := 0
+	if s.config.OfficialPassthrough != nil {
+		officialModelCount = len(s.config.OfficialPassthrough.Models)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service":                "relaykit",
+		"status":                 "ok",
+		"provider_count":         len(s.config.Providers),
+		"configured_model_count": configuredModelCount,
+		"official_model_count":   officialModelCount,
 	})
 }
 
@@ -215,7 +244,7 @@ func (s *Server) probeModel(provider config.ProviderProfile, model config.Model)
 	if err != nil {
 		return false, "network failed"
 	}
-	if err := applyProviderAuth(req, provider); err != nil {
+	if err := s.applyProviderAuth(req, provider); err != nil {
 		return false, "auth failed"
 	}
 	resp, err := s.client.Do(req)
@@ -252,7 +281,7 @@ func (s *Server) probeModel(provider config.ProviderProfile, model config.Model)
 			return false, "network failed"
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		if err := applyProviderAuth(httpReq, provider); err != nil {
+		if err := s.applyProviderAuth(httpReq, provider); err != nil {
 			return false, "auth failed"
 		}
 		resp, err = s.client.Do(httpReq)
@@ -399,6 +428,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamReq := upstreamRequest(provider.APIFormat, upstreamModelName(model), messages, req.Stream)
+	addProviderTools(upstreamReq, provider.APIFormat, req.Tools)
 	payload, err := json.Marshal(upstreamReq)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("server_error", err.Error()))
@@ -416,7 +446,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if err := applyProviderAuth(httpReq, provider); err != nil {
+	if err := s.applyProviderAuth(httpReq, provider); err != nil {
 		writeJSON(w, http.StatusBadGateway, errorBody("upstream_auth_error", err.Error()))
 		return
 	}
@@ -718,8 +748,9 @@ func (s *Server) completeResponse(ctx context.Context, req responsesRequest, mes
 		if officialUsesCodexHome(*s.config.OfficialPassthrough) {
 			result, err := s.completeOfficialWithCodex(ctx, *s.config.OfficialPassthrough, model, messages)
 			if err != nil {
-				s.recordFailedUsage("openai", req.Model, "auth_required", http.StatusUnauthorized, start, transport)
-				return nil, http.StatusUnauthorized, errorBody("auth_required", "RelayKit official Codex login is not connected")
+				status, errorType, message := officialCodexFailureDetails(err)
+				s.recordFailedUsage("openai", req.Model, errorType, status, start, transport)
+				return nil, status, errorBody(errorType, message)
 			}
 			s.recordCompletedUsage("openai", req.Model, responseID(""), "completed", false, nil, start, transport)
 			return result, http.StatusOK, nil
@@ -741,7 +772,7 @@ func (s *Server) completeResponse(ctx context.Context, req responsesRequest, mes
 			return nil, http.StatusInternalServerError, errorBody("server_error", err.Error())
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		if err := applyOfficialAuth(httpReq, *s.config.OfficialPassthrough); err != nil {
+		if err := s.applyOfficialAuth(httpReq, *s.config.OfficialPassthrough); err != nil {
 			s.recordFailedUsage("openai", req.Model, "auth_required", http.StatusUnauthorized, start, transport)
 			return nil, http.StatusUnauthorized, errorBody("auth_required", "RelayKit official credential is not configured")
 		}
@@ -771,6 +802,7 @@ func (s *Server) completeResponse(ctx context.Context, req responsesRequest, mes
 		return nil, http.StatusBadRequest, errorBody("invalid_request_error", "unknown model")
 	}
 	upstreamReq := upstreamRequest(provider.APIFormat, upstreamModelName(model), messages, false)
+	addProviderTools(upstreamReq, provider.APIFormat, req.Tools)
 	payload, err := json.Marshal(upstreamReq)
 	if err != nil {
 		s.recordFailedUsage(provider.ID, req.Model, "server_error", http.StatusInternalServerError, start, transport)
@@ -787,7 +819,7 @@ func (s *Server) completeResponse(ctx context.Context, req responsesRequest, mes
 		return nil, http.StatusInternalServerError, errorBody("server_error", err.Error())
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if err := applyProviderAuth(httpReq, provider); err != nil {
+	if err := s.applyProviderAuth(httpReq, provider); err != nil {
 		s.recordFailedUsage(provider.ID, req.Model, "upstream_auth_error", http.StatusBadGateway, start, transport)
 		return nil, http.StatusBadGateway, errorBody("upstream_auth_error", err.Error())
 	}
@@ -825,8 +857,9 @@ func (s *Server) officialResponses(w http.ResponseWriter, r *http.Request, req r
 	if officialUsesCodexHome(*s.config.OfficialPassthrough) {
 		result, err := s.completeOfficialWithCodex(r.Context(), *s.config.OfficialPassthrough, model, messages)
 		if err != nil {
-			s.recordFailedUsage("openai", req.Model, "auth_required", http.StatusUnauthorized, start, "responses_http")
-			writeJSON(w, http.StatusUnauthorized, errorBody("auth_required", "RelayKit official Codex login is not connected"))
+			status, errorType, message := officialCodexFailureDetails(err)
+			s.recordFailedUsage("openai", req.Model, errorType, status, start, "responses_http")
+			writeJSON(w, status, errorBody(errorType, message))
 			return
 		}
 		usage, _ := result["usage"].(map[string]any)
@@ -860,7 +893,7 @@ func (s *Server) officialResponses(w http.ResponseWriter, r *http.Request, req r
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if err := applyOfficialAuth(httpReq, *s.config.OfficialPassthrough); err != nil {
+	if err := s.applyOfficialAuth(httpReq, *s.config.OfficialPassthrough); err != nil {
 		s.recordFailedUsage("openai", req.Model, "auth_required", http.StatusUnauthorized, start, "responses_http")
 		writeJSON(w, http.StatusUnauthorized, errorBody("auth_required", "RelayKit official credential is not configured"))
 		return
@@ -1098,6 +1131,30 @@ func upstreamRequest(apiFormat, model string, messages []chatMessage, stream boo
 	}
 }
 
+func addProviderTools(request map[string]any, apiFormat string, tools []responsesTool) {
+	if apiFormat != config.APIFormatAnthropicMessages {
+		return
+	}
+	anthropicTools := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Type != "function" || tool.Name == "" {
+			continue
+		}
+		inputSchema := tool.Parameters
+		if inputSchema == nil {
+			inputSchema = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		anthropicTools = append(anthropicTools, map[string]any{
+			"name":         tool.Name,
+			"description":  tool.Description,
+			"input_schema": inputSchema,
+		})
+	}
+	if len(anthropicTools) > 0 {
+		request["tools"] = anthropicTools
+	}
+}
+
 func probeUpstreamRequest(apiFormat, model string) map[string]any {
 	messages := []chatMessage{{Role: "user", Content: "Return a tiny reachability confirmation."}}
 	req := upstreamRequest(apiFormat, model, messages, false)
@@ -1126,7 +1183,7 @@ func providerAuthEnv(provider config.ProviderProfile) string {
 	return ""
 }
 
-func applyProviderAuth(req *http.Request, provider config.ProviderProfile) error {
+func (s *Server) applyProviderAuth(req *http.Request, provider config.ProviderProfile) error {
 	if authEnv := providerAuthEnv(provider); authEnv != "" {
 		if token := os.Getenv(authEnv); token != "" {
 			setAuthHeader(req, provider, token)
@@ -1137,7 +1194,7 @@ func applyProviderAuth(req *http.Request, provider config.ProviderProfile) error
 		return nil
 	}
 	if provider.CredentialRef.Kind == config.CredentialKindKeychain {
-		token, err := lookupKeychainCredential(provider.CredentialRef.Value)
+		token, err := s.keychainCredential(provider.CredentialRef.Value)
 		if err != nil {
 			return err
 		}
@@ -1165,11 +1222,11 @@ func applyProviderAuth(req *http.Request, provider config.ProviderProfile) error
 	return nil
 }
 
-func applyOfficialAuth(req *http.Request, official config.OfficialPassthrough) error {
+func (s *Server) applyOfficialAuth(req *http.Request, official config.OfficialPassthrough) error {
 	if official.CredentialRef == nil {
 		return fmt.Errorf("official credential is not configured")
 	}
-	token, err := credentialRefToken(*official.CredentialRef)
+	token, err := s.credentialRefToken(*official.CredentialRef)
 	if err != nil {
 		return err
 	}
@@ -1179,6 +1236,62 @@ func applyOfficialAuth(req *http.Request, official config.OfficialPassthrough) e
 
 func officialUsesCodexHome(official config.OfficialPassthrough) bool {
 	return official.CredentialRef != nil && official.CredentialRef.Kind == config.CredentialKindCodexHome
+}
+
+type officialCodexFailure struct {
+	status    int
+	errorType string
+	message   string
+}
+
+func (failure *officialCodexFailure) Error() string {
+	return failure.message
+}
+
+func classifyOfficialCodexFailure(stderr string, contextError error) error {
+	if contextError == context.DeadlineExceeded {
+		return &officialCodexFailure{
+			status:    http.StatusGatewayTimeout,
+			errorType: "official_timeout",
+			message:   "RelayKit official Codex request timed out",
+		}
+	}
+	normalized := strings.ToLower(stderr)
+	if strings.Contains(normalized, "not supported when using codex with a chatgpt account") {
+		return &officialCodexFailure{
+			status:    http.StatusBadRequest,
+			errorType: "model_not_supported",
+			message:   "Official model is not available for this Codex account",
+		}
+	}
+	if strings.Contains(normalized, "unknown model") {
+		return &officialCodexFailure{
+			status:    http.StatusBadRequest,
+			errorType: "unknown_model",
+			message:   "Official model is not recognized by the current Codex installation",
+		}
+	}
+	for _, marker := range []string{"not logged in", "login required", "unauthorized", "authentication failed", "refresh token"} {
+		if strings.Contains(normalized, marker) {
+			return &officialCodexFailure{
+				status:    http.StatusUnauthorized,
+				errorType: "auth_required",
+				message:   "RelayKit official Codex login is not connected",
+			}
+		}
+	}
+	return &officialCodexFailure{
+		status:    http.StatusBadGateway,
+		errorType: "official_request_failed",
+		message:   "RelayKit official Codex request failed",
+	}
+}
+
+func officialCodexFailureDetails(err error) (int, string, string) {
+	if failure, ok := err.(*officialCodexFailure); ok {
+		return failure.status, failure.errorType, failure.message
+	}
+	return http.StatusBadGateway, "official_request_failed", "RelayKit official Codex request failed"
 }
 
 func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, messages []chatMessage) (map[string]any, error) {
@@ -1210,9 +1323,10 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 	cmd.Env = append(os.Environ(), "HOME="+isolatedHome, "CODEX_HOME="+codexHome)
 	cmd.Stdin = strings.NewReader(codexPrompt(messages))
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, err
+		return nil, classifyOfficialCodexFailure(stderr.String(), cmdCtx.Err())
 	}
 	body, err := os.ReadFile(outPath)
 	if err != nil {
@@ -1243,7 +1357,7 @@ func codexPrompt(messages []chatMessage) string {
 	return b.String()
 }
 
-func credentialRefToken(ref config.CredentialRef) (string, error) {
+func (s *Server) credentialRefToken(ref config.CredentialRef) (string, error) {
 	switch ref.Kind {
 	case config.CredentialKindEnv:
 		token := strings.TrimSpace(os.Getenv(ref.Value))
@@ -1252,7 +1366,7 @@ func credentialRefToken(ref config.CredentialRef) (string, error) {
 		}
 		return token, nil
 	case config.CredentialKindKeychain:
-		return lookupKeychainCredential(ref.Value)
+		return s.keychainCredential(ref.Value)
 	case config.CredentialKindKeyFile:
 		path := strings.TrimPrefix(ref.Value, "~/")
 		if path != ref.Value {
@@ -1272,6 +1386,16 @@ func credentialRefToken(ref config.CredentialRef) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported credential kind")
 	}
+}
+
+func (s *Server) keychainCredential(reference string) (string, error) {
+	if token := s.keychainCredentials[reference]; token != "" {
+		return token, nil
+	}
+	if !s.allowKeychainCLIFallback {
+		return "", fmt.Errorf("keychain credential unavailable from RelayKit App")
+	}
+	return lookupKeychainCredential(reference)
 }
 
 func setAuthHeader(req *http.Request, provider config.ProviderProfile, token string) {
@@ -1340,6 +1464,14 @@ type responsesRequest struct {
 	Model  string          `json:"model"`
 	Input  json.RawMessage `json:"input"`
 	Stream bool            `json:"stream"`
+	Tools  []responsesTool `json:"tools,omitempty"`
+}
+
+type responsesTool struct {
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
 type chatMessage struct {

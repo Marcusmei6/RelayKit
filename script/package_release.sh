@@ -52,7 +52,7 @@ verify_package() {
     exit 1
   fi
   "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" --verify-bundled-gateway
-  echo "RelayKit local release package verified: ${artifact}"
+  echo "RelayKit local beta package verified: ${artifact}"
 }
 
 case "${MODE}" in

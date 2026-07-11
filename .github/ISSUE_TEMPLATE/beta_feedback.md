@@ -18,9 +18,28 @@ assignees: ""
 ## Environment
 
 - RelayKit version:
+- Local zip SHA-256, if known:
 - macOS version:
+- Codex Desktop version:
 - Package: local ad-hoc beta / signed beta
 - Diagnostics bundle attached: yes / no
+
+## Provider Setup
+
+- Provider saved: yes / no
+- Saved Keychain state remained after quitting and reopening RelayKit: yes / no
+- Test connection result:
+- Detect models result:
+- Use reachable models result:
+
+## Routing And Display
+
+- Official request completed: yes / no / not tested
+- Provider request completed: yes / no / not tested
+- Markdown heading, list, table, code block, and bold text rendered correctly: yes / no / not tested
+- Shell/tool block showed a matching successful output: yes / no / not tested
+- Raw XML, `function_calls`, or unparsed tool JSON appeared: yes / no
+- RelayKit Usage showed a fresh event: yes / no
 
 ## Redaction Checklist
 

@@ -21,7 +21,8 @@ If macOS blocks the app, this is expected for the local ad-hoc beta. The signed 
 6. Enter a model id.
 7. Click `Test connection`.
 8. Click `Detect models` if the provider exposes a model-list endpoint.
-9. Save.
+9. Choose `Use reachable models` so failed models do not enter the usable list.
+10. Save, quit RelayKit, reopen it, and confirm the provider plus masked saved-Keychain state remain visible.
 
 Do not send the provider base URL or API key in feedback.
 
@@ -35,7 +36,8 @@ Do not send the provider base URL or API key in feedback.
 6. Open Advanced only if needed.
 7. Set `Upstream protocol` to `Anthropic Messages`.
 8. Use `Custom models URL`, `Custom auth header`, or `Upstream model override` only when your provider requires it.
-9. Test, detect models, and save.
+9. Test, detect models, choose reachable models, and save.
+10. Quit and reopen RelayKit to confirm the provider and masked saved-Keychain state persist.
 
 ## Verify Locally
 
@@ -50,12 +52,19 @@ Do not send the provider base URL or API key in feedback.
 4. Run the manual proof harness and keep its terminal open:
 
    ```bash
-   ./scripts/codex-desktop-manual-proof.sh
+   RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="$HOME/path/to/local-providers.json" \
+   RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="public/provider-model-id" \
+     ./scripts/codex-desktop-manual-proof.sh
    ```
 
-5. In the isolated Codex Desktop window, confirm the model picker lists official and demo provider models.
-6. Send one tiny request and one tool/command request.
-7. Open RelayKit Usage and confirm a fresh local usage row appears.
+   The local provider config must live outside tracked repository files, contain the selected public model id, and store only a Keychain credential reference. Never put an API key or token in that JSON file.
+
+5. In the isolated Codex Desktop window, confirm the model picker lists current official and locally configured provider models. Current account projection should include GPT-5.3 Codex Spark and exclude stale GPT-5.2.
+6. Complete the harness prompts for GPT-5.5, GPT-5.6 Luna, provider Markdown, and provider shell/tool output.
+7. Confirm Markdown and tool blocks render normally with no raw XML, `function_calls`, or unparsed tool JSON.
+8. Open RelayKit Usage and confirm fresh completed events appear for both official and provider routes.
+
+The public demo/loopback provider is only a catalog, picker, Keychain, and form-plumbing fixture. It cannot prove real model output or tool compatibility. Real route proof must use a provider configured locally outside git; RelayKit evidence records only public model ids and redacted status/count fields.
 
 Keep screenshots redacted. Hide provider URLs, keys, account names, local usernames, and private model names if needed.
 

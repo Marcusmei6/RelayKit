@@ -182,48 +182,53 @@ import Foundation
 
 let args = CommandLine.arguments
 guard args.count == 3, let pid = pid_t(args[1]) else { exit(2) }
-let needle = args[2].lowercased()
+let needle = args[2]
 let app = AXUIElementCreateApplication(pid)
 
-func text(_ element: AXUIElement, _ attribute: String) -> String {
+func attr(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
     var value: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-          let value else { return "" }
-    return String(describing: value)
+    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+    return value
 }
 
-func press(_ element: AXUIElement) -> Bool {
+func text(_ element: AXUIElement, _ attribute: String) -> String {
+    (attr(element, attribute) as? String) ?? ""
+}
+
+func children(_ element: AXUIElement) -> [AXUIElement] {
+    (attr(element, kAXChildrenAttribute as String) as? [AXUIElement]) ?? []
+}
+
+func exactIdentity(_ element: AXUIElement) -> Bool {
+    [
+        text(element, kAXTitleAttribute),
+        text(element, kAXDescriptionAttribute),
+        text(element, "AXIdentifier")
+    ].contains(needle)
+}
+
+func pressDescendant(_ element: AXUIElement, depth: Int = 0) -> Bool {
+    if depth > 8 { return false }
     var actionsRef: CFArray?
-    if AXUIElementCopyActionNames(element, &actionsRef) == .success,
+    let role = text(element, kAXRoleAttribute)
+    if (role == kAXButtonRole as String || role == kAXRadioButtonRole as String),
+       AXUIElementCopyActionNames(element, &actionsRef) == .success,
        let actions = actionsRef as? [String],
        actions.contains(kAXPressAction) {
         return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
     }
-    var parent: CFTypeRef?
-    if AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
-       let parent {
-        return press(parent as! AXUIElement)
+    for child in children(element) where pressDescendant(child, depth: depth + 1) {
+        return true
     }
     return false
 }
 
 func walk(_ element: AXUIElement, _ depth: Int = 0) -> Bool {
     if depth > 12 { return false }
-    let haystack = [
-        text(element, kAXTitleAttribute),
-        text(element, kAXDescriptionAttribute),
-        text(element, kAXValueAttribute),
-        text(element, "AXIdentifier")
-    ].joined(separator: " ").lowercased()
-    if haystack.contains(needle), press(element) {
+    if exactIdentity(element), pressDescendant(element) {
         return true
     }
-    var children: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
-          let elements = children as? [AXUIElement] else {
-        return false
-    }
-    for child in elements {
+    for child in children(element) {
         if walk(child, depth + 1) { return true }
     }
     return false
@@ -242,7 +247,7 @@ import Foundation
 
 let args = CommandLine.arguments
 guard args.count == 3, let pid = pid_t(args[1]) else { exit(2) }
-let needle = args[2].lowercased()
+let needle = args[2]
 let app = AXUIElementCreateApplication(pid)
 
 func attr(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
@@ -267,34 +272,40 @@ func canPress(_ element: AXUIElement) -> Bool {
     return actions.contains(kAXPressAction)
 }
 
-func buttonAncestor(_ element: AXUIElement) -> AXUIElement {
-    var current = element
-    for _ in 0..<6 {
-        if text(current, kAXRoleAttribute).lowercased().contains("button") {
-            return current
-        }
-        guard let parent = attr(current, kAXParentAttribute as String) else { return current }
-        current = parent as! AXUIElement
+func children(_ element: AXUIElement) -> [AXUIElement] {
+    (attr(element, kAXChildrenAttribute as String) as? [AXUIElement]) ?? []
+}
+
+func exactIdentity(_ element: AXUIElement) -> Bool {
+    [
+        text(element, kAXTitleAttribute),
+        text(element, kAXDescriptionAttribute),
+        text(element, "AXIdentifier")
+    ].contains(needle)
+}
+
+func buttonDescendant(_ element: AXUIElement, depth: Int = 0) -> AXUIElement? {
+    if depth > 8 { return nil }
+    let role = text(element, kAXRoleAttribute)
+    if role == kAXButtonRole as String || role == kAXRadioButtonRole as String {
+        return element
     }
-    return current
+    for child in children(element) {
+        if let button = buttonDescendant(child, depth: depth + 1) {
+            return button
+        }
+    }
+    return nil
 }
 
 func walk(_ element: AXUIElement, _ depth: Int = 0) -> Int32? {
     if depth > 12 { return nil }
-    let haystack = [
-        text(element, kAXTitleAttribute),
-        text(element, kAXDescriptionAttribute),
-        text(element, kAXValueAttribute),
-        text(element, "AXIdentifier")
-    ].joined(separator: " ").lowercased()
-    if haystack.contains(needle) {
-        let button = buttonAncestor(element)
+    if exactIdentity(element), let button = buttonDescendant(element) {
         if enabled(button) == false { return 0 }
         if !canPress(button) { return 0 }
         return 1
     }
-    guard let children = attr(element, kAXChildrenAttribute) as? [AXUIElement] else { return nil }
-    for child in children {
+    for child in children(element) {
         if let result = walk(child, depth + 1) { return result }
     }
     return nil
@@ -313,33 +324,49 @@ import Foundation
 
 let args = CommandLine.arguments
 guard args.count == 3, let pid = pid_t(args[1]) else { exit(2) }
-let needle = args[2].lowercased()
+let needle = args[2]
 let app = AXUIElementCreateApplication(pid)
 
-func text(_ element: AXUIElement, _ attribute: String) -> String {
+func attr(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
     var value: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-          let value else { return "" }
-    return String(describing: value)
+    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+    return value
+}
+
+func text(_ element: AXUIElement, _ attribute: String) -> String {
+    (attr(element, attribute) as? String) ?? ""
+}
+
+func children(_ element: AXUIElement) -> [AXUIElement] {
+    (attr(element, kAXChildrenAttribute as String) as? [AXUIElement]) ?? []
+}
+
+func exactIdentity(_ element: AXUIElement) -> Bool {
+    [
+        text(element, kAXTitleAttribute),
+        text(element, kAXDescriptionAttribute),
+        text(element, "AXIdentifier")
+    ].contains(needle)
+}
+
+func focusTextFieldDescendant(_ element: AXUIElement, depth: Int = 0) -> Bool {
+    if depth > 8 { return false }
+    let role = text(element, kAXRoleAttribute)
+    if role == kAXTextFieldRole as String || role == "AXSecureTextField" {
+        return AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    }
+    for child in children(element) where focusTextFieldDescendant(child, depth: depth + 1) {
+        return true
+    }
+    return false
 }
 
 func walk(_ element: AXUIElement, _ depth: Int = 0) -> Bool {
     if depth > 12 { return false }
-    let haystack = [
-        text(element, kAXTitleAttribute),
-        text(element, kAXDescriptionAttribute),
-        text(element, kAXValueAttribute),
-        text(element, "AXIdentifier")
-    ].joined(separator: " ").lowercased()
-    if haystack.contains(needle) {
-        return AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    if exactIdentity(element) {
+        return focusTextFieldDescendant(element)
     }
-    var children: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
-          let elements = children as? [AXUIElement] else {
-        return false
-    }
-    for child in elements {
+    for child in children(element) {
         if walk(child, depth + 1) { return true }
     }
     return false
@@ -404,6 +431,7 @@ capture() {
   shift
   local evidence="${OUT}/${name}.json"
   cleanup
+  cleanup_smoke_keychain_credential
   /usr/bin/open -n "${APP_BUNDLE}" --args --ui-smoke --ui-smoke-keep-open --ui-smoke-evidence "${evidence}" --ui-smoke-catalog-url "${CATALOG_URL}" --ui-smoke-seed-keychain "${SMOKE_KEYCHAIN_SERVICE}" "$@" >/tmp/relaykit-ui-smoke.log 2>&1
   sleep 3
   PID="$(pgrep -x RelayKitApp.bin | sort -n | tail -1 || true)"
@@ -495,7 +523,7 @@ capture() {
   fi
   if [[ "${name}" == "official-sheet" || "${name}" == "official-light" || "${name}" == "official-dark" ]]; then
     manual_proof_signature_before="$(file_signature "${MANUAL_PROOF_EVIDENCE}")"
-    press_ax_label "OpenAI Official"
+    press_ax_label "OpenAI Official / Codex Official"
     wait_for_jq "${evidence}" '.connect.official_sheet_opened == true'
     press_ax_label "Check status"
     wait_for_jq "${evidence}" '
@@ -678,7 +706,7 @@ capture() {
     /usr/sbin/screencapture -x "${OUT}/provider-advanced-simplified.png"
     test -s "${OUT}/provider-advanced-simplified.png"
     if [[ "${name}" != "provider-click-flow" ]]; then
-      press_ax_label "保存"
+      press_ax_label "Save provider"
       sleep 0.8
     fi
   fi
@@ -856,7 +884,7 @@ PY
     ' "${evidence}" >/dev/null
   fi
   if [[ "${name}" == "settings-developer-expanded" ]]; then
-    press_ax_label "Developer / Diagnostics"
+    press_ax_label "settings-developer-toggle"
     wait_for_jq "${evidence}" '.settings.developer_expanded == true and .settings.manual_proof_visible_when_expanded == true'
   fi
   if [[ "${name}" == "provider" ]]; then

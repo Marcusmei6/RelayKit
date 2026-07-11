@@ -39,6 +39,17 @@ func TestHealthz(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"service":"relaykit"`) {
 		t.Fatalf("body = %s", rec.Body.String())
 	}
+	var body struct {
+		ProviderCount        int `json:"provider_count"`
+		ConfiguredModelCount int `json:"configured_model_count"`
+		OfficialModelCount   int `json:"official_model_count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode health body err = %v", err)
+	}
+	if body.ProviderCount != 1 || body.ConfiguredModelCount != 1 || body.OfficialModelCount != 0 {
+		t.Fatalf("redacted config counts = %+v", body)
+	}
 }
 
 func TestChatMessagesAcceptsResponsesFunctionCallOutput(t *testing.T) {
@@ -733,6 +744,68 @@ printf '{"home":"%s","codex_home":"%s","model":"%s","args":"%s"}\n' "$HOME" "$CO
 		t.Fatalf("decode usage log err = %v; raw=%s", err, raw)
 	}
 	if event.ProviderID != "openai" || event.Model != "gpt-5.5" || event.Transport != "responses_http" || !event.Streaming || event.Status != "completed" || event.HTTPStatus != http.StatusOK {
+		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestOfficialPassthroughCodexHomeReportsUnsupportedAccountModel(t *testing.T) {
+	dir := t.TempDir()
+	codexHome := filepath.Join(dir, "codex-home")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeCodex := filepath.Join(dir, "codex")
+	fakeScript := "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '%s\n' \"The 'gpt-5.2' model is not supported when using Codex with a ChatGPT account.\" >&2\nexit 1\n"
+	if err := os.WriteFile(fakeCodex, []byte(fakeScript), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfgData, err := json.Marshal(map[string]any{
+		"official_passthrough": map[string]any{
+			"base_url":       "https://api.openai.example/v1",
+			"credential_ref": map[string]any{"kind": "codex_home", "value": codexHome},
+			"codex_binary":   fakeCodex,
+			"models":         []map[string]string{{"id": "gpt-5.2", "display_name": "GPT-5.2"}},
+		},
+		"providers": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "providers.json")
+	if err := os.WriteFile(cfgPath, cfgData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	usagePath := filepath.Join(dir, "usage.jsonl")
+	h, err := NewWithUsageLog(cfgPath, usagePath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\"gpt-5.2\",\"input\":\"diagnose\"}"))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "\"type\":\"model_not_supported\"") ||
+		!strings.Contains(rec.Body.String(), "Official model is not available for this Codex account") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), codexHome) || strings.Contains(rec.Body.String(), fakeCodex) {
+		t.Fatalf("model error leaked local path: %s", rec.Body.String())
+	}
+	raw, err := os.ReadFile(usagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &event); err != nil {
+		t.Fatalf("decode usage err = %v; raw=%s", err, raw)
+	}
+	if event["provider_id"] != "openai" || event["model"] != "gpt-5.2" || event["status"] != "failed" ||
+		event["http_status"] != float64(http.StatusBadRequest) || event["error_type"] != "model_not_supported" {
 		t.Fatalf("event = %+v", event)
 	}
 }
@@ -1590,6 +1663,77 @@ func TestCredentialRefKeychainSetsAuthorizationHeader(t *testing.T) {
 	}
 }
 
+func TestAppCredentialHandoffAvoidsSecurityLookup(t *testing.T) {
+	oldLookup := lookupKeychainCredential
+	lookupKeychainCredential = func(name string) (string, error) {
+		t.Fatalf("security lookup must not run for App-injected credential %q", name)
+		return "", fmt.Errorf("unexpected security lookup")
+	}
+	defer func() { lookupKeychainCredential = oldLookup }()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer memory-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-memory","model":"qwen3-coder","choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"` + upstream.URL + `","api_format":"openai_chat","credential_ref":{"kind":"keychain","value":"relaykit.test.provider-token"},"models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := NewWithUsageLogAndCredentials(cfgPath, "", map[string]string{
+		"relaykit.test.provider-token": "memory-token",
+	})
+	if err != nil {
+		t.Fatalf("NewWithUsageLogAndCredentials err = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"qwen3-coder","input":"reply OK"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAppCredentialHandoffFailsClosedWithoutInjectedCredential(t *testing.T) {
+	oldLookup := lookupKeychainCredential
+	securityLookupCalled := false
+	lookupKeychainCredential = func(name string) (string, error) {
+		securityLookupCalled = true
+		return "unexpected-token", nil
+	}
+	defer func() { lookupKeychainCredential = oldLookup }()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{"providers":[{"id":"test","name":"Test","base_url":"http://127.0.0.1:9/v1","api_format":"openai_chat","credential_ref":{"kind":"keychain","value":"relaykit.test.missing"},"models":[{"id":"qwen3-coder"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := NewWithUsageLogAndCredentials(cfgPath, "", map[string]string{})
+	if err != nil {
+		t.Fatalf("NewWithUsageLogAndCredentials err = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"qwen3-coder","input":"reply OK"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "credential unavailable from RelayKit App") {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if securityLookupCalled {
+		t.Fatal("App credential mode must fail closed without invoking /usr/bin/security")
+	}
+}
+
 func TestLookupKeychainCredentialPrefersRelayKitAccountAndFallsBackToServiceOnly(t *testing.T) {
 	oldRun := runSecurityFindGenericPassword
 	defer func() { runSecurityFindGenericPassword = oldRun }()
@@ -2032,6 +2176,70 @@ func TestResponsesMapsAnthropicToolUse(t *testing.T) {
 	call := got.Output[1]
 	if call["type"] != "function_call" || call["call_id"] != "toolu_123" || call["name"] != "lookup" || call["arguments"] != `{"query":"relaykit"}` {
 		t.Fatalf("function call = %+v", call)
+	}
+}
+
+func TestResponsesForwardsFunctionToolsToAnthropic(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("upstream path = %s", r.URL.Path)
+		}
+		var req struct {
+			Tools []struct {
+				Name        string         `json:"name"`
+				Description string         `json:"description"`
+				InputSchema map[string]any `json:"input_schema"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream request err = %v", err)
+		}
+		if len(req.Tools) != 1 {
+			t.Fatalf("upstream tools = %+v", req.Tools)
+		}
+		tool := req.Tools[0]
+		if tool.Name != "exec_command" || tool.Description != "Run a shell command" {
+			t.Fatalf("upstream tool identity = %+v", tool)
+		}
+		if tool.InputSchema["type"] != "object" {
+			t.Fatalf("upstream tool input_schema = %+v", tool.InputSchema)
+		}
+		properties, ok := tool.InputSchema["properties"].(map[string]any)
+		if !ok || properties["cmd"] == nil {
+			t.Fatalf("upstream tool properties = %+v", tool.InputSchema)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"id":          "msg-tool-definition",
+			"model":       "claude-example",
+			"stop_reason": "end_turn",
+			"content":     []map[string]string{{"type": "text", "text": "ready"}},
+		}); err != nil {
+			t.Fatalf("encode upstream response err = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeTestProviderConfig(t, upstream.URL, "anthropic_messages", "claude-example"))
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	body := strings.NewReader(`{
+		"model":"claude-example",
+		"input":"Run a command",
+		"tools":[
+			{"type":"function","name":"exec_command","description":"Run a shell command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}},
+			{"type":"web_search_preview","name":"web_search"}
+		]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -95,3 +95,24 @@ func TestActivateCodexConfigWritesExplicitTargetAndPrintsRollback(t *testing.T) 
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
+
+func TestReadCredentialHandoff(t *testing.T) {
+	credentials, err := readCredentialHandoff(strings.NewReader(`{"version":1,"credentials":{"relaykit.provider.one":"fixture-secret"}}`))
+	if err != nil {
+		t.Fatalf("readCredentialHandoff err = %v", err)
+	}
+	if len(credentials) != 1 || credentials["relaykit.provider.one"] != "fixture-secret" {
+		t.Fatalf("credentials = %#v", credentials)
+	}
+}
+
+func TestReadCredentialHandoffRejectsInvalidPayloadWithoutEchoingSecret(t *testing.T) {
+	const secret = "fixture-secret-must-not-leak"
+	_, err := readCredentialHandoff(strings.NewReader(`{"version":2,"credentials":{"relaykit.provider.one":"` + secret + `"}}`))
+	if err == nil {
+		t.Fatal("invalid credential handoff unexpectedly passed")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("credential handoff error leaked secret: %v", err)
+	}
+}

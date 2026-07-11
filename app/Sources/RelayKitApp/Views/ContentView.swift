@@ -273,6 +273,8 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(item.title)
+                .accessibilityIdentifier("tab-\(item.rawValue)")
                 .foregroundStyle(tab == item ? primaryText : mutedText)
                 .overlay(alignment: .bottom) {
                     Capsule()
@@ -334,12 +336,12 @@ struct ContentView: View {
                 modelAccessList
                 addStrip
             }
-            .smokeSection("configured-providers", recorder: smokeSectionRecorder)
-            .smokeSection("import-candidates", recorder: smokeSectionRecorder)
-            .smokeSection("add-strip", recorder: smokeSectionRecorder)
-            .smokeSection("auth-blocked-state", recorder: smokeSectionRecorder)
-            .smokeSection("status-summary-inline", recorder: smokeSectionRecorder)
-            .smokeSection("model-access-merged", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("configured-providers", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("import-candidates", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("add-strip", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("auth-blocked-state", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("status-summary-inline", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("model-access-merged", recorder: smokeSectionRecorder)
         })
     }
 
@@ -486,7 +488,7 @@ struct ContentView: View {
                 }
             }
         }
-        .smokeSection("model-access-merged", recorder: smokeSectionRecorder))
+        .smokeRecordOnly("model-access-merged", recorder: smokeSectionRecorder))
     }
 
     private var officialProviderRow: some View {
@@ -521,6 +523,8 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(hex: 0x78D8FF).opacity(0.32)))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("OpenAI Official / Codex Official")
+        .accessibilityIdentifier("official-provider-row")
         .smokeSection("official-provider-row", recorder: smokeSectionRecorder)
     }
 
@@ -872,6 +876,8 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(hex: 0x78D8FF).opacity(0.36), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("新增模型接入")
+        .accessibilityIdentifier("provider-add-entry")
     }
 
     private func openProviderFormFromAddStrip() {
@@ -913,11 +919,13 @@ struct ContentView: View {
                             .foregroundStyle(secondaryText)
                     }
                     Spacer()
-                    Button("Refresh") {
-                        Task { await model.refreshUsageSummary() }
-                    }
-                    .buttonStyle(ControlButtonStyle(prominent: true))
-                    .disabled(model.usageRefreshInProgress)
+                Button("Refresh") {
+                    Task { await model.refreshUsageSummary() }
+                }
+                .buttonStyle(ControlButtonStyle(prominent: true))
+                .accessibilityLabel("Refresh usage")
+                .accessibilityIdentifier("usage-refresh")
+                .disabled(model.usageRefreshInProgress)
                 }
 
                 usageKpis(analytics)
@@ -1224,17 +1232,21 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     Button("Start") { model.startGateway() }
                         .buttonStyle(ControlButtonStyle(prominent: true))
+                        .accessibilityLabel("Start gateway")
+                        .accessibilityIdentifier("gateway-start")
                     Button("Stop") { model.stopGateway() }
                         .buttonStyle(ControlButtonStyle())
                     Button("Restart") { model.restartGateway() }
                         .buttonStyle(ControlButtonStyle())
+                        .accessibilityLabel("Restart gateway")
+                        .accessibilityIdentifier("gateway-restart")
                 }
                 settingsInfoRow(title: "Usage log path", subtitle: shortPath(model.usageLogPath))
                 settingsInfoRow(title: "Helper log path", subtitle: "/tmp/relay.out / /tmp/relay.err")
             }
-            .smokeSection("settings-gateway-group", recorder: smokeSectionRecorder)
-            .smokeSection("settings-actions", recorder: smokeSectionRecorder)
-            .smokeSection("settings-gateway-port-fixed", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("settings-gateway-group", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("settings-actions", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("settings-gateway-port-fixed", recorder: smokeSectionRecorder)
 
             SectionCard {
                 sectionEyebrow("CODEX INTEGRATION")
@@ -1277,7 +1289,9 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .smokeSection(showingDeveloperDiagnostics ? "settings-developer-expanded" : "settings-developer-collapsed", recorder: smokeSectionRecorder)
+                .accessibilityLabel("Developer / Diagnostics")
+                .accessibilityIdentifier("settings-developer-toggle")
+                .smokeRecordOnly(showingDeveloperDiagnostics ? "settings-developer-expanded" : "settings-developer-collapsed", recorder: smokeSectionRecorder)
 
                 if showingDeveloperDiagnostics {
                     ManualProofEntryView(
@@ -1304,10 +1318,10 @@ struct ContentView: View {
                         .foregroundStyle(mutedText)
                 }
             }
-            .smokeSection("settings-developer-group", recorder: smokeSectionRecorder)
-            .smokeSection("developer-verification", recorder: smokeSectionRecorder)
-            .smokeSection("advanced-paths", recorder: smokeSectionRecorder)
-            .smokeSection(showingDeveloperDiagnostics ? "desktop-acceptance-manual-proof-entry" : "desktop-acceptance-manual-proof-entry-hidden", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("settings-developer-group", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("developer-verification", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("advanced-paths", recorder: smokeSectionRecorder)
+            .smokeRecordOnly(showingDeveloperDiagnostics ? "desktop-acceptance-manual-proof-entry" : "desktop-acceptance-manual-proof-entry-hidden", recorder: smokeSectionRecorder)
         }
     }
 
@@ -1637,8 +1651,12 @@ private struct ProviderFormView: View {
                 Spacer()
                 Button("取消") { onClose() }
                     .buttonStyle(ControlButtonStyle())
+                    .accessibilityLabel("Cancel provider")
+                    .accessibilityIdentifier("provider-form-cancel")
                 Button(mode.saveTitle) { save() }
                     .buttonStyle(ControlButtonStyle(prominent: true))
+                    .accessibilityLabel("Save provider")
+                    .accessibilityIdentifier("provider-form-save")
                     .disabled(!canSave)
             }
             .padding(.top, 12)
@@ -1764,6 +1782,8 @@ private struct ProviderFormView: View {
                 .foregroundStyle(secondaryText)
             TextField(prompt, text: value)
                 .textFieldStyle(ProductTextFieldStyle())
+                .accessibilityLabel("\(label) field")
+                .accessibilityIdentifier("provider-\(label.lowercased().replacingOccurrences(of: " ", with: "-"))-field")
         }
     }
 
@@ -1885,6 +1905,8 @@ private struct ProviderFormView: View {
                     }
                     .buttonStyle(ControlButtonStyle())
                     .fixedSize(horizontal: true, vertical: false)
+                    .accessibilityLabel("provider-model-detection-entry")
+                    .accessibilityIdentifier("provider-model-detection-entry")
                     .disabled(baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isDetectingModels || isTestingConnection)
                     .smokeSection("provider-model-detection-entry", recorder: smokeSectionRecorder)
                     Spacer(minLength: 0)
@@ -1903,6 +1925,8 @@ private struct ProviderFormView: View {
                         HStack(spacing: 8) {
                             TextField("model id", text: $row.modelId)
                                 .textFieldStyle(ProductTextFieldStyle())
+                                .accessibilityLabel("Model ID field")
+                                .accessibilityIdentifier("provider-model-id-field")
                                 .smokeSection("provider-model-id-main-field", recorder: smokeSectionRecorder)
                             if modelRows.count > 1 {
                                 Button {
@@ -2702,6 +2726,21 @@ private struct SmokeSectionModifier: ViewModifier {
     }
 }
 
+private struct SmokeRecordOnlyModifier: ViewModifier {
+    let id: String
+    let recorder: ((String) -> Void)?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                recorder?(id)
+            }
+            .onChange(of: id) { _, newValue in
+                recorder?(newValue)
+            }
+    }
+}
+
 private struct ManualProofEntryView: View {
     let acceptance: DesktopAcceptanceEvidence
     let secondaryText: Color
@@ -2791,5 +2830,9 @@ private extension View {
         } else {
             modifier(SmokeSectionModifier(id: id, recorder: recorder))
         }
+    }
+
+    func smokeRecordOnly(_ id: String, recorder: ((String) -> Void)?) -> some View {
+        modifier(SmokeRecordOnlyModifier(id: id, recorder: recorder))
     }
 }
