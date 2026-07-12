@@ -118,6 +118,42 @@ jq -e \
 [[ ! -s "${tmp}/stderr.txt" ]] ||
   fail "successful backend leaked harness cleanup noise"
 
+status_failed_lifecycle="${tmp}/status-failed-lifecycle.sh"
+cat >"${status_failed_lifecycle}" <<'LIFECYCLE'
+#!/usr/bin/env bash
+set -euo pipefail
+jq -nc '{status:"failed",error_code:"synthetic_failed_status",submission_state:"not_submitted",evidence:"/tmp/failed-status-evidence.json"}'
+LIFECYCLE
+chmod 700 "${status_failed_lifecycle}"
+status_failed_exit=0
+RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
+RELAYKIT_DESKTOP_QUERY_OFFICIAL_LIFECYCLE="${status_failed_lifecycle}" \
+RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
+  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" \
+  >"${tmp}/status-failed.stdout" 2>"${tmp}/status-failed.json" || status_failed_exit=$?
+[[ "${status_failed_exit}" -ne 0 && ! -s "${tmp}/status-failed.stdout" ]] ||
+  fail "exit-zero harness result with failed status was accepted"
+jq -e -s 'length == 1 and .[0].status == "failed" and .[0].error_code == "synthetic_failed_status"' "${tmp}/status-failed.json" >/dev/null ||
+  fail "exit-zero failed harness status was not returned as one redacted failure"
+
+noisy_success_lifecycle="${tmp}/noisy-success-lifecycle.sh"
+cat >"${noisy_success_lifecycle}" <<'LIFECYCLE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'private successful harness diagnostic must not escape' >&2
+jq -nc '{status:"complete",submission_state:"submitted",evidence:"/tmp/noisy-success-evidence.json"}'
+LIFECYCLE
+chmod 700 "${noisy_success_lifecycle}"
+RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
+RELAYKIT_DESKTOP_QUERY_OFFICIAL_LIFECYCLE="${noisy_success_lifecycle}" \
+RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
+  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" \
+  >"${tmp}/noisy-success.json" 2>"${tmp}/noisy-success.stderr"
+jq -e '.status == "complete" and .evidence_path == "/tmp/noisy-success-evidence.json"' "${tmp}/noisy-success.json" >/dev/null ||
+  fail "successful structured harness result was not preserved"
+[[ ! -s "${tmp}/noisy-success.stderr" ]] ||
+  fail "successful backend leaked non-structured harness stderr"
+
 if RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
   RELAYKIT_DESKTOP_QUERY_CATALOG_EVIDENCE="${catalog_evidence}" \
   RELAYKIT_DESKTOP_QUERY_TEST_CAPTURE="${capture_file}" \

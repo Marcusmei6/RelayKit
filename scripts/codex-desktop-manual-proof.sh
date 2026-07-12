@@ -78,6 +78,8 @@ else
 fi
 APP_ZIP_SHA256=""
 APP_ZIP_BUILD_TIME_UTC=""
+APP_SERVER_SETUP_ID=""
+APP_SERVER_SESSION_ID=""
 RELAYKIT_APP_LAUNCHED=false
 STARTED_AT=""
 CONFIG_BEFORE=""
@@ -1726,12 +1728,20 @@ write_app_server_evidence() {
     CODEX_CLI_BINARY="$(resolve_codex_cli_binary || true)"
   fi
   [[ -n "${CODEX_CLI_BINARY}" && -x "${CODEX_CLI_BINARY}" ]] || return 1
-  CFFIXED_USER_HOME="${ISO_HOME}" HOME="${ISO_HOME}" CODEX_HOME="${CODEX_HOME_DIR}" node - "${OUT}/app-server.json" "${PROVIDER_CONFIG}" "${CODEX_CLI_BINARY}" <<'NODE'
+  [[ "${APP_SERVER_SETUP_ID}" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || return 1
+  [[ "${APP_SERVER_SESSION_ID}" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || return 1
+  [[ "${APP_ZIP_SHA256}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  CFFIXED_USER_HOME="${ISO_HOME}" HOME="${ISO_HOME}" CODEX_HOME="${CODEX_HOME_DIR}" node - \
+    "${OUT}/app-server.json" "${PROVIDER_CONFIG}" "${CODEX_CLI_BINARY}" \
+    "${APP_SERVER_SETUP_ID}" "${APP_SERVER_SESSION_ID}" "${APP_ZIP_SHA256}" <<'NODE'
 const {spawn} = require("child_process");
 const fs = require("fs");
 const out = process.argv[2];
 const providerConfig = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
 const codexCli = process.argv[4];
+const setupId = process.argv[5];
+const sessionId = process.argv[6];
+const artifactSha256 = process.argv[7];
 const providerModels = new Set((providerConfig.providers || []).flatMap(provider => (provider.models || []).map(model => model.id)));
 const child = spawn(codexCli, ["app-server", "--listen", "stdio://"], {stdio: ["pipe", "pipe", "pipe"], env: process.env});
 let buffer = "";
@@ -1754,11 +1764,15 @@ function finish() {
   wrote = true;
   const config = messages.find(m => m.id === 2)?.result?.config;
   const models = messages.find(m => m.id === 3)?.result?.data || [];
-  fs.writeFileSync(out, JSON.stringify({
+  const temp = `${out}.tmp.${process.pid}`;
+  fs.writeFileSync(temp, JSON.stringify({
+    relaykit_lineage: {setup_id: setupId, session_id: sessionId, artifact_sha256: artifactSha256},
     config: {model: config?.model, model_provider: config?.model_provider},
     official: models.filter(model => !providerModels.has(model.model)).map(model => ({model: model.model, displayName: model.displayName, hidden: model.hidden})),
     provider: models.filter(model => providerModels.has(model.model)).map(model => ({model: model.model, displayName: model.displayName, hidden: model.hidden}))
   }, null, 2) + "\n");
+  fs.chmodSync(temp, 0o600);
+  fs.renameSync(temp, out);
   child.kill("SIGTERM");
   setTimeout(() => process.exit(0), 100);
 }
@@ -2466,6 +2480,8 @@ setup_preflight() {
   : >"${USAGE_PATH}"
   chmod 600 "${USAGE_PATH}"
   prepare_extracted_app
+  APP_SERVER_SETUP_ID="desktop-proof-${APP_ZIP_SHA256:0:16}"
+  APP_SERVER_SESSION_ID="desktop-proof:${STARTED_AT}:$$"
 
   local provider_port="" gateway_port
   if [[ "${setup_scope}" == "real" ]]; then
@@ -3697,6 +3713,17 @@ EOF
   --test-sync-official-models)
     [[ -n "${4:-}" ]] || exit 2
     sync_official_models_to_provider_config "$2" "$3" "$4"
+    ;;
+  --test-write-app-server-evidence)
+    [[ -n "${7:-}" && -z "${8:-}" ]] || exit 2
+    [[ "$(basename "$2")" == "app-server.json" ]] || exit 2
+    OUT="$(dirname "$2")"
+    PROVIDER_CONFIG="$3"
+    CODEX_CLI_BINARY="$4"
+    APP_SERVER_SETUP_ID="$5"
+    APP_SERVER_SESSION_ID="$6"
+    APP_ZIP_SHA256="$7"
+    write_app_server_evidence
     ;;
   --test-reset-run-markers)
     reset_run_markers

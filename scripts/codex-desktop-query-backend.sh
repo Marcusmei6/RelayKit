@@ -131,6 +131,22 @@ fi
 set -e
 
 grep -Ev 'Terminated: 15.*sandbox-exec' "${harness_stderr}" >"${filtered_stderr}" || true
+if [[ "${harness_status}" -eq 0 ]] && ! jq -e -s '
+  length == 1 and
+  (.[0] | type == "object") and
+  .[0].status == "complete" and
+  ((.[0].submission_state // .[0].stages[0].submission_state // "") == "submitted") and
+  (.[0].evidence | type == "string" and length > 0)
+' "${harness_stdout}" >/dev/null 2>&1; then
+  semantic_error="$(jq -r -s '
+    if length == 1 and (.[0] | type == "object") and (.[0].error_code | type == "string")
+    then .[0].error_code
+    else "harness_result_invalid"
+    end
+  ' "${harness_stdout}" 2>/dev/null || printf 'harness_result_invalid')"
+  jq -nc --arg error_code "${semantic_error}" '{status:"failed",error_code:$error_code}' >>"${filtered_stderr}"
+  harness_status=1
+fi
 if [[ "${harness_status}" -ne 0 ]]; then
   failure_meta="$(python3 - "${filtered_stderr}" "${harness_stdout}" <<'PY'
 import json
@@ -185,9 +201,6 @@ PY
   exit "${harness_status}"
 fi
 
-jq -e -s 'length == 1 and (.[0] | type == "object")' "${harness_stdout}" >/dev/null ||
-  fail "harness_result_invalid"
-[[ -s "${filtered_stderr}" ]] && cat "${filtered_stderr}" >&2
 jq -c \
   --arg model "${model_id}" \
   --arg expect "${expect}" \

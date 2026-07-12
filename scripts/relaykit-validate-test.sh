@@ -143,8 +143,21 @@ jq -e '
 ' "${tmp}/workflow.json" >/dev/null || fail "workflow/skill plan selected a heavy layer"
 selected workflow desktop-query-runner-contract || fail "Skill plan omitted runner tests"
 selected workflow agent-config-syntax || fail "workflow plan omitted agent config syntax"
+selected workflow agent-workflow-contract || fail "workflow plan omitted the project workflow contract"
 jq -e 'any(.selected_commands[]; .id == "agent-config-syntax" and (.command | contains("relaykit-validate-agent-config.sh")))' "${tmp}/workflow.json" >/dev/null ||
   fail "workflow plan depends on a non-portable TOML parser"
+
+write_fixture workflow-config .codex/config.toml
+plan_fixture workflow-config
+jq -e '(.change_classes | index("workflow")) != null' "${tmp}/workflow-config.json" >/dev/null ||
+  fail "project Agent config was not classified as workflow"
+selected workflow-config agent-workflow-contract || fail "project Agent config omitted the workflow contract"
+
+write_fixture workflow-contract-script scripts/relaykit-agent-workflow-test.sh
+plan_fixture workflow-contract-script
+jq -e '(.change_classes | index("workflow")) != null and (.change_classes | index("shell")) != null' "${tmp}/workflow-contract-script.json" >/dev/null ||
+  fail "workflow contract script was not classified as workflow shell"
+selected workflow-contract-script agent-workflow-contract || fail "workflow contract script did not select itself"
 
 agent_validator="${ROOT}/scripts/relaykit-validate-agent-config.sh"
 [[ -x "${agent_validator}" ]] || fail "agent config validator is missing"
@@ -244,6 +257,26 @@ jq -e '
   (.change_classes | index("gateway_runtime")) != null and
   any(.selected_commands[]; .id == "live-desktop-query")
 ' "${tmp}/deleted.json" >/dev/null || fail "committed deletion of a critical path was not selected"
+
+deleted_syntax_repo="${tmp}/deleted-syntax-repo"
+new_git_repo "${deleted_syntax_repo}"
+mkdir -p "${deleted_syntax_repo}/.codex/agents"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${deleted_syntax_repo}/scripts/removed-validation.sh"
+printf '%s\n' 'name = "removed"' >"${deleted_syntax_repo}/.codex/agents/removed.toml"
+git -C "${deleted_syntax_repo}" add scripts/removed-validation.sh .codex/agents/removed.toml
+git -C "${deleted_syntax_repo}" commit -qm 'add syntax fixtures'
+deleted_syntax_base="$(git -C "${deleted_syntax_repo}" rev-parse HEAD)"
+git -C "${deleted_syntax_repo}" rm -q scripts/removed-validation.sh .codex/agents/removed.toml
+git -C "${deleted_syntax_repo}" commit -qm 'delete syntax fixtures'
+"${deleted_syntax_repo}/scripts/relaykit-validate.sh" --base "${deleted_syntax_base}" --head HEAD --plan-only >"${tmp}/deleted-syntax.json"
+jq -e '
+  (.changed_files | index("scripts/removed-validation.sh")) != null and
+  (.changed_files | index(".codex/agents/removed.toml")) != null and
+  (.change_classes | index("shell")) != null and
+  (.change_classes | index("workflow")) != null and
+  all(.selected_commands[]; (.command | contains("removed-validation.sh") or contains("removed.toml")) | not) and
+  any(.selected_commands[]; .id == "agent-workflow-contract")
+' "${tmp}/deleted-syntax.json" >/dev/null || fail "deleted syntax files were passed to parsers or lost their risk classification"
 
 worktree_repo="${tmp}/worktree-repo"
 new_git_repo "${worktree_repo}"

@@ -65,7 +65,7 @@ python3 - "${ROOT}" "${base_sha}" "${head_sha}" "${changed_input}" "${changed_fo
 import json
 import shlex
 import sys
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 root, base, head, changed_path, changed_format, full_raw, live_raw = sys.argv[1:]
 raw = open(changed_path, "rb").read()
@@ -101,7 +101,11 @@ for path in files:
     if is_docs(path) and not path.startswith(".agents/skills/"):
         classes.add("docs")
         continue
-    if path.startswith(".codex/agents/") or path == "AGENTS.md":
+    if path.startswith(".codex/agents/") or path in {
+        ".codex/config.toml",
+        "AGENTS.md",
+        "scripts/relaykit-agent-workflow-test.sh",
+    }:
         classes.add("workflow")
     if path.startswith(".agents/skills/"):
         classes.add("skill")
@@ -113,11 +117,10 @@ for path in files:
         classes.update(("harness", "shell"))
     if path.startswith("scripts/codex-desktop-ax-driver"):
         classes.update(("ax", "harness"))
-        if path.endswith(".sh"):
-            classes.add("shell")
     if path.endswith(".sh"):
         classes.add("shell")
-        shell_files.append(path)
+        if (Path(root) / path).is_file():
+            shell_files.append(path)
     if path.startswith("gateway/"):
         classes.add("gateway")
         directory = str(PurePosixPath(path).parent)
@@ -134,9 +137,6 @@ for path in files:
             classes.add("gateway_lifecycle")
     if path.startswith("script/") and any(token in lower for token in ("package", "release", "build_app_bundle", "sign", "notary")):
         classes.add("packaging")
-        if path.endswith(".sh"):
-            classes.add("shell")
-            shell_files.append(path)
     if path.endswith((".entitlements", "/Info.plist")):
         classes.add("packaging")
 
@@ -183,7 +183,13 @@ if "harness" in classes:
 if "ax" in classes:
     add("ax-driver-contract", "./scripts/codex-desktop-ax-driver-test.sh", "AX changes require deterministic selector tests")
 if "workflow" in classes:
-    tomls = [path for path in files if path.startswith(".codex/agents/") and path.endswith(".toml")]
+    add("agent-workflow-contract", "./scripts/relaykit-agent-workflow-test.sh", "workflow changes require the project role and ownership contract")
+    tomls = [
+        path for path in files
+        if path.startswith(".codex/agents/")
+        and path.endswith(".toml")
+        and (Path(root) / path).is_file()
+    ]
     if tomls:
         args = " ".join(shlex.quote(path) for path in tomls)
         add("agent-config-syntax", f"./scripts/relaykit-validate-agent-config.sh {args}", "changed agent TOML must parse without optional Python modules")

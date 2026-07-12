@@ -253,19 +253,20 @@ Status: selector, Skill contracts, evidence-state fix, and the post-fix live Ski
 - `relaykit_gateway` (`gpt-5.6-sol` / `high`) owns only `gateway/**` protocol, routing, catalog, config, usage, and tests.
 - `relaykit_app` (`gpt-5.6-sol` / `high`) owns only `app/**` SwiftUI/AppKit, Keychain, helper lifecycle, config activation, and tests.
 - `relaykit_worker` (`gpt-5.6-sol` / `high`) owns assigned docs, examples, project Agent/Skill config, and ordinary tooling; it never substitutes for App or Gateway.
-- `relaykit_test` (`gpt-5.6-luna` / `medium`) is read-only and executes only the selector-generated plan.
+- `relaykit_test` (`gpt-5.6-luna` / `medium`) executes only the selector-generated plan. Its workspace write access is limited to ignored build/test artifacts, with byte-identical tracked-worktree status required before and after execution.
 - `relaykit_cr` (`gpt-5.6-sol` / `xhigh`) owns read-only findings and never edits or delegates.
 - `relaykit_release` (`gpt-5.6-terra` / `high`) owns assigned packaging/signing/notarization/release paths, not product business code.
 
 ## Phase 7.8: Workflow 5.6 Migration and Fast Path Safety
 
-Status: workflow configuration and static ownership contracts are migrated; Fast Path safety contracts are implemented. Runtime acceptance still requires a fresh RelayKit task because existing tasks retain their loaded Agent metadata. The fresh smoke must prove model/effort from authoritative `turn_context`, not Agent self-report, and must perform no writes, network requests, package, GUI, or product validation.
+Status: workflow configuration, static ownership contracts, and fresh runtime role metadata are verified; Fast Path safety contracts are implemented. The fresh smoke proved model/effort from authoritative `turn_context`, not Agent self-report, and performed no tracked writes, network requests, package, GUI, or product validation. The host permission profile reported `danger-full-access`, so repository Test policy now uses `workspace-write` plus an explicit tracked-worktree guard rather than claiming an OS-enforced read-only process.
 
 - Keep `max_threads = 8` and `max_depth = 2`; only Planner uses Ultra and no role uses Max.
 - Planner is the only role allowed to decide delegation and may authorize at most two concurrent write lanes; root only performs exact registered-role launches from `PARENT DISPATCH REQUIRED`.
 - Test, CR, and Release are sequential gates after implementation lanes close.
 - Backlog Expansion is explicit opt-in and disabled by default.
-- Fast Path execution gives safe local commands at most two attempts and live/full commands exactly one. Committed deletions are selected, `--worktree` unions committed/staged/unstaged/untracked paths, and dirty repositories fail without it. Exact current Gateway/App sensitive paths drive high-risk selection. Catalog evidence must bind caller-pinned setup, session, and artifact lineage even when a stale file has its own matching SHA.
+- Fast Path execution gives safe local commands at most two attempts and live/full commands exactly one. Committed deletions are selected, but deleted shell/TOML paths are never passed to syntax parsers. `--worktree` unions committed/staged/unstaged/untracked paths, and dirty repositories fail without it. `.codex/config.toml` and the workflow contract script select the full workflow contract. Exact current Gateway/App sensitive paths drive high-risk selection.
+- The manual-proof app-server producer atomically writes `relaykit_lineage` with current setup id, session id, and product artifact SHA-256. The query backend accepts only one structured `status=complete` result with submitted state and evidence path; an exit-zero failed/invalid result remains a redacted failure, and non-structured success stderr is not forwarded.
 - After an independent read-only CR clears Critical/High findings, merge this feature branch into `main` with `git merge --ff-only`; do not push or delete the branch.
 
 See `docs/agents/README.md` for the assignment header and dispatch rules.

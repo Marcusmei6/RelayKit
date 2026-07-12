@@ -20,7 +20,7 @@ expected = {
     "relaykit_gateway": ("relaykit-gateway.toml", "gpt-5.6-sol", "high", "workspace-write"),
     "relaykit_app": ("relaykit-app.toml", "gpt-5.6-sol", "high", "workspace-write"),
     "relaykit_worker": ("relaykit-worker.toml", "gpt-5.6-sol", "high", "workspace-write"),
-    "relaykit_test": ("relaykit-test.toml", "gpt-5.6-luna", "medium", "read-only"),
+    "relaykit_test": ("relaykit-test.toml", "gpt-5.6-luna", "medium", "workspace-write"),
     "relaykit_cr": ("relaykit-cr.toml", "gpt-5.6-sol", "xhigh", "read-only"),
     "relaykit_release": ("relaykit-release.toml", "gpt-5.6-terra", "high", "workspace-write"),
 }
@@ -115,6 +115,9 @@ assert "Own only app/**" in agents["relaykit_app"]["developer_instructions"]
 assert "docs/**, examples/**, .codex/**, .agents/**" in agents["relaykit_worker"]["developer_instructions"]
 assert "Do not edit app/** or gateway/**" in agents["relaykit_worker"]["developer_instructions"]
 assert "Execute only the selector-generated validation plan" in agents["relaykit_test"]["developer_instructions"]
+assert "tracked-worktree" in agents["relaykit_test"]["developer_instructions"]
+assert "setup id" in agents["relaykit_test"]["developer_instructions"]
+assert "session id" in agents["relaykit_test"]["developer_instructions"]
 assert "Only review. Do not edit files." in agents["relaykit_cr"]["developer_instructions"]
 assert "only packaging, signing, notarization, release helpers, and release documentation" in agents["relaykit_release"]["developer_instructions"]
 assert "Do not modify app/** or gateway/** product business code" in agents["relaykit_release"]["developer_instructions"]

@@ -1349,6 +1349,43 @@ jq -e '
 
 echo "Manual proof official gateway catalog sync test passed"
 
+app_server_dir="${tmp_dir}/app-server-lineage"
+mkdir -p "${app_server_dir}"
+app_server_output="${app_server_dir}/app-server.json"
+app_server_provider_config="${app_server_dir}/providers.json"
+fake_codex_cli="${app_server_dir}/codex"
+lineage_artifact_sha="$(printf 'c%.0s' {1..64})"
+jq -n '{providers:[{models:[{id:"public/provider-model"}]}]}' >"${app_server_provider_config}"
+cat >"${fake_codex_cli}" <<'CODEX'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "app-server" && "${2:-}" == "--listen" && "${3:-}" == "stdio://" ]]
+while IFS= read -r request; do
+  case "$(jq -r '.id // empty' <<<"${request}")" in
+    2) jq -nc '{id:2,result:{config:{model:"gpt-5.5",model_provider:"openai"}}}' ;;
+    3)
+      jq -nc '{id:3,result:{data:[
+        {model:"gpt-5.5",displayName:"GPT-5.5",hidden:false},
+        {model:"public/provider-model",displayName:"Public Provider Model",hidden:false}
+      ]}}'
+      exit 0
+      ;;
+  esac
+done
+CODEX
+chmod 700 "${fake_codex_cli}"
+"${PROOF_SCRIPT}" --test-write-app-server-evidence \
+  "${app_server_output}" "${app_server_provider_config}" "${fake_codex_cli}" \
+  current-setup current-session "${lineage_artifact_sha}"
+jq -e --arg artifact_sha256 "${lineage_artifact_sha}" '
+  .relaykit_lineage == {setup_id:"current-setup",session_id:"current-session",artifact_sha256:$artifact_sha256} and
+  .config == {model:"gpt-5.5",model_provider:"openai"} and
+  ([.official[].model] == ["gpt-5.5"]) and
+  ([.provider[].model] == ["public/provider-model"])
+' "${app_server_output}" >/dev/null || fail "production app-server evidence path omitted current setup/session/artifact lineage"
+
+echo "Manual proof app-server lineage producer test passed"
+
 marker_home="${tmp_dir}/marker-home"
 marker_run_dir="${marker_home}/Library/Application Support/RelayKit/DesktopProof/run"
 mkdir -p "${marker_run_dir}"
