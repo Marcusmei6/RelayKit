@@ -45,20 +45,15 @@ capture_file="${tmp}/capture.json"
 printf '%s\n' 'Summarize RelayKit in one sentence.' >"${query_file}"
 chmod 600 "${query_file}"
 
-cat >"${catalog_evidence}" <<'JSON'
-{
-  "official": [
-    {"model": "gpt-5.5", "displayName": "GPT-5.5"}
-  ],
-  "provider": [
-    {"model": "public/provider-model", "displayName": "Public Provider Model"}
-  ]
-}
-JSON
-chmod 600 "${catalog_evidence}"
 printf '%s\n' 'artifact fixture' >"${artifact}"
-catalog_sha="$(shasum -a 256 "${catalog_evidence}" | awk '{print $1}')"
 artifact_sha="$(shasum -a 256 "${artifact}" | awk '{print $1}')"
+jq -n --arg artifact_sha256 "${artifact_sha}" '{
+  relaykit_lineage: {setup_id:"current-setup",session_id:"current-session",artifact_sha256:$artifact_sha256},
+  official: [{model:"gpt-5.5",displayName:"GPT-5.5"}],
+  provider: [{model:"public/provider-model",displayName:"Public Provider Model"}]
+}' >"${catalog_evidence}"
+chmod 600 "${catalog_evidence}"
+catalog_sha="$(shasum -a 256 "${catalog_evidence}" | awk '{print $1}')"
 
 cat >"${fake_harness}" <<'HARNESS'
 #!/usr/bin/env bash
@@ -108,6 +103,8 @@ RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
     --expect markdown \
     --catalog-evidence "${catalog_evidence}" \
     --catalog-sha256 "${catalog_sha}" \
+    --catalog-setup-id current-setup \
+    --catalog-session-id current-session \
     --artifact-sha256 "${artifact_sha}" >"${tmp}/result.json" 2>"${tmp}/stderr.txt"
 
 jq -e \
@@ -125,7 +122,7 @@ if RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
   RELAYKIT_DESKTOP_QUERY_CATALOG_EVIDENCE="${catalog_evidence}" \
   RELAYKIT_DESKTOP_QUERY_TEST_CAPTURE="${capture_file}" \
   RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
-  "${RUNNER}" --model 'missing-model' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
+  "${RUNNER}" --model 'missing-model' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
   fail "default backend accepted an unknown model"
 fi
 
@@ -142,7 +139,7 @@ official_failure_status=0
 RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
 RELAYKIT_DESKTOP_QUERY_OFFICIAL_LIFECYCLE="${failing_official_lifecycle}" \
 RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
-  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" \
+  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" \
   >"${tmp}/official-failure.stdout" 2>"${tmp}/official-failure.json" || official_failure_status=$?
 [[ "${official_failure_status}" -ne 0 && ! -s "${tmp}/official-failure.stdout" ]] ||
   fail "failed targeted official lifecycle returned success output"
@@ -157,7 +154,7 @@ jq -e -s '
 
 if RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
   RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
-  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 deadbeef --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
+  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 deadbeef --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
   fail "default backend accepted a stale catalog hash"
 fi
 
@@ -169,7 +166,7 @@ fi
 
 if RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
   RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
-  "${RUNNER}" --model 'public/provider-model' --query-file "${query_file}" --expect tool --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
+  "${RUNNER}" --model 'public/provider-model' --query-file "${query_file}" --expect tool --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
   fail "provider query accepted a missing provider precondition"
 fi
 
@@ -186,7 +183,7 @@ chmod 700 "${failing_harness}"
 failure_status=0
 RELAYKIT_DESKTOP_QUERY_HARNESS="${failing_harness}" \
 RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
-  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" \
+  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog_evidence}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" \
   >"${tmp}/failure.stdout" 2>"${tmp}/failure.json" || failure_status=$?
 [[ "${failure_status}" -ne 0 && ! -s "${tmp}/failure.stdout" ]] || fail "failed backend returned success output"
 jq -e -s \
@@ -197,5 +194,22 @@ jq -e -s \
 if rg -Fq 'private harness diagnostic' "${tmp}/failure.json"; then
   fail "failed backend leaked raw harness diagnostics"
 fi
+
+stale_catalog="${tmp}/stale-app-server.json"
+jq -n --arg artifact_sha256 "${artifact_sha}" '{
+  relaykit_lineage: {setup_id:"stale-setup",session_id:"stale-session",artifact_sha256:$artifact_sha256},
+  official: [{model:"gpt-5.5",displayName:"GPT-5.5"}],
+  provider: []
+}' >"${stale_catalog}"
+chmod 600 "${stale_catalog}"
+stale_catalog_sha="$(shasum -a 256 "${stale_catalog}" | awk '{print $1}')"
+stale_status=0
+RELAYKIT_DESKTOP_QUERY_HARNESS="${fake_harness}" \
+RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
+  "${RUNNER}" --model 'gpt-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${stale_catalog}" --catalog-sha256 "${stale_catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" \
+  >"${tmp}/stale.stdout" 2>"${tmp}/stale.json" || stale_status=$?
+[[ "${stale_status}" -ne 0 && ! -s "${tmp}/stale.stdout" ]] || fail "stale catalog lineage passed with its own matching SHA"
+jq -e -s 'length == 1 and .[0].error_code == "catalog_lineage_stale"' "${tmp}/stale.json" >/dev/null ||
+  fail "stale catalog lineage rejection was not machine-readable"
 
 printf '%s\n' 'codex-desktop-query backend tests passed'

@@ -241,7 +241,7 @@ Status: selector, Skill contracts, evidence-state fix, and the post-fix live Ski
 - `scripts/relaykit-validate.sh` is the deterministic changed-file selector. Its JSON plan records files, classes, selected/skipped commands, reasons, and build/package/GUI/live/full requirements before execution.
 - Docs and workflow/Skill/harness changes stay on syntax and focused contract tests. Gateway changes select affected Go packages. Ordinary App UI selects Swift build/validation plus no-model menu smoke. Packaging inputs alone select package and extracted-App dogfood.
 - A single paid `$relaykit-desktop-query` request is an explicit high-risk leaf selected with `--live-query`; it is never the default validation entry. Full four-stage proof requires `--full` and is not part of this phase's execution.
-- The Skill accepts `plain`, `markdown`, or `tool`, requires explicit catalog evidence and caller-pinned catalog/artifact SHA-256 values, and does not search stale `dist` directories.
+- The Skill accepts `plain`, `markdown`, or `tool`, requires explicit catalog evidence with caller-pinned catalog SHA-256 plus matching setup/session/artifact lineage, and does not search stale `dist` directories.
 - The Skill remains one-shot. Persistent prepare/query/status/finalize/stop lifecycle, watchdog, and finalization profiles remain the next-session design, not this phase.
 - Future manual-proof evidence reports GUI tool review as verified for both `manual_user_only` and `automated_ax` when current-run rollout, process-bound screenshot, and render evidence agree. Previously accepted artifacts are not rewritten.
 - The initial failed lifecycle remains archived at `dist/validation-fast-path/live-skill-request-evidence.json`; it records a completed request followed by `gateway_port_not_released`, not a model failure. The authoritative post-fix result is `dist/validation-fast-path/postfix-live-skill-result.json`, which points to the fresh targeted-query evidence under `dist/codex-desktop-query/`. That run exited `0` in 39 seconds and proves current-run GPT-5.5 completed/200 usage, one user/assistant marker pair, a bound Desktop screenshot, clean protocol rendering, exact cleanup, and global state preservation.
@@ -259,13 +259,13 @@ Status: selector, Skill contracts, evidence-state fix, and the post-fix live Ski
 
 ## Phase 7.8: Workflow 5.6 Migration and Fast Path Safety
 
-Status: workflow configuration and static ownership contracts are being migrated first. Runtime acceptance requires a fresh RelayKit task because existing tasks retain their loaded Agent metadata. The fresh smoke must prove model/effort from authoritative `turn_context`, not Agent self-report, and must perform no writes, network requests, package, GUI, or product validation.
+Status: workflow configuration and static ownership contracts are migrated; Fast Path safety contracts are implemented. Runtime acceptance still requires a fresh RelayKit task because existing tasks retain their loaded Agent metadata. The fresh smoke must prove model/effort from authoritative `turn_context`, not Agent self-report, and must perform no writes, network requests, package, GUI, or product validation.
 
 - Keep `max_threads = 8` and `max_depth = 2`; only Planner uses Ultra and no role uses Max.
-- Planner is the only role allowed to delegate and may run at most two concurrent write lanes.
+- Planner is the only role allowed to decide delegation and may authorize at most two concurrent write lanes; root only performs exact registered-role launches from `PARENT DISPATCH REQUIRED`.
 - Test, CR, and Release are sequential gates after implementation lanes close.
 - Backlog Expansion is explicit opt-in and disabled by default.
-- Fast Path safety closeout follows the workflow commit and covers dangerous retries, deleted files, dirty worktrees, real sensitive paths, catalog lineage, and validation cost.
+- Fast Path execution gives safe local commands at most two attempts and live/full commands exactly one. Committed deletions are selected, `--worktree` unions committed/staged/unstaged/untracked paths, and dirty repositories fail without it. Exact current Gateway/App sensitive paths drive high-risk selection. Catalog evidence must bind caller-pinned setup, session, and artifact lineage even when a stale file has its own matching SHA.
 - After an independent read-only CR clears Critical/High findings, merge this feature branch into `main` with `git merge --ff-only`; do not push or delete the branch.
 
 See `docs/agents/README.md` for the assignment header and dispatch rules.

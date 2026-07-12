@@ -106,7 +106,7 @@ RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP=1 \
   ./scripts/codex-desktop-manual-proof.sh run-auto --scenario /absolute/path/scenario.json
 ```
 
-The project Skill `$relaykit-desktop-query` is a smaller one-query dispatcher selected only as a high-risk validation leaf. It accepts `plain`, `markdown`, or `tool`, requires caller-pinned catalog evidence plus catalog/artifact SHA-256 values, and returns redacted model/submission/evidence metadata. Official models use a targeted one-shot App-first lifecycle with an official-only temporary gateway config, so they do not require provider setup. Provider models retain the compatibility full-harness path and require an ignored local provider config. The Skill does not scan stale `dist` candidates, choose validation scope, aggregate stages, or produce `automated_gui_complete` by itself.
+The project Skill `$relaykit-desktop-query` is a smaller one-query dispatcher selected only as a high-risk validation leaf. It accepts `plain`, `markdown`, or `tool`, requires caller-pinned catalog SHA-256, setup id, session id, and artifact SHA-256 matching the catalog's `relaykit_lineage`, and returns redacted model/submission/evidence metadata. Official models use a targeted one-shot App-first lifecycle with an official-only temporary gateway config, so they do not require provider setup. Provider models retain the compatibility full-harness path and require an ignored local provider config. The Skill does not scan stale `dist` candidates, choose validation scope, aggregate stages, or produce `automated_gui_complete` by itself.
 
 The reuse flags are mandatory for harness/test-only reruns. The harness verifies that the existing extracted App is byte-identical to the fixed zip and still runs codesign verification; a mismatch fails closed. Record the zip SHA before and after the run and do not invoke `package_release.sh` for an evidence/assertion-only change.
 
@@ -139,10 +139,11 @@ Validation cadence is tiered:
 
 ```bash
 ./scripts/relaykit-validate.sh --base <commit> --head <commit> --plan-only
+./scripts/relaykit-validate.sh --base <commit> --head <commit> --worktree --plan-only
 ./scripts/relaykit-validate.sh --base <commit> --head <commit> --execute
 ```
 
-The selector emits changed files, change classes, selected and skipped commands, reasons, and explicit build/package/GUI/live/full booleans. Docs, workflow, Skill, and harness changes remain on focused checks. Gateway paths select affected Go packages; ordinary App UI selects one Swift build/validation plus no-model menu smoke. Package and extracted-App dogfood are selected only by packaging inputs. A paid query requires both a justified high-risk class and `--live-query`; full four-stage E2E requires `--full`. Execution retries a failed command once and records the attempt count in JSON.
+The selector emits changed files, change classes, selected and skipped commands, reasons, and explicit build/package/GUI/live/full booleans. Without `--worktree`, a dirty repository fails closed; with it, committed, staged, unstaged, untracked, and deleted paths are unioned. Docs, workflow, Skill, and harness changes remain on focused checks. Gateway paths select affected Go packages; ordinary App UI selects one Swift build/validation plus no-model menu smoke. Package and extracted-App dogfood are selected only by packaging inputs. A paid query requires both a justified high-risk class and `--live-query`; full four-stage E2E requires `--full`. Live/full failures record one attempt; safe local commands may run at most twice.
 
 ## Diagnostics
 

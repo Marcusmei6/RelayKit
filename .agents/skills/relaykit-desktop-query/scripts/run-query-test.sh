@@ -20,10 +20,10 @@ artifact="${tmp}/artifact.zip"
 
 printf '%s\n' 'Explain the current RelayKit status.' >"${query_file}"
 chmod 600 "${query_file}"
-printf '%s\n' '{"official":[{"model":"gpt-5.5","displayName":"GPT-5.5"}],"provider":[]}' >"${catalog}"
 printf '%s\n' 'artifact fixture' >"${artifact}"
-catalog_sha="$(shasum -a 256 "${catalog}" | awk '{print $1}')"
 artifact_sha="$(shasum -a 256 "${artifact}" | awk '{print $1}')"
+jq -n --arg artifact_sha256 "${artifact_sha}" '{relaykit_lineage:{setup_id:"current-setup",session_id:"current-session",artifact_sha256:$artifact_sha256},official:[{model:"gpt-5.5",displayName:"GPT-5.5"}],provider:[]}' >"${catalog}"
+catalog_sha="$(shasum -a 256 "${catalog}" | awk '{print $1}')"
 
 cat >"${backend}" <<'BACKEND'
 #!/usr/bin/env bash
@@ -32,12 +32,14 @@ set -euo pipefail
 [[ "${5:-}" == "--expect" && "${6:-}" == "markdown" ]]
 [[ "${7:-}" == "--catalog-evidence" && -f "${8:-}" ]]
 [[ "${9:-}" == "--catalog-sha256" && -n "${10:-}" ]]
-[[ "${11:-}" == "--artifact-sha256" && -n "${12:-}" && -z "${13:-}" ]]
+[[ "${11:-}" == "--catalog-setup-id" && "${12:-}" == "current-setup" ]]
+[[ "${13:-}" == "--catalog-session-id" && "${14:-}" == "current-session" ]]
+[[ "${15:-}" == "--artifact-sha256" && -n "${16:-}" && -z "${17:-}" ]]
 jq -n \
   --arg model "$2" \
   --arg expect "$6" \
   --arg catalog_sha256 "${10}" \
-  --arg artifact_sha256 "${12}" \
+  --arg artifact_sha256 "${16}" \
   --arg query_sha256 "$(shasum -a 256 "$4" | awk '{print $1}')" \
   '{status:"submitted",model:$model,expect:$expect,catalog_sha256:$catalog_sha256,artifact_sha256:$artifact_sha256,query_sha256:$query_sha256}'
 BACKEND
@@ -51,6 +53,8 @@ RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH="${artifact}" \
     --expect markdown \
     --catalog-evidence "${catalog}" \
     --catalog-sha256 "${catalog_sha}" \
+    --catalog-setup-id current-setup \
+    --catalog-session-id current-session \
     --artifact-sha256 "${artifact_sha}" >"${tmp}/result.json"
 
 jq -e \
@@ -66,24 +70,29 @@ fi
 
 chmod 644 "${query_file}"
 if RELAYKIT_DESKTOP_QUERY_BACKEND="${backend}" \
-  "${RUNNER}" --model 'GPT-5.5' --query-file "${query_file}" --expect markdown --catalog-evidence "${catalog}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
+  "${RUNNER}" --model 'GPT-5.5' --query-file "${query_file}" --expect markdown --catalog-evidence "${catalog}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
   fail "runner accepted a non-0600 query file"
 fi
 
 if RELAYKIT_DESKTOP_QUERY_BACKEND="${backend}" \
-  "${RUNNER}" --query-file "${query_file}" --expect markdown --catalog-evidence "${catalog}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
+  "${RUNNER}" --query-file "${query_file}" --expect markdown --catalog-evidence "${catalog}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
   fail "runner accepted a missing model"
 fi
 
 chmod 600 "${query_file}"
 if RELAYKIT_DESKTOP_QUERY_BACKEND="${backend}" \
-  "${RUNNER}" --model 'GPT-5.5' --query-file "${query_file}" --expect invalid --catalog-evidence "${catalog}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
+  "${RUNNER}" --model 'GPT-5.5' --query-file "${query_file}" --expect invalid --catalog-evidence "${catalog}" --catalog-sha256 "${catalog_sha}" --catalog-setup-id current-setup --catalog-session-id current-session --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
   fail "runner accepted an invalid expectation"
 fi
 
 if RELAYKIT_DESKTOP_QUERY_BACKEND="${backend}" \
   "${RUNNER}" --model 'GPT-5.5' --query-file "${query_file}" --expect plain >/dev/null 2>&1; then
   fail "runner accepted missing explicit catalog/artifact evidence"
+fi
+
+if RELAYKIT_DESKTOP_QUERY_BACKEND="${backend}" \
+  "${RUNNER}" --model 'GPT-5.5' --query-file "${query_file}" --expect plain --catalog-evidence "${catalog}" --catalog-sha256 "${catalog_sha}" --artifact-sha256 "${artifact_sha}" >/dev/null 2>&1; then
+  fail "runner accepted catalog evidence without explicit setup/session lineage"
 fi
 
 printf '%s\n' 'relaykit-desktop-query runner tests passed'

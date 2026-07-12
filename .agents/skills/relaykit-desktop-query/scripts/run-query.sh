@@ -11,6 +11,8 @@ query_file=""
 expect="plain"
 catalog_evidence=""
 catalog_sha256=""
+catalog_setup_id=""
+catalog_session_id=""
 artifact_sha256=""
 
 while [[ "$#" -gt 0 ]]; do
@@ -20,12 +22,14 @@ while [[ "$#" -gt 0 ]]; do
     --expect) expect="${2:-}"; shift 2 ;;
     --catalog-evidence) catalog_evidence="${2:-}"; shift 2 ;;
     --catalog-sha256) catalog_sha256="${2:-}"; shift 2 ;;
+    --catalog-setup-id) catalog_setup_id="${2:-}"; shift 2 ;;
+    --catalog-session-id) catalog_session_id="${2:-}"; shift 2 ;;
     --artifact-sha256) artifact_sha256="${2:-}"; shift 2 ;;
     *) fail "invalid_arguments" ;;
   esac
 done
 
-[[ -n "${model}" && -n "${query_file}" && -n "${catalog_evidence}" && -n "${catalog_sha256}" && -n "${artifact_sha256}" ]] ||
+[[ -n "${model}" && -n "${query_file}" && -n "${catalog_evidence}" && -n "${catalog_sha256}" && -n "${catalog_setup_id}" && -n "${catalog_session_id}" && -n "${artifact_sha256}" ]] ||
   fail "invalid_arguments"
 backend="${RELAYKIT_DESKTOP_QUERY_BACKEND:-}"
 
@@ -47,6 +51,8 @@ catalog_mode="$(stat -f '%Lp' "${catalog_evidence}")"
   fail "catalog_evidence_permissions"
 [[ "${catalog_sha256}" =~ ^[0-9a-f]{64}$ && "${artifact_sha256}" =~ ^[0-9a-f]{64}$ ]] ||
   fail "evidence_hash_invalid"
+[[ "${catalog_setup_id}" =~ ^[A-Za-z0-9._:-]{1,128}$ && "${catalog_session_id}" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] ||
+  fail "catalog_lineage_invalid"
 
 if [[ -z "${backend}" ]]; then
   repo_root="$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -62,4 +68,6 @@ exec "${backend}" \
   --expect "${expect}" \
   --catalog-evidence "${catalog_evidence}" \
   --catalog-sha256 "${catalog_sha256}" \
+  --catalog-setup-id "${catalog_setup_id}" \
+  --catalog-session-id "${catalog_session_id}" \
   --artifact-sha256 "${artifact_sha256}"

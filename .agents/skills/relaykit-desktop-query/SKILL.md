@@ -10,7 +10,7 @@ Accept these logical inputs:
 - `model`: the model id or visible model label understood by the configured backend;
 - `query`: the complete query text to send.
 - `expect`: optional `plain`, `markdown`, or `tool`; defaults to `plain`.
-- `catalog_evidence` plus its expected SHA-256: an explicitly selected current app-server catalog.
+- `catalog_evidence` plus its expected SHA-256, setup id, and session id: an explicitly selected current app-server catalog whose `relaykit_lineage` also binds the current artifact SHA-256.
 - `artifact_sha256`: the expected current RelayKit zip SHA-256.
 
 ## Run
@@ -27,6 +27,8 @@ Accept these logical inputs:
      --expect "${EXPECT:-plain}" \
      --catalog-evidence "/absolute/path/to/current/app-server.json" \
      --catalog-sha256 "$CATALOG_SHA256" \
+     --catalog-setup-id "$CATALOG_SETUP_ID" \
+     --catalog-session-id "$CATALOG_SESSION_ID" \
      --artifact-sha256 "$ARTIFACT_SHA256"
    ```
 

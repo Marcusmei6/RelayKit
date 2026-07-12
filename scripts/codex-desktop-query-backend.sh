@@ -10,7 +10,8 @@ fail() {
 
 [[ "${1:-}" == "--model" && -n "${2:-}" && "${3:-}" == "--query-file" && -n "${4:-}" &&
    "${5:-}" == "--expect" && -n "${6:-}" && "${7:-}" == "--catalog-evidence" && -n "${8:-}" &&
-   "${9:-}" == "--catalog-sha256" && -n "${10:-}" && "${11:-}" == "--artifact-sha256" && -n "${12:-}" && -z "${13:-}" ]] ||
+   "${9:-}" == "--catalog-sha256" && -n "${10:-}" && "${11:-}" == "--catalog-setup-id" && -n "${12:-}" &&
+   "${13:-}" == "--catalog-session-id" && -n "${14:-}" && "${15:-}" == "--artifact-sha256" && -n "${16:-}" && -z "${17:-}" ]] ||
   fail "invalid_arguments"
 
 model="$2"
@@ -18,7 +19,9 @@ query_file="$4"
 expect="$6"
 catalog_evidence="$8"
 catalog_sha256="${10}"
-artifact_sha256="${12}"
+catalog_setup_id="${12}"
+catalog_session_id="${14}"
+artifact_sha256="${16}"
 harness="${RELAYKIT_DESKTOP_QUERY_HARNESS:-${ROOT}/scripts/codex-desktop-manual-proof.sh}"
 official_lifecycle="${RELAYKIT_DESKTOP_QUERY_OFFICIAL_LIFECYCLE:-}"
 artifact_path="${RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH:-${ROOT}/dist/RelayKitApp-local.zip}"
@@ -28,8 +31,15 @@ artifact_path="${RELAYKIT_DESKTOP_QUERY_ARTIFACT_PATH:-${ROOT}/dist/RelayKitApp-
 [[ "${expect}" == "plain" || "${expect}" == "markdown" || "${expect}" == "tool" ]] || fail "expect_invalid"
 [[ "${catalog_evidence}" = /* && -f "${catalog_evidence}" && ! -L "${catalog_evidence}" ]] || fail "catalog_evidence_unavailable"
 [[ "${catalog_sha256}" =~ ^[0-9a-f]{64}$ && "${artifact_sha256}" =~ ^[0-9a-f]{64}$ ]] || fail "evidence_hash_invalid"
+[[ "${catalog_setup_id}" =~ ^[A-Za-z0-9._:-]{1,128}$ && "${catalog_session_id}" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || fail "catalog_lineage_invalid"
 [[ "$(shasum -a 256 "${catalog_evidence}" | awk '{print $1}')" == "${catalog_sha256}" ]] || fail "catalog_evidence_stale"
 [[ -f "${artifact_path}" && ! -L "${artifact_path}" && "$(shasum -a 256 "${artifact_path}" | awk '{print $1}')" == "${artifact_sha256}" ]] || fail "artifact_evidence_stale"
+jq -e \
+  --arg setup_id "${catalog_setup_id}" \
+  --arg session_id "${catalog_session_id}" \
+  --arg artifact_sha256 "${artifact_sha256}" \
+  '.relaykit_lineage == {setup_id:$setup_id,session_id:$session_id,artifact_sha256:$artifact_sha256}' \
+  "${catalog_evidence}" >/dev/null 2>&1 || fail "catalog_lineage_stale"
 [[ -x "${harness}" ]] || fail "harness_unavailable"
 if [[ -z "${official_lifecycle}" && "${harness}" == "${ROOT}/scripts/codex-desktop-manual-proof.sh" ]]; then
   official_lifecycle="${ROOT}/scripts/codex-desktop-query-official-once.sh"

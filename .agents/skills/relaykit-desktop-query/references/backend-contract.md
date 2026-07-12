@@ -7,6 +7,8 @@ backend --model MODEL --query-file /absolute/path/query.txt \
   --expect plain|markdown|tool \
   --catalog-evidence /absolute/path/app-server.json \
   --catalog-sha256 SHA256 \
+  --catalog-setup-id SETUP_ID \
+  --catalog-session-id SESSION_ID \
   --artifact-sha256 SHA256
 ```
 
@@ -14,7 +16,7 @@ Requirements:
 
 - Treat `model` as opaque input. Resolve ids or visible labels inside the backend.
 - Read the query from the supplied regular `0600` file; never require query text in argv or environment variables.
-- Require explicit catalog evidence and verify its SHA-256. Never scan `dist/` for the first available catalog.
+- Require explicit catalog evidence and verify its SHA-256. Require exact `relaykit_lineage` fields `setup_id`, `session_id`, and `artifact_sha256` to match the caller-pinned current setup/session/artifact. A stale catalog with its own matching SHA must fail. Never scan `dist/` for the first available catalog.
 - Verify the current product artifact against the caller's artifact SHA-256.
 - Apply provider preconditions only when the resolved model comes from the provider catalog. Official models must not be rejected solely because provider configuration is absent.
 - Perform one submission attempt. Do not retry when Send may already have happened.
