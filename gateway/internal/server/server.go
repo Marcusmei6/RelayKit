@@ -305,6 +305,19 @@ func (s *Server) probeModel(provider config.ProviderProfile, model config.Model)
 			}
 			return true, ""
 		}
+		if provider.APIFormat == config.APIFormatOpenAIResponses {
+			if !isJSONContentType(resp.Header.Get("Content-Type")) {
+				return false, "upstream decode error"
+			}
+			nativeResponse, err := rewriteNativeResponsesResponse(io.LimitReader(resp.Body, 1<<20), model.ID)
+			if err != nil {
+				return false, "upstream decode error"
+			}
+			if nativeResponse.status != "completed" {
+				return false, "upstream response not completed"
+			}
+			return true, ""
+		}
 		var chat chatResponse
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&chat); err != nil {
 			return false, "upstream decode error"
@@ -324,7 +337,7 @@ func healthReason(reason string) string {
 		return reason
 	}
 	switch reason {
-	case "auth failed", "network failed", "upstream non-success", "unsupported model", "upstream decode error":
+	case "auth failed", "network failed", "upstream non-success", "unsupported model", "upstream decode error", "upstream response not completed":
 		return reason
 	default:
 		return "upstream non-success"
@@ -398,9 +411,23 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		defer closeBody()
 	}
 
-	var req responsesRequest
-	if err := json.NewDecoder(body).Decode(&req); err != nil {
+	var rawRequest map[string]json.RawMessage
+	if err := json.NewDecoder(body).Decode(&rawRequest); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", err.Error()))
+		return
+	}
+	rawBody, err := json.Marshal(rawRequest)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "invalid request body"))
+		return
+	}
+	var req responsesRequest
+	if err := json.Unmarshal(rawBody, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "invalid request body"))
+		return
+	}
+	if provider, model, ok := s.providerForModel(req.Model); ok && provider.APIFormat == config.APIFormatOpenAIResponses {
+		s.nativeOpenAIResponses(w, r, rawRequest, req, provider, model, start)
 		return
 	}
 	messages, err := chatMessages(req.Input)
@@ -517,9 +544,54 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		case websocketOpcodePing:
 			_ = writeWebSocketFrame(rw.Writer, websocketOpcodePong, payload)
 		case websocketOpcodeText, websocketOpcodeBinary:
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(payload, &envelope); err != nil {
+				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
+			requestBody := envelope
+			if rawType, hasType := envelope["type"]; hasType {
+				var eventType string
+				if err := json.Unmarshal(rawType, &eventType); err != nil || eventType != "response.create" {
+					_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
+					_ = writeWebSocketClose(rw.Writer)
+					return
+				}
+				if envelope["response"] != nil {
+					if err := json.Unmarshal(envelope["response"], &requestBody); err != nil {
+						_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
+						_ = writeWebSocketClose(rw.Writer)
+						return
+					}
+				} else {
+					requestBody = make(map[string]json.RawMessage, len(envelope)-1)
+					for key, value := range envelope {
+						if key != "type" {
+							requestBody[key] = value
+						}
+					}
+				}
+				if requestBody == nil {
+					_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
+					_ = writeWebSocketClose(rw.Writer)
+					return
+				}
+			}
+			requestJSON, err := json.Marshal(requestBody)
+			if err != nil {
+				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
 			var req responsesRequest
-			if err := json.Unmarshal(payload, &req); err != nil {
+			if err := json.Unmarshal(requestJSON, &req); err != nil {
 				_ = writeWebSocketJSON(rw.Writer, map[string]any{"type": "response.error", "message": "invalid websocket response request"})
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
+			if provider, model, ok := s.providerForModel(req.Model); ok && provider.APIFormat == config.APIFormatOpenAIResponses {
+				s.nativeOpenAIResponsesWebSocket(rw.Writer, r.Context(), requestBody, req, provider, model, start)
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
@@ -1088,6 +1160,9 @@ func upstreamPath(apiFormat string) string {
 	if apiFormat == config.APIFormatAnthropicMessages {
 		return "messages"
 	}
+	if apiFormat == config.APIFormatOpenAIResponses {
+		return "responses"
+	}
 	return "chat/completions"
 }
 
@@ -1161,6 +1236,14 @@ func addProviderTools(request map[string]any, apiFormat string, tools []response
 }
 
 func probeUpstreamRequest(apiFormat, model string) map[string]any {
+	if apiFormat == config.APIFormatOpenAIResponses {
+		return map[string]any{
+			"model":             model,
+			"input":             "Return a tiny reachability confirmation.",
+			"stream":            false,
+			"max_output_tokens": 16,
+		}
+	}
 	messages := []chatMessage{{Role: "user", Content: "Return a tiny reachability confirmation."}}
 	req := upstreamRequest(apiFormat, model, messages, false)
 	req["max_tokens"] = 16

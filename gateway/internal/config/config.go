@@ -15,6 +15,7 @@ const (
 	CodeValidationError        = "config_validation_error"
 	CodeUnsupportedFormat      = "unsupported_provider_format"
 	APIFormatOpenAIChat        = "openai_chat"
+	APIFormatOpenAIResponses   = "openai_responses"
 	APIFormatAnthropicMessages = "anthropic_messages"
 	CredentialKindEnv          = "env"
 	CredentialKindKeychain     = "keychain"
@@ -204,7 +205,7 @@ func validate(cfg Config) error {
 		if p.ID == "" || p.Name == "" || p.BaseURL == "" || p.APIFormat == "" || len(p.Models) == 0 {
 			return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid provider %q", p.ID)}
 		}
-		if p.APIFormat != APIFormatOpenAIChat && p.APIFormat != APIFormatAnthropicMessages {
+		if p.APIFormat != APIFormatOpenAIChat && p.APIFormat != APIFormatOpenAIResponses && p.APIFormat != APIFormatAnthropicMessages {
 			return &Error{Code: CodeUnsupportedFormat, Err: fmt.Errorf("unsupported api_format %q", p.APIFormat)}
 		}
 		if err := validateBaseURL(p.BaseURL); err != nil {

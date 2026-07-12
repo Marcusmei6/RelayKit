@@ -139,6 +139,21 @@ func TestValidationRejectsUnsupportedFormat(t *testing.T) {
 	}
 }
 
+func TestValidationAcceptsOpenAIResponsesFormat(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	if err := os.WriteFile(p, []byte(`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_responses","models":[{"id":"m"}]}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load err = %v", err)
+	}
+	if got := cfg.Providers[0].APIFormat; got != APIFormatOpenAIResponses {
+		t.Fatalf("api_format = %q, want %q", got, APIFormatOpenAIResponses)
+	}
+}
+
 func TestAuthEnvOptional(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
