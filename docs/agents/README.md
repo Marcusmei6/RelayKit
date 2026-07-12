@@ -23,10 +23,12 @@ The checked-in agent configs use public model names. Keep private/local model ro
 1. Root session starts `relaykit_planner` for non-trivial project work.
 2. Planner builds a dispatch board with plan id, branch/worktree, owned paths, blocked paths, dependencies, tiers, validators, and stop conditions.
 3. Planner is the only project role that decides delegation. It may authorize at most two concurrent write lanes, and their owned paths must not overlap.
-4. Project role selection is root-mediated. Planner outputs `PARENT DISPATCH REQUIRED`; root mechanically launches only those exact registered roles and returns results to Planner. Planner must not use nested generic `spawn_agent(task_name=...)`, because that inherits Planner model/effort instead of loading the specialist config.
+4. Project role selection is root-mediated. Planner outputs `PARENT DISPATCH REQUIRED`. Main/root is a mechanical dispatcher only: it launches only those exact registered roles and returns each role's complete result to Planner. Main/root must not patch files, redirect findings, choose another role, expand owned paths, change tiers, or bypass Planner. Planner remains the sole owner of decomposition, delegation, remediation, validation, and closeout decisions, and must not use nested generic `spawn_agent(task_name=...)`, because that inherits Planner model/effort instead of loading the specialist config.
 5. Implementation lanes go to `relaykit_gateway`, `relaykit_app`, or `relaykit_worker`. Cross-App/Gateway work is always split into two specialist lanes.
 6. Close implementation lanes, then run `relaykit_test`, then `relaykit_cr`, then `relaykit_release` when release scope exists. These gates never run concurrently.
 7. Planner updates `docs/handoff.md` and relevant plan docs before final handoff.
+
+Every CR finding returns through Main/root to Planner. Main/root must not send CR findings directly to an implementation role. Planner dispositions every finding and, when remediation is required, emits a new bounded assignment to the correct original owning specialist. The remediation result returns to Planner. Planner generates a fresh selector plan, then authorizes relaykit_test and relaykit_cr again, sequentially.
 
 ## Desktop Live Validation Gate
 
@@ -38,7 +40,11 @@ Desktop live validation is opt-in because it can send paid requests. A single ex
 
 Accessibility permission, authenticated Desktop state, and repository-external provider configuration are one-time system prerequisites. A daily proof must then finish with no human intervention or fail with a bounded machine-readable auth/selector/PID/window error. Only harness exit `0` plus current evidence containing `desktop_gui_route_proof=automated_gui_complete` and `human_intervention_count=0` counts as automated Desktop success.
 
-If `relaykit_cr` fails to start, returns a provider route error, or does not return after one bounded retry, record the failure in `docs/handoff.md` and run a root-session read-only review over the same diff. Passing tests plus a clean public-boundary scan plus root review may close the lane; do not let CR provider availability become the only blocker.
+If `relaykit_cr` fails to start, returns a provider route error, or does not return after one bounded retry, treat the outcome as CR UNAVAILABLE. Main/root returns that unavailable result to Planner. Main/root must not invoke the root review or decide closeout. Main/root must not write unavailable or fallback-review state. Planner records CR UNAVAILABLE only in controller evidence and must not write any repository file. Planner may authorize fallback review only for the exact unchanged Test-verified diff with the same base commit, HEAD commit, changed-file set, complete diff SHA-256, and tracked-worktree snapshot. The fallback review verifies that identity before review and returns the complete fallback review result to Planner. Planner alone decides closeout from the passed tests, clean public-boundary scan, and fallback review. This root-review fallback applies only when CR is unavailable after its bounded retry and must never bypass actual CR findings. The fallback is forbidden when relaykit_cr returned actual findings; do not let CR provider availability become the only blocker.
+
+## Approval Boundary
+
+For reversible, public-safe, repository-local reads, edits, and focused checks already inside the supplied plan, owned paths, and assigned risk tier, Planner proceeds without asking the user again. Planner may pre-authorize those actions in the specialist assignment. Main/root launches only the exact Planner-selected specialist. The specialist performs the pre-authorized operation, then Main/root returns the specialist's complete result to Planner. Specialists still stop on scope, ownership, risk-tier, validation-plan, or shared-state changes. User approval remains required for product-scope or public-API changes, security changes, irreversible data behavior, real credentials, private providers, signing, publishing, hosted telemetry, destructive operations, paid or live requests, shared runtime mutation, or port 18787 takeover.
 
 ## Continuation Gate
 

@@ -85,9 +85,38 @@ for required in (
     "Project role selection is root-mediated",
     "Do not call a nested generic `spawn_agent`",
     "PARENT DISPATCH REQUIRED",
+    "Main/root is a mechanical dispatcher only",
+    "must not patch files, redirect findings, choose another role, expand owned paths, change tiers, or bypass Planner",
+    "returns each role's complete result to Planner",
     "at most two concurrent write lanes",
     "Test, CR, and Release gates are sequential",
     "Never run these three roles concurrently",
+    "Every CR finding returns through Main/root to Planner",
+    "Main/root must not send CR findings directly to an implementation role",
+    "Planner dispositions every finding",
+    "new bounded assignment to the correct original owning specialist",
+    "remediation result returns to Planner",
+    "fresh selector plan",
+    "relaykit_test and relaykit_cr again, sequentially",
+    "root-review fallback applies only when CR is unavailable after its bounded retry",
+    "must never bypass actual CR findings",
+    "CR UNAVAILABLE",
+    "Main/root returns that unavailable result to Planner",
+    "Main/root must not invoke the root review or decide closeout",
+    "records CR UNAVAILABLE only in controller evidence and must not write any repository file",
+    "same base commit, HEAD commit, changed-file set, complete diff SHA-256, and tracked-worktree snapshot",
+    "returns the complete fallback review result to Planner",
+    "Planner alone decides closeout",
+    "fallback is forbidden when relaykit_cr returned actual findings",
+    "reversible, public-safe, repository-local reads, edits, and focused checks",
+    "supplied plan, owned paths, and assigned risk tier",
+    "without asking the user again",
+    "may pre-authorize those actions in the specialist assignment",
+    "Main/root launches only the exact Planner-selected specialist",
+    "The specialist performs the pre-authorized operation",
+    "Main/root returns the specialist's complete result to Planner",
+    "scope, ownership, risk-tier, validation-plan, or shared-state changes",
+    "User approval remains required for product-scope or public-API changes, security changes, irreversible data behavior, real credentials, private providers, signing, publishing, hosted telemetry, destructive operations, paid or live requests, shared runtime mutation, or port 18787 takeover",
     "Backlog Expansion Gate is disabled by default",
     "BACKLOG EXPANSION: enabled",
     "task crossing app/** and gateway/** must be split",
@@ -99,11 +128,55 @@ workflow_docs = (root / "docs" / "agents" / "README.md").read_text(encoding="utf
 for required in (
     "Project role selection is root-mediated",
     "PARENT DISPATCH REQUIRED",
+    "Main/root is a mechanical dispatcher only",
+    "must not patch files, redirect findings, choose another role, expand owned paths, change tiers, or bypass Planner",
+    "returns each role's complete result to Planner",
     "nested generic `spawn_agent(task_name=...)`",
+    "Every CR finding returns through Main/root to Planner",
+    "Main/root must not send CR findings directly to an implementation role",
+    "Planner dispositions every finding",
+    "new bounded assignment to the correct original owning specialist",
+    "remediation result returns to Planner",
+    "fresh selector plan",
+    "relaykit_test and relaykit_cr again, sequentially",
+    "root-review fallback applies only when CR is unavailable after its bounded retry",
+    "must never bypass actual CR findings",
+    "CR UNAVAILABLE",
+    "Main/root returns that unavailable result to Planner",
+    "Main/root must not invoke the root review or decide closeout",
+    "records CR UNAVAILABLE only in controller evidence and must not write any repository file",
+    "same base commit, HEAD commit, changed-file set, complete diff SHA-256, and tracked-worktree snapshot",
+    "returns the complete fallback review result to Planner",
+    "Planner alone decides closeout",
+    "fallback is forbidden when relaykit_cr returned actual findings",
+    "reversible, public-safe, repository-local reads, edits, and focused checks",
+    "supplied plan, owned paths, and assigned risk tier",
+    "without asking the user again",
+    "may pre-authorize those actions in the specialist assignment",
+    "Main/root launches only the exact Planner-selected specialist",
+    "The specialist performs the pre-authorized operation",
+    "Main/root returns the specialist's complete result to Planner",
+    "scope, ownership, risk-tier, validation-plan, or shared-state changes",
+    "User approval remains required for product-scope or public-API changes, security changes, irreversible data behavior, real credentials, private providers, signing, publishing, hosted telemetry, destructive operations, paid or live requests, shared runtime mutation, or port 18787 takeover",
     "continues only inside the supplied plan",
     "requires explicit Backlog Expansion opt-in",
 ):
     assert required in workflow_docs, required
+
+ambiguous_authorization = "Main/root merely carries out " + "that authorization"
+assert ambiguous_authorization not in planner, ambiguous_authorization
+assert ambiguous_authorization not in workflow_docs, ambiguous_authorization
+ambiguous_fallback = "record the failure in `docs/handoff.md` and run a root-session read-only review"
+assert ambiguous_fallback not in workflow_docs, ambiguous_fallback
+for forbidden_handoff_write in (
+    "records the unavailable state in docs/handoff.md",
+    "record the failure in `docs/handoff.md`",
+):
+    assert forbidden_handoff_write not in planner, forbidden_handoff_write
+    assert forbidden_handoff_write not in workflow_docs, forbidden_handoff_write
+loose_same_diff = "read-only review over the same diff"
+assert loose_same_diff not in planner, loose_same_diff
+assert loose_same_diff not in workflow_docs, loose_same_diff
 
 for role, values in agents.items():
     if role == "relaykit_planner":
@@ -119,8 +192,38 @@ assert "tracked-worktree" in agents["relaykit_test"]["developer_instructions"]
 assert "setup id" in agents["relaykit_test"]["developer_instructions"]
 assert "session id" in agents["relaykit_test"]["developer_instructions"]
 assert "Only review. Do not edit files." in agents["relaykit_cr"]["developer_instructions"]
+assert "Return every finding through Main/root to Planner" in agents["relaykit_cr"]["developer_instructions"]
 assert "only packaging, signing, notarization, release helpers, and release documentation" in agents["relaykit_release"]["developer_instructions"]
 assert "Do not modify app/** or gateway/** product business code" in agents["relaykit_release"]["developer_instructions"]
+
+development_plan = (root / "docs" / "development-plan.md").read_text(encoding="utf-8")
+handoff = (root / "docs" / "handoff.md").read_text(encoding="utf-8")
+for current_truth in (
+    "Workflow 5.6 is current on `main`",
+    "fresh exact `relaykit_planner` and `relaykit_worker` runtime smoke",
+    "authoritative parent/root `turn_context` and direct role-thread metadata",
+    "Static TOML and Agent self-report are not runtime proof",
+    "The responsibility contract is implemented",
+    "Acceptance requires fresh sequential `relaykit_test` and `relaykit_cr` evidence returned to Planner",
+    "Transient gate outcomes belong in controller evidence and require no source edit after CR",
+    "An unchanged-diff CR `SHIP IT` after Test `PASS` permits Planner to close the objective without a source edit",
+):
+    assert current_truth in development_plan, current_truth
+    assert current_truth in handoff, current_truth
+for transient_state in (
+    "Independent `relaykit_test` passed",
+    "CR1 returned `NEEDS REMEDIATION`",
+    "RK-WF-5.6-MAIN-PLANNER-CLOSEOUT-R1",
+    "fresh `relaykit_test` and `relaykit_cr` remain pending",
+    "Final closeout is not claimed",
+):
+    assert transient_state not in development_plan, transient_state
+    assert transient_state not in handoff, transient_state
+assert "active pre-merge gate" not in handoff
+assert "merge this feature branch into `main`" not in development_plan
+stale_pending = "pending independent " + "`relaykit_test` and `relaykit_cr`"
+assert stale_pending not in development_plan, stale_pending
+assert stale_pending not in handoff, stale_pending
 
 print("RelayKit agent workflow contract tests passed")
 PY
