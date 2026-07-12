@@ -249,22 +249,27 @@ Status: selector, Skill contracts, evidence-state fix, and the post-fix live Ski
 
 ## Task Ownership
 
-- `relaykit_planner` (`gpt-5.6-sol` / `ultra`) is the sole delegation owner and owns roadmap, bounded dispatch, convergence, validation/review gates, and public boundary. It runs at most two disjoint write lanes and never auto-expands backlog.
-- `relaykit_gateway` (`gpt-5.6-sol` / `high`) owns only `gateway/**` protocol, routing, catalog, config, usage, and tests.
-- `relaykit_app` (`gpt-5.6-sol` / `high`) owns only `app/**` SwiftUI/AppKit, Keychain, helper lifecycle, config activation, and tests.
+- `relaykit_planner` (`gpt-5.6-sol` / `xhigh`) is the sole delegation owner and owns roadmap, bounded dispatch, convergence, validation/review gates, and public boundary. It runs at most two disjoint write lanes and never auto-expands backlog.
+- `relaykit_gateway` (`gpt-5.6-terra` / `high`) owns only `gateway/**` protocol, routing, catalog, config, usage, and tests.
+- `relaykit_app` (`gpt-5.6-terra` / `high`) owns only `app/**` SwiftUI/AppKit, Keychain, helper lifecycle, config activation, and tests.
 - `relaykit_worker` (`gpt-5.6-sol` / `high`) owns assigned docs, examples, project Agent/Skill config, and ordinary tooling; it never substitutes for App or Gateway.
-- `relaykit_test` (`gpt-5.6-luna` / `medium`) executes only the selector-generated plan. Its workspace write access is limited to ignored build/test artifacts, with byte-identical tracked-worktree status required before and after execution.
-- `relaykit_cr` (`gpt-5.6-sol` / `xhigh`) owns read-only findings and never edits or delegates.
+- `relaykit_test` (`gpt-5.6-luna` / `medium`): Eligible Tier 0/1 Fast Path executes the Planner exact command allowlist directly; otherwise Test executes the selector-generated plan. Its workspace write access is limited to ignored build/test artifacts, with byte-identical tracked-worktree status required before and after execution.
+- `relaykit_cr` (`gpt-5.6-sol` / `high`) owns read-only findings and never edits or delegates.
 - `relaykit_release` (`gpt-5.6-terra` / `high`) owns assigned packaging/signing/notarization/release paths, not product business code.
 
 ## Phase 7.8: Workflow 5.6 Migration and Fast Path Safety
 
-Status: Workflow 5.6 is current on `main`; prior workflow configuration, ownership contracts, and Fast Path safety contracts are implemented. W1 is a fresh exact `relaykit_planner` and `relaykit_worker` runtime smoke, supported by authoritative parent/root `turn_context` and direct role-thread metadata. Static TOML and Agent self-report are not runtime proof. The responsibility contract is implemented. Acceptance requires fresh sequential `relaykit_test` and `relaykit_cr` evidence returned to Planner. Transient gate outcomes belong in controller evidence and require no source edit after CR. An unchanged-diff CR `SHIP IT` after Test `PASS` permits Planner to close the objective without a source edit.
+Status: Workflow 5.6 is current on `main`; the seven-role model matrix and minimal Main/Planner responsibility contract are implemented.
 
-- Keep `max_threads = 8` and `max_depth = 2`; only Planner uses Ultra and no role uses Max.
-- Planner is the only role allowed to decide delegation and may authorize at most two concurrent write lanes; root only performs exact registered-role launches from `PARENT DISPATCH REQUIRED`.
+- Keep `max_threads = 8` and `max_depth = 2`; allowed efforts are xhigh, high, and medium, and no role uses Ultra or Max.
+- The exact seven-role model matrix is Planner Sol/xhigh, Gateway Terra/high, App Terra/high, Worker Sol/high, Test Luna/medium, CR Sol/high, and Release Terra/high; Ultra and Max are forbidden.
+- Main/root owns goal registration, pause/resume, risk assessment, and user confirmation. Main/root does not decompose tasks or implement changes. Planner decomposes work, designates and dispatches bounded roles, and owns remediation.
+- Main/root may approve one batch of 1-3 test messages only for the current task-bound isolated proof/session. Main/root approves only; the Planner-designated `relaykit_test` or `relaykit_worker` sends the messages. The batch is limited to 3 messages, stays bound to that isolated proof/session, does not read, refresh, copy, or migrate credentials, and does not touch global config/auth, LaunchAgents, shared services, or port `18787`. It does not publish, sign, delete, perform irreversible actions, automatically retry, or expand the approved count. More than 3 messages, any retry or count expansion, auth/login, shared ports or services, global config/auth, signing or release, and destructive or irreversible actions require user confirmation.
 - Test, CR, and Release are sequential gates after implementation lanes close.
 - Backlog Expansion is explicit opt-in and disabled by default.
+- Tier 0/1 Fast Validation Path is eligible only when all of these are true: Validation Tier is 0 or 1; changed paths are limited to docs, public agent TOML, the workflow contract test, or ordinary project config; scope excludes app/**, gateway/**, credentials, Keychain, auth, shared services, LaunchAgents, port 18787, global Codex config, build, package, GUI, network, live requests, signing, and release; and Planner supplies an exact command allowlist.
+- An eligible Fast Path uses exactly one Planner, one bounded Worker, one Test, and one CR. Test executes the exact allowlist directly without selector generation or `relaykit-validate.sh --plan-only`. Tier 2/3 and every ineligible change retain the selector path.
+- Main/root still performs no decomposition or implementation, but may verbatim-correct a missing ROLE field, field-name typo, or command-transcription error without replanning. Allow at most one remediation. After a test-assertion-only fix, rerun only the corresponding test and minimal CR recheck without repeating passed runtime metadata. Nonblocking Medium/Low findings become backlog evidence without scope expansion.
 - Fast Path execution gives safe local commands at most two attempts and live/full commands exactly one. Committed deletions are selected, but deleted shell/TOML paths are never passed to syntax parsers. `--worktree` unions committed/staged/unstaged/untracked paths, and dirty repositories fail without it. `.codex/config.toml` and the workflow contract script select the full workflow contract. Exact current Gateway/App sensitive paths drive high-risk selection.
 - The manual-proof app-server producer atomically writes `relaykit_lineage` with current setup id, session id, and product artifact SHA-256. The query backend accepts only one structured `status=complete` result with submitted state and evidence path; an exit-zero failed/invalid result remains a redacted failure, and non-structured success stderr is not forwarded.
 

@@ -10,12 +10,12 @@ The checked-in agent configs use public model names. Keep private/local model ro
 
 | Agent | Model | Role | Writes? | Use when | Must not do |
 | --- | --- | --- | --- | --- | --- |
-| `relaykit_planner` | `gpt-5.6-sol` / `ultra` | Controller and sole delegation owner | Planning/handoff only | Split work, assign at most two disjoint write lanes, enforce gates, converge evidence | Implement product code, auto-expand backlog, claim runtime metadata from self-report |
-| `relaykit_gateway` | `gpt-5.6-sol` / `high` | Go gateway specialist | `gateway/**` only | Protocols, routes, config, catalog, usage events, gateway tests | Edit App/docs/Agent config, delegate, copy private gateway behavior |
-| `relaykit_app` | `gpt-5.6-sol` / `high` | Apple app specialist | `app/**` only | SwiftUI/AppKit, Keychain, helper lifecycle, config activation | Edit gateway/docs/Agent config, delegate, implement protocol adapters in Swift |
+| `relaykit_planner` | `gpt-5.6-sol` / `xhigh` | Controller and sole delegation owner | Planning/handoff only | Split work, assign at most two disjoint write lanes, enforce gates, converge evidence | Implement product code, auto-expand backlog, claim runtime metadata from self-report |
+| `relaykit_gateway` | `gpt-5.6-terra` / `high` | Go gateway specialist | `gateway/**` only | Protocols, routes, config, catalog, usage events, gateway tests | Edit App/docs/Agent config, delegate, copy private gateway behavior |
+| `relaykit_app` | `gpt-5.6-terra` / `high` | Apple app specialist | `app/**` only | SwiftUI/AppKit, Keychain, helper lifecycle, config activation | Edit gateway/docs/Agent config, delegate, implement protocol adapters in Swift |
 | `relaykit_worker` | `gpt-5.6-sol` / `high` | Bounded project worker | Assigned docs/examples/config/tooling only | `docs/**`, `examples/**`, `.codex/**`, `.agents/**`, ordinary scripts | Edit App/Gateway, act as a cross-product generalist, delegate, merge/push |
-| `relaykit_test` | `gpt-5.6-luna` / `medium` | Tracked-source read-only validator | Ignored test/build artifacts only | Execute only selector-selected commands and return pass/fail/unavailable | Change, repair, restore, or stage tracked paths; add unplanned commands; delegate; drive live GUI manually |
-| `relaykit_cr` | `gpt-5.6-sol` / `xhigh` | Read-only reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files or delegate |
+| `relaykit_test` | `gpt-5.6-luna` / `medium` | Tracked-source read-only validator | Ignored test/build artifacts only | Eligible Tier 0/1 Fast Path executes the Planner exact command allowlist directly; otherwise Test executes the selector-generated plan. | Change, repair, restore, or stage tracked paths; add unplanned commands; delegate; drive live GUI manually |
+| `relaykit_cr` | `gpt-5.6-sol` / `high` | Read-only reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files or delegate |
 | `relaykit_release` | `gpt-5.6-terra` / `high` | Release specialist | Assigned release/package paths only | Packaging, signing/notarization readiness, release docs | Edit product business code, delegate, sign/publish without authorization |
 
 ## Default Flow
@@ -28,11 +28,19 @@ The checked-in agent configs use public model names. Keep private/local model ro
 6. Close implementation lanes, then run `relaykit_test`, then `relaykit_cr`, then `relaykit_release` when release scope exists. These gates never run concurrently.
 7. Planner updates `docs/handoff.md` and relevant plan docs before final handoff.
 
-Every CR finding returns through Main/root to Planner. Main/root must not send CR findings directly to an implementation role. Planner dispositions every finding and, when remediation is required, emits a new bounded assignment to the correct original owning specialist. The remediation result returns to Planner. Planner generates a fresh selector plan, then authorizes relaykit_test and relaykit_cr again, sequentially.
+Every CR finding returns through Main/root to Planner. Main/root must not send CR findings directly to an implementation role. Planner dispositions every finding and, when remediation is required, emits a new bounded assignment to the correct original owning specialist. The remediation result returns to Planner. Selector-path remediation receives a fresh selector plan before relaykit_test and relaykit_cr run again, sequentially; Fast Path remediation follows the bounded rerun rule below.
+
+## Tier 0/1 Fast Validation Path
+
+Tier 0/1 Fast Validation Path is eligible only when all of these are true: Validation Tier is 0 or 1; changed paths are limited to docs, public agent TOML, the workflow contract test, or ordinary project config; scope excludes app/**, gateway/**, credentials, Keychain, auth, shared services, LaunchAgents, port 18787, global Codex config, build, package, GUI, network, live requests, signing, and release; and Planner supplies an exact command allowlist.
+
+An eligible Fast Path uses exactly one Planner, one bounded Worker, one Test, and one CR. Test executes the exact allowlist directly without selector generation or `relaykit-validate.sh --plan-only`. Tier 2/3 and every ineligible change retain the selector path.
+
+Main/root still performs no decomposition or implementation, but may verbatim-correct a missing ROLE field, field-name typo, or command-transcription error without replanning. Allow at most one remediation. After a test-assertion-only fix, rerun only the corresponding test and minimal CR recheck without repeating passed runtime metadata. Nonblocking Medium/Low findings become backlog evidence without scope expansion.
 
 ## Desktop Live Validation Gate
 
-Every validation lane starts with `./scripts/relaykit-validate.sh --base <commit> --head <commit> --plan-only`. The changed-file selector, not a generic tier label, decides whether the lane needs syntax, focused contracts, Swift/Go work, UI smoke, package, a live query, or full E2E. By default the repository must be clean; pass `--worktree` to deliberately plan the union of committed, staged, unstaged, and untracked paths. Execute the plan only after one coherent root-cause group is ready; do not repeat unchanged layers. Safe, side-effect-free local failures may be retried once. Live and full commands execute once and are never retried.
+Every selector-path validation lane starts with `./scripts/relaykit-validate.sh --base <commit> --head <commit> --plan-only`. The changed-file selector, not a generic tier label, decides whether the lane needs syntax, focused contracts, Swift/Go work, UI smoke, package, a live query, or full E2E. By default the repository must be clean; pass `--worktree` to deliberately plan the union of committed, staged, unstaged, and untracked paths. Execute the plan only after one coherent root-cause group is ready; do not repeat unchanged layers. Safe, side-effect-free local failures may be retried once. Live and full commands execute once and are never retried.
 
 `relaykit_test` uses `workspace-write` because selected Swift/package commands may need ignored build outputs. That access does not grant source ownership: Test records `git status --porcelain=v1 --untracked-files=no` before and after execution, requires the snapshots to be byte-identical, and fails with `tracked_worktree_changed` instead of repairing any tracked change.
 
@@ -44,7 +52,9 @@ If `relaykit_cr` fails to start, returns a provider route error, or does not ret
 
 ## Approval Boundary
 
-For reversible, public-safe, repository-local reads, edits, and focused checks already inside the supplied plan, owned paths, and assigned risk tier, Planner proceeds without asking the user again. Planner may pre-authorize those actions in the specialist assignment. Main/root launches only the exact Planner-selected specialist. The specialist performs the pre-authorized operation, then Main/root returns the specialist's complete result to Planner. Specialists still stop on scope, ownership, risk-tier, validation-plan, or shared-state changes. User approval remains required for product-scope or public-API changes, security changes, irreversible data behavior, real credentials, private providers, signing, publishing, hosted telemetry, destructive operations, paid or live requests, shared runtime mutation, or port 18787 takeover.
+Main/root owns goal registration, pause/resume, risk assessment, and user confirmation. Main/root does not decompose tasks or implement changes. Planner decomposes work, designates and dispatches bounded roles, and owns remediation.
+
+Main/root may approve one batch of 1-3 test messages only for the current task-bound isolated proof/session. Main/root approves only; the Planner-designated `relaykit_test` or `relaykit_worker` sends the messages. The batch is limited to 3 messages, stays bound to that isolated proof/session, does not read, refresh, copy, or migrate credentials, and does not touch global config/auth, LaunchAgents, shared services, or port `18787`. It does not publish, sign, delete, perform irreversible actions, automatically retry, or expand the approved count. More than 3 messages, any retry or count expansion, auth/login, shared ports or services, global config/auth, signing or release, and destructive or irreversible actions require user confirmation.
 
 ## Continuation Gate
 

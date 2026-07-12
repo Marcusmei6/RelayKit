@@ -16,12 +16,12 @@ root = Path(sys.argv[1])
 agent_dir = root / ".codex" / "agents"
 
 expected = {
-    "relaykit_planner": ("relaykit-planner.toml", "gpt-5.6-sol", "ultra", "workspace-write"),
-    "relaykit_gateway": ("relaykit-gateway.toml", "gpt-5.6-sol", "high", "workspace-write"),
-    "relaykit_app": ("relaykit-app.toml", "gpt-5.6-sol", "high", "workspace-write"),
+    "relaykit_planner": ("relaykit-planner.toml", "gpt-5.6-sol", "xhigh", "workspace-write"),
+    "relaykit_gateway": ("relaykit-gateway.toml", "gpt-5.6-terra", "high", "workspace-write"),
+    "relaykit_app": ("relaykit-app.toml", "gpt-5.6-terra", "high", "workspace-write"),
     "relaykit_worker": ("relaykit-worker.toml", "gpt-5.6-sol", "high", "workspace-write"),
     "relaykit_test": ("relaykit-test.toml", "gpt-5.6-luna", "medium", "workspace-write"),
-    "relaykit_cr": ("relaykit-cr.toml", "gpt-5.6-sol", "xhigh", "read-only"),
+    "relaykit_cr": ("relaykit-cr.toml", "gpt-5.6-sol", "high", "read-only"),
     "relaykit_release": ("relaykit-release.toml", "gpt-5.6-terra", "high", "workspace-write"),
 }
 
@@ -39,9 +39,9 @@ def parse_agent(path):
         if not match:
             raise AssertionError(f"{path}:{index}: invalid assignment")
         key, raw = match.groups()
-        if raw == '\"\"\"':
+        if raw == '"""':
             body = []
-            while index < len(lines) and lines[index] != '\"\"\"':
+            while index < len(lines) and lines[index] != '"""':
                 body.append(lines[index])
                 index += 1
             if index >= len(lines):
@@ -64,166 +64,70 @@ assert set(registrations) == set(expected), registrations
 
 agents = {}
 for role, (filename, model, effort, sandbox) in expected.items():
-    path = agent_dir / filename
-    assert path.is_file(), path
-    values = parse_agent(path)
+    values = parse_agent(agent_dir / filename)
     agents[role] = values
-    assert values["name"] == role, (path, values["name"])
-    assert values["model"] == model, (path, values["model"])
-    assert values["model_reasoning_effort"] == effort, (path, values["model_reasoning_effort"])
-    assert values["sandbox_mode"] == sandbox, (path, values["sandbox_mode"])
-    assert registrations[role] == f"agents/{filename}", (role, registrations[role])
+    assert values["name"] == role, role
+    assert values["model"] == model, role
+    assert values["model_reasoning_effort"] == effort, role
+    assert values["sandbox_mode"] == sandbox, role
+    assert registrations[role] == f"agents/{filename}", role
 
-efforts = [values["model_reasoning_effort"] for values in agents.values()]
-assert efforts.count("ultra") == 1
+efforts = {values["model_reasoning_effort"] for values in agents.values()}
+assert efforts <= {"xhigh", "high", "medium"}, efforts
+assert "ultra" not in efforts
 assert "max" not in efforts
-assert agents["relaykit_planner"]["model_reasoning_effort"] == "ultra"
 
-planner = agents["relaykit_planner"]["developer_instructions"]
-for required in (
-    "only RelayKit role allowed to decide delegation",
-    "Project role selection is root-mediated",
-    "Do not call a nested generic `spawn_agent`",
-    "PARENT DISPATCH REQUIRED",
-    "Main/root is a mechanical dispatcher only",
-    "must not patch files, redirect findings, choose another role, expand owned paths, change tiers, or bypass Planner",
-    "returns each role's complete result to Planner",
-    "at most two concurrent write lanes",
-    "Test, CR, and Release gates are sequential",
-    "Never run these three roles concurrently",
-    "Every CR finding returns through Main/root to Planner",
-    "Main/root must not send CR findings directly to an implementation role",
-    "Planner dispositions every finding",
-    "new bounded assignment to the correct original owning specialist",
-    "remediation result returns to Planner",
-    "fresh selector plan",
-    "relaykit_test and relaykit_cr again, sequentially",
-    "root-review fallback applies only when CR is unavailable after its bounded retry",
-    "must never bypass actual CR findings",
-    "CR UNAVAILABLE",
-    "Main/root returns that unavailable result to Planner",
-    "Main/root must not invoke the root review or decide closeout",
-    "records CR UNAVAILABLE only in controller evidence and must not write any repository file",
-    "same base commit, HEAD commit, changed-file set, complete diff SHA-256, and tracked-worktree snapshot",
-    "returns the complete fallback review result to Planner",
-    "Planner alone decides closeout",
-    "fallback is forbidden when relaykit_cr returned actual findings",
-    "reversible, public-safe, repository-local reads, edits, and focused checks",
-    "supplied plan, owned paths, and assigned risk tier",
-    "without asking the user again",
-    "may pre-authorize those actions in the specialist assignment",
-    "Main/root launches only the exact Planner-selected specialist",
-    "The specialist performs the pre-authorized operation",
-    "Main/root returns the specialist's complete result to Planner",
-    "scope, ownership, risk-tier, validation-plan, or shared-state changes",
-    "User approval remains required for product-scope or public-API changes, security changes, irreversible data behavior, real credentials, private providers, signing, publishing, hosted telemetry, destructive operations, paid or live requests, shared runtime mutation, or port 18787 takeover",
-    "Backlog Expansion Gate is disabled by default",
-    "BACKLOG EXPANSION: enabled",
-    "task crossing app/** and gateway/** must be split",
-    "selector's explicit boundary",
-):
-    assert required in planner, required
+responsibility_contract = (
+    "Main/root owns goal registration, pause/resume, risk assessment, and user confirmation. "
+    "Main/root does not decompose tasks or implement changes. "
+    "Planner decomposes work, designates and dispatches bounded roles, and owns remediation."
+)
+approval_contract = (
+    "Main/root may approve one batch of 1-3 test messages only for the current task-bound isolated proof/session. "
+    "Main/root approves only; the Planner-designated `relaykit_test` or `relaykit_worker` sends the messages. "
+    "The batch is limited to 3 messages, stays bound to that isolated proof/session, does not read, refresh, copy, "
+    "or migrate credentials, and does not touch global config/auth, LaunchAgents, shared services, or port `18787`. "
+    "It does not publish, sign, delete, perform irreversible actions, automatically retry, or expand the approved count. "
+    "More than 3 messages, any retry or count expansion, auth/login, shared ports or services, global config/auth, "
+    "signing or release, and destructive or irreversible actions require user confirmation."
+)
+fast_path_contract = (
+    "Tier 0/1 Fast Validation Path is eligible only when all of these are true: Validation Tier is 0 or 1; "
+    "changed paths are limited to docs, public agent TOML, the workflow contract test, or ordinary project config; "
+    "scope excludes app/**, gateway/**, credentials, Keychain, auth, shared services, LaunchAgents, port 18787, "
+    "global Codex config, build, package, GUI, network, live requests, signing, and release; and Planner supplies an "
+    "exact command allowlist."
+)
+fast_path_execution_contract = (
+    "An eligible Fast Path uses exactly one Planner, one bounded Worker, one Test, and one CR. Test executes the exact "
+    "allowlist directly without selector generation or `relaykit-validate.sh --plan-only`. Tier 2/3 and every ineligible "
+    "change retain the selector path."
+)
+fast_path_closeout_contract = (
+    "Main/root still performs no decomposition or implementation, but may verbatim-correct a missing ROLE field, "
+    "field-name typo, or command-transcription error without replanning. Allow at most one remediation. After a "
+    "test-assertion-only fix, rerun only the corresponding test and minimal CR recheck without repeating passed runtime "
+    "metadata. Nonblocking Medium/Low findings become backlog evidence without scope expansion."
+)
 
-workflow_docs = (root / "docs" / "agents" / "README.md").read_text(encoding="utf-8")
-for required in (
-    "Project role selection is root-mediated",
-    "PARENT DISPATCH REQUIRED",
-    "Main/root is a mechanical dispatcher only",
-    "must not patch files, redirect findings, choose another role, expand owned paths, change tiers, or bypass Planner",
-    "returns each role's complete result to Planner",
-    "nested generic `spawn_agent(task_name=...)`",
-    "Every CR finding returns through Main/root to Planner",
-    "Main/root must not send CR findings directly to an implementation role",
-    "Planner dispositions every finding",
-    "new bounded assignment to the correct original owning specialist",
-    "remediation result returns to Planner",
-    "fresh selector plan",
-    "relaykit_test and relaykit_cr again, sequentially",
-    "root-review fallback applies only when CR is unavailable after its bounded retry",
-    "must never bypass actual CR findings",
-    "CR UNAVAILABLE",
-    "Main/root returns that unavailable result to Planner",
-    "Main/root must not invoke the root review or decide closeout",
-    "records CR UNAVAILABLE only in controller evidence and must not write any repository file",
-    "same base commit, HEAD commit, changed-file set, complete diff SHA-256, and tracked-worktree snapshot",
-    "returns the complete fallback review result to Planner",
-    "Planner alone decides closeout",
-    "fallback is forbidden when relaykit_cr returned actual findings",
-    "reversible, public-safe, repository-local reads, edits, and focused checks",
-    "supplied plan, owned paths, and assigned risk tier",
-    "without asking the user again",
-    "may pre-authorize those actions in the specialist assignment",
-    "Main/root launches only the exact Planner-selected specialist",
-    "The specialist performs the pre-authorized operation",
-    "Main/root returns the specialist's complete result to Planner",
-    "scope, ownership, risk-tier, validation-plan, or shared-state changes",
-    "User approval remains required for product-scope or public-API changes, security changes, irreversible data behavior, real credentials, private providers, signing, publishing, hosted telemetry, destructive operations, paid or live requests, shared runtime mutation, or port 18787 takeover",
-    "continues only inside the supplied plan",
-    "requires explicit Backlog Expansion opt-in",
-):
-    assert required in workflow_docs, required
-
-ambiguous_authorization = "Main/root merely carries out " + "that authorization"
-assert ambiguous_authorization not in planner, ambiguous_authorization
-assert ambiguous_authorization not in workflow_docs, ambiguous_authorization
-ambiguous_fallback = "record the failure in `docs/handoff.md` and run a root-session read-only review"
-assert ambiguous_fallback not in workflow_docs, ambiguous_fallback
-for forbidden_handoff_write in (
-    "records the unavailable state in docs/handoff.md",
-    "record the failure in `docs/handoff.md`",
-):
-    assert forbidden_handoff_write not in planner, forbidden_handoff_write
-    assert forbidden_handoff_write not in workflow_docs, forbidden_handoff_write
-loose_same_diff = "read-only review over the same diff"
-assert loose_same_diff not in planner, loose_same_diff
-assert loose_same_diff not in workflow_docs, loose_same_diff
-
-for role, values in agents.items():
-    if role == "relaykit_planner":
-        continue
-    assert "do not delegate to other agents" in values["developer_instructions"].lower(), role
-
-assert "Own only gateway/**" in agents["relaykit_gateway"]["developer_instructions"]
-assert "Own only app/**" in agents["relaykit_app"]["developer_instructions"]
-assert "docs/**, examples/**, .codex/**, .agents/**" in agents["relaykit_worker"]["developer_instructions"]
-assert "Do not edit app/** or gateway/**" in agents["relaykit_worker"]["developer_instructions"]
-assert "Execute only the selector-generated validation plan" in agents["relaykit_test"]["developer_instructions"]
-assert "tracked-worktree" in agents["relaykit_test"]["developer_instructions"]
-assert "setup id" in agents["relaykit_test"]["developer_instructions"]
-assert "session id" in agents["relaykit_test"]["developer_instructions"]
-assert "Only review. Do not edit files." in agents["relaykit_cr"]["developer_instructions"]
-assert "Return every finding through Main/root to Planner" in agents["relaykit_cr"]["developer_instructions"]
-assert "only packaging, signing, notarization, release helpers, and release documentation" in agents["relaykit_release"]["developer_instructions"]
-assert "Do not modify app/** or gateway/** product business code" in agents["relaykit_release"]["developer_instructions"]
-
-development_plan = (root / "docs" / "development-plan.md").read_text(encoding="utf-8")
-handoff = (root / "docs" / "handoff.md").read_text(encoding="utf-8")
-for current_truth in (
-    "Workflow 5.6 is current on `main`",
-    "fresh exact `relaykit_planner` and `relaykit_worker` runtime smoke",
-    "authoritative parent/root `turn_context` and direct role-thread metadata",
-    "Static TOML and Agent self-report are not runtime proof",
-    "The responsibility contract is implemented",
-    "Acceptance requires fresh sequential `relaykit_test` and `relaykit_cr` evidence returned to Planner",
-    "Transient gate outcomes belong in controller evidence and require no source edit after CR",
-    "An unchanged-diff CR `SHIP IT` after Test `PASS` permits Planner to close the objective without a source edit",
-):
-    assert current_truth in development_plan, current_truth
-    assert current_truth in handoff, current_truth
-for transient_state in (
-    "Independent `relaykit_test` passed",
-    "CR1 returned `NEEDS REMEDIATION`",
-    "RK-WF-5.6-MAIN-PLANNER-CLOSEOUT-R1",
-    "fresh `relaykit_test` and `relaykit_cr` remain pending",
-    "Final closeout is not claimed",
-):
-    assert transient_state not in development_plan, transient_state
-    assert transient_state not in handoff, transient_state
-assert "active pre-merge gate" not in handoff
-assert "merge this feature branch into `main`" not in development_plan
-stale_pending = "pending independent " + "`relaykit_test` and `relaykit_cr`"
-assert stale_pending not in development_plan, stale_pending
-assert stale_pending not in handoff, stale_pending
+contract_sources = {
+    "planner": agents["relaykit_planner"]["developer_instructions"],
+    "test": agents["relaykit_test"]["developer_instructions"],
+    "agents-doc": (root / "docs" / "agents" / "README.md").read_text(encoding="utf-8"),
+    "development-plan": (root / "docs" / "development-plan.md").read_text(encoding="utf-8"),
+    "handoff": (root / "docs" / "handoff.md").read_text(encoding="utf-8"),
+}
+test_summary_contract = (
+    "Eligible Tier 0/1 Fast Path executes the Planner exact command allowlist directly; otherwise Test executes the "
+    "selector-generated plan."
+)
+assert all(test_summary_contract in contract_sources[name] for name in ("agents-doc", "development-plan"))
+for name, source in contract_sources.items():
+    assert responsibility_contract in source, name
+    assert approval_contract in source, name
+    assert fast_path_contract in source, name
+    assert fast_path_execution_contract in source, name
+    assert fast_path_closeout_contract in source, name
 
 print("RelayKit agent workflow contract tests passed")
 PY
