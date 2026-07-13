@@ -275,6 +275,19 @@ Status: Workflow 5.6 is current on `main`; the seven-role model matrix and minim
 
 See `docs/agents/README.md` for the assignment header and dispatch rules.
 
+## Phase 7.9: RC1 Public Proof Remediation
+
+Status: implementation complete; the fresh final matrix passed in `relaykit_test`, independent `relaykit_cr` passed, and `automated_classifier=false` was preserved for local ad-hoc RC1 acceptance; Planner completion awaits frozen-artifact inspection; Signed Beta remains pending real Apple distribution inputs.
+
+- The tracked remote-Mac acceptance guide and resume helper are machine-neutral. Real host, account, address, and checkout paths are local environment inputs only; the pre-remediation originals remain in ignored `docs/private/` and `scripts/private/` archives.
+- `scripts/public-boundary-check.sh` scans tracked text for personal home paths, private network addresses, SSH targets, and machine identifiers in addition to existing provider, credential, and sensitive-path gates. Its contract proves ignored and untracked fixture content stays out of scope while forcibly tracked private/build paths fail.
+- Public fake fixtures use an explicit `RELAYKIT_FAKE_SENTINEL_...` marker that is not credential-shaped. A fake marker may prove redaction or routing behavior; it must never weaken rejection of credential-shaped content.
+- `scripts/rc1-native-responses-proof.sh` launches the final extracted App first, starts its bundled helper through the App UI, and proves one native OpenAI Responses request against a loopback-only fake upstream. Evidence contains booleans, counts, paths, and artifact hashes only—not request/response bodies.
+- `scripts/rc1-helper-lifecycle-proof.sh` launches the same final extracted App, starts its helper through the App UI, kills the App without graceful cleanup, and requires the parent-bound helper to exit and release `19777`.
+- `scripts/menu-bar-e2e-smoke.sh` accepts `RELAYKIT_REUSE_FINAL_BUNDLE=1`, verifies the supplied bundle signature, and skips rebuilding so the menu, native Responses, and lifecycle proofs can share one extracted package artifact.
+- `./scripts/relaykit-validate.sh --plan-only --rc1` selects one fixed RC1 matrix: diff/public-boundary checks, Swift and Go validation, one package build, then menu/native/lifecycle proof against `dist/verify-release/RelayKitApp.app`. This matrix uses fake loopback traffic only; it does not select a paid live query or the four-stage Desktop proof.
+- Implementation lanes must run only the focused contract commands. Package creation, menu GUI smoke, native App-first proof, helper lifecycle proof, and final matrix execution belong to `relaykit_test`.
+
 ## Release Gate
 
 First public release requires:

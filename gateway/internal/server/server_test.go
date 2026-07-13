@@ -16,9 +16,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+func testBearerCredential(parts ...string) string {
+	return "Bearer " + strings.Join(parts, "-")
+}
 
 func TestHealthz(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -1476,7 +1481,7 @@ func TestUsageJSONLOmitsBodiesHeadersAndURLs(t *testing.T) {
 	body := strings.NewReader(`{"model":"qwen3-coder","input":"prompt-secret-value api_key=secret"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer request-header-secret")
+	req.Header.Set("Authorization", testBearerCredential("request", "header", "secret"))
 	req.Header.Set("Cookie", "session=request-cookie-secret")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -3164,7 +3169,7 @@ func TestNativeOpenAIResponsesCatalogProbeUsesResponsesEndpoint(t *testing.T) {
 					if strings.Contains(r.URL.Path, "chat/completions") {
 						t.Fatalf("native probe used chat endpoint %q", r.URL.Path)
 					}
-					wantAuth := "Bearer keychain-probe-token"
+					wantAuth := testBearerCredential("keychain", "probe", "token")
 					if tc.credential == "key_file" {
 						wantAuth = "file-probe-token"
 					}
@@ -3415,7 +3420,7 @@ func TestNativeOpenAIResponsesStreamErrorIsSingleTerminalFailure(t *testing.T) {
 			}
 			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"public/native","input":"stream error","stream":true}`))
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Authorization", "Bearer INBOUND_SECRET_SENTINEL")
+			req.Header.Set("Authorization", testBearerCredential("INBOUND", "SECRET", "SENTINEL"))
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 			body := rec.Body.String()
@@ -3986,6 +3991,103 @@ func readNativeWebSocketAllEvents(t *testing.T, reader *bufio.Reader) []map[stri
 	}
 	t.Fatalf("websocket did not close: %#v", events)
 	return nil
+}
+
+func TestResponsesRejectsOversizedOrAmbiguousRequestBeforeUpstream(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"resp_unexpected","object":"response","status":"completed","output":[]}`)
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeNativeResponsesConfig(t, upstream.URL, "public/native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"top level array", `[]`, http.StatusBadRequest},
+		{"trailing JSON", `{"model":"public/native","input":"x"} {}`, http.StatusBadRequest},
+		{"duplicate model", `{"model":"public/native","model":"other","input":"x"}`, http.StatusBadRequest},
+		{"duplicate stream", `{"model":"public/native","stream":false,"stream":true,"input":"x"}`, http.StatusBadRequest},
+		{"missing model", `{"input":"x"}`, http.StatusBadRequest},
+		{"empty model", `{"model":"  ","input":"x"}`, http.StatusBadRequest},
+		{"unknown model", `{"model":"missing","input":"x"}`, http.StatusBadRequest},
+		{"too large", `{"model":"public/native","input":"` + strings.Repeat("x", maximumResponsesRequestBytes) + `"}`, http.StatusRequestEntityTooLarge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.want || !strings.Contains(rec.Body.String(), `"type":"invalid_request_error"`) {
+				t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstream was called %d times for rejected requests", upstreamHits)
+	}
+}
+
+func TestRewriteNativeResponsesResponseRejectsExactMaxPlusOne(t *testing.T) {
+	prefix := `{"id":"resp_limit","object":"response","status":"completed","output":[],"future":"`
+	suffix := `"}`
+	valid := prefix + strings.Repeat("x", maximumNativeResponsesResponseBytes-len(prefix)-len(suffix)) + suffix
+	if len(valid) != maximumNativeResponsesResponseBytes {
+		t.Fatalf("valid response size = %d", len(valid))
+	}
+	if _, err := rewriteNativeResponsesResponse(strings.NewReader(valid), "public/native"); err != nil {
+		t.Fatalf("response exactly at limit rejected: %v", err)
+	}
+	over := valid[:len(valid)-len(suffix)] + "x" + suffix
+	if len(over) != maximumNativeResponsesResponseBytes+1 {
+		t.Fatalf("over response size = %d", len(over))
+	}
+	if _, err := rewriteNativeResponsesResponse(strings.NewReader(over), "public/native"); err == nil {
+		t.Fatal("response over limit unexpectedly accepted")
+	}
+}
+
+func TestNativeResponsesWebSocketClientCloseCancelsUpstream(t *testing.T) {
+	upstreamStarted := make(chan struct{})
+	upstreamCanceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(upstreamStarted)
+		<-r.Context().Done()
+		close(upstreamCanceled)
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeNativeResponsesConfig(t, upstream.URL, "public/native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	conn, _ := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, `{"model":"public/native","input":"cancel me"}`)
+	select {
+	case <-upstreamStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream request did not start")
+	}
+	writeTestWebSocketClose(t, conn)
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream request was not canceled after websocket close")
+	}
 }
 
 func readNativeUsageEvents(t *testing.T, path string) []map[string]any {

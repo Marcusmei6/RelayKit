@@ -231,6 +231,53 @@ func expectProviderDraftWriterWithKeychainReference() throws {
     }
 }
 
+func expectProviderDraftWriterWithResponsesProtocol() throws {
+    let draft = ProviderConfigDraft(
+        providerId: "responses-provider",
+        providerName: "Responses Provider",
+        baseURL: "https://example.test/v1",
+        apiFormat: "openai_responses",
+        authEnv: "",
+        modelId: "responses/model",
+        modelDisplayName: "Responses Model",
+        contextWindow: nil,
+        source: "responses-provider",
+        modelPrefix: "responses/",
+        credentialKind: "keychain",
+        credentialReference: "relaykit.validation.responses",
+        keyHeader: "Authorization",
+        upstreamModel: "responses-model",
+        priority: 100,
+        visible: true
+    )
+    let data = try ProviderConfigDraftWriter.addProvider(draft, to: Data(validConfig.utf8))
+    let text = String(data: data, encoding: .utf8) ?? ""
+    if text.contains("fixture-keychain-value") {
+        fatalError("Responses draft must not serialize a Keychain value")
+    }
+    let json = try JSONSerialization.jsonObject(with: data)
+    try ProviderConfigValidator.validate(json)
+    guard let root = json as? [String: Any],
+          let providers = root["providers"] as? [[String: Any]],
+          let added = providers.last,
+          added["api_format"] as? String == "openai_responses",
+          let credentialRef = added["credential_ref"] as? [String: Any],
+          credentialRef["kind"] as? String == "keychain",
+          credentialRef["value"] as? String == "relaykit.validation.responses" else {
+        fatalError("Responses draft did not preserve public configuration fields: \(json)")
+    }
+}
+
+func expectExplicitUpstreamProtocolSelectionWins() {
+    let selected = ProviderFormLabels.resolvedUpstreamProtocol(
+        selected: "openai_responses",
+        providerText: "Anthropic-compatible endpoint"
+    )
+    if selected != "openai_responses" {
+        fatalError("explicit upstream protocol selection must override name-based inference: \(selected)")
+    }
+}
+
 func expectProviderDraftRejectsCredentialValue() {
     let draft = ProviderConfigDraft(
         providerId: "local-new",
@@ -401,9 +448,9 @@ func expectProviderConfigPathRecoversStaleTemporaryPreference() {
 }
 
 func expectOfficialProofRootOverride() {
-    let home = URL(fileURLWithPath: "/Users/relaykit-proof-user", isDirectory: true)
-    let defaultRoot = "/Users/relaykit-proof-user/Library/Application Support/RelayKit/OfficialProof"
-    let isolatedRoot = "/Users/relaykit-proof-user/Library/Application Support/RelayKit/DesktopProof/official-proof"
+    let home = URL(fileURLWithPath: "/tmp/relaykit-proof-user", isDirectory: true)
+    let defaultRoot = "/tmp/relaykit-proof-user/Library/Application Support/RelayKit/OfficialProof"
+    let isolatedRoot = "/tmp/relaykit-proof-user/Library/Application Support/RelayKit/DesktopProof/official-proof"
     let environment = ["RELAYKIT_OFFICIAL_PROOF_ROOT": isolatedRoot]
     if RelayKitPaths.officialProofRoot(environment: environment, homeDirectory: home) != isolatedRoot {
         fatalError("manual proof official auth root override was not honored")
@@ -464,12 +511,12 @@ func expectProviderFormPresentationLabels() {
         fatalError("Disconnected official CTA should remain available")
     }
     let enabledProtocols = ProviderFormLabels.upstreamProtocolOptions.filter(\.isEnabled).map(\.id)
-    if enabledProtocols != ["anthropic_messages", "openai_chat"] {
+    if enabledProtocols != ["anthropic_messages", "openai_chat", "openai_responses"] {
         fatalError("Provider Advanced protocols must match gateway support: \(enabledProtocols)")
     }
     let plannedProtocols = ProviderFormLabels.upstreamProtocolOptions.filter { !$0.isEnabled }.map(\.label)
-    if plannedProtocols != ["OpenAI Responses (planned)"] {
-        fatalError("Unsupported Responses provider route must be shown only as planned: \(plannedProtocols)")
+    if !plannedProtocols.isEmpty {
+        fatalError("Responses provider route must be selectable: \(plannedProtocols)")
     }
     let advancedLabels = ProviderFormLabels.ordinaryAdvancedLabels
     let expectedAdvanced = ["Upstream protocol", "Custom models URL", "Custom auth header", "Upstream model override"]
@@ -734,6 +781,7 @@ try expectProviderDraftWriter()
 try expectProviderDraftWriterWithPrototypeMetadata()
 try expectProviderDraftWriterNormalizesPrefixedModels()
 try expectProviderDraftWriterWithKeychainReference()
+try expectProviderDraftWriterWithResponsesProtocol()
 expectProviderDraftRejectsCredentialValue()
 try expectLocalCatalogSummary()
 try expectCredentialRefContract()
@@ -742,6 +790,7 @@ expectAppSettingsPersistence()
 expectProviderConfigPathRecoversStaleTemporaryPreference()
 expectOfficialProofRootOverride()
 expectProviderFormPresentationLabels()
+expectExplicitUpstreamProtocolSelectionWins()
 expectRedactedProviderSaveAndGatewayGuidance()
 expectOfficialChannelPresentationLabels()
 expectOfficialAuthURLSanitizer()

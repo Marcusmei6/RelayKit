@@ -71,7 +71,7 @@ The draft script requires an existing signed zip and checksum from `package_sign
 ./scripts/public-boundary-check.sh
 ```
 
-The check scans tracked files for private provider references, credential-shaped content, auth/log artifacts, and accidentally tracked private/build paths.
+The check scans tracked files for private provider references, credential-shaped content, auth/log artifacts, machine-local paths or identifiers, and accidentally tracked private/build paths. `./scripts/public-boundary-check-test.sh` locks the tracked-only rule, fake-sentinel policy, and fail-closed private/build path behavior.
 
 ## Menu-Bar UI Smoke
 
@@ -80,6 +80,27 @@ The check scans tracked files for private provider references, credential-shaped
 ```
 
 The UI smoke launches `dist/RelayKitApp.app` through LaunchServices, captures the menu-bar popover and provider sheet under `dist/ui-smoke/`, verifies redacted local catalog/source grouping, Settings state including Light appearance persistence, provider modal fields, and cleans up RelayKit-owned app/helper processes.
+
+After `./script/package_release.sh --verify` has produced the final extracted bundle, reuse it without rebuilding:
+
+```bash
+RELAYKIT_REUSE_FINAL_BUNDLE=1 \
+RELAYKIT_APP_BUNDLE=dist/verify-release/RelayKitApp.app \
+  ./scripts/menu-bar-e2e-smoke.sh
+```
+
+Reuse mode verifies the supplied bundle with `codesign` and fails if the App or bundled helper executable is missing.
+
+## RC1 Public Proofs
+
+```bash
+RELAYKIT_RC1_APP_BUNDLE=dist/verify-release/RelayKitApp.app \
+  ./scripts/rc1-native-responses-proof.sh
+RELAYKIT_RC1_APP_BUNDLE=dist/verify-release/RelayKitApp.app \
+  ./scripts/rc1-helper-lifecycle-proof.sh
+```
+
+The native proof launches the App first, starts its bundled helper through the App UI, and routes one request to a loopback-only fake `openai_responses` upstream. The lifecycle proof starts the same App-owned helper, kills the App without graceful cleanup, and requires the helper to exit and release `19777`. Neither proof reads real credentials, mutates global Codex files, controls LaunchAgents, or changes the shared `18787` listener.
 
 ## Local Beta Dogfood
 
@@ -141,9 +162,12 @@ Validation cadence is tiered:
 ./scripts/relaykit-validate.sh --base <commit> --head <commit> --plan-only
 ./scripts/relaykit-validate.sh --base <commit> --head <commit> --worktree --plan-only
 ./scripts/relaykit-validate.sh --base <commit> --head <commit> --execute
+./scripts/relaykit-validate.sh --plan-only --rc1
 ```
 
 The selector emits changed files, change classes, selected and skipped commands, reasons, and explicit build/package/GUI/live/full booleans. Without `--worktree`, a dirty repository fails closed; with it, committed, staged, unstaged, untracked, and deleted paths are unioned. Deleted scripts and Agent TOML remain risk-classified but are not passed to syntax parsers. Project Agent config and workflow-contract changes select the workflow contract test. Docs, workflow, Skill, and harness changes remain on focused checks. Gateway paths select affected Go packages; ordinary App UI selects one Swift build/validation plus no-model menu smoke. Package and extracted-App dogfood are selected only by packaging inputs. A paid query requires both a justified high-risk class and `--live-query`; full four-stage E2E requires `--full`. Live/full failures record one attempt; safe local commands may run at most twice.
+
+`--rc1` is a fixed profile, not another changed-file heuristic. It selects one package build followed by menu, native Responses, and helper lifecycle proof against the same extracted final bundle. It never selects a paid live query or the four-stage Desktop E2E.
 
 ## Diagnostics
 

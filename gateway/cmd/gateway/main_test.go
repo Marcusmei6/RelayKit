@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestActivateCodexConfigRequiresExplicitTarget(t *testing.T) {
@@ -114,5 +118,70 @@ func TestReadCredentialHandoffRejectsInvalidPayloadWithoutEchoingSecret(t *testi
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Fatalf("credential handoff error leaked secret: %v", err)
+	}
+}
+
+func TestParseParentPIDRequiresPositiveInteger(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int
+		valid bool
+	}{
+		{"1", 1, true},
+		{"0", 0, false},
+		{"-1", 0, false},
+		{"not-a-pid", 0, false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			got, err := parseParentPID(tc.value)
+			if tc.valid {
+				if err != nil || got != tc.want {
+					t.Fatalf("parseParentPID(%q) = %d, %v", tc.value, got, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("parseParentPID(%q) unexpectedly succeeded", tc.value)
+			}
+		})
+	}
+}
+
+func TestGatewayStopsWhenParentExits(t *testing.T) {
+	if os.Getenv("RELAYKIT_TEST_PARENT") == "1" {
+		time.Sleep(300 * time.Millisecond)
+		os.Exit(0)
+	}
+
+	parent := exec.Command(os.Args[0], "-test.run=^TestGatewayStopsWhenParentExits$")
+	parent.Env = append(os.Environ(), "RELAYKIT_TEST_PARENT=1")
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "providers.json")
+	config := `{"providers":[{"id":"test","name":"Test","base_url":"http://127.0.0.1:9/v1","api_format":"openai_chat","models":[{"id":"test-model"}]}]}`
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- runServer([]string{
+			"-listen", "127.0.0.1:0",
+			"-config", configPath,
+			"-usage-log", filepath.Join(t.TempDir(), "usage.jsonl"),
+			"-parent-pid", strconv.Itoa(parent.Process.Pid),
+		}, strings.NewReader(""), io.Discard)
+	}()
+	if err := parent.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runServer returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("gateway did not stop after parent exited")
 	}
 }

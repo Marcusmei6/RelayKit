@@ -18,7 +18,7 @@ public enum ProviderFormLabels {
     public static let upstreamProtocolOptions = [
         UpstreamProtocolOption(id: "anthropic_messages", label: "Anthropic Messages", isEnabled: true),
         UpstreamProtocolOption(id: "openai_chat", label: "OpenAI Chat Completions", isEnabled: true),
-        UpstreamProtocolOption(id: "openai_responses", label: "OpenAI Responses (planned)", isEnabled: false),
+        UpstreamProtocolOption(id: "openai_responses", label: "OpenAI Responses", isEnabled: true),
     ]
     public static let ordinaryAdvancedLabels = [
         "Upstream protocol",
@@ -62,7 +62,30 @@ public enum ProviderFormLabels {
     }
 
     public static func upstreamProtocol(apiFormat: String) -> String {
-        apiFormat == "anthropic_messages" ? "Upstream: Anthropic" : "Upstream: OpenAI Chat"
+        switch apiFormat {
+        case "anthropic_messages":
+            "Upstream: Anthropic"
+        case "openai_responses":
+            "Upstream: OpenAI Responses"
+        default:
+            "Upstream: OpenAI Chat"
+        }
+    }
+
+    public static func resolvedUpstreamProtocol(
+        selected: String,
+        providerText: String,
+        selectionIsExplicit: Bool = true
+    ) -> String {
+        let supported = Set(upstreamProtocolOptions.map(\.id))
+        if selectionIsExplicit, supported.contains(selected) {
+            return selected
+        }
+        let normalized = providerText.lowercased()
+        if normalized.contains("anthropic") || normalized.contains("claude") {
+            return "anthropic_messages"
+        }
+        return supported.contains(selected) ? selected : "openai_chat"
     }
 
     public static func apiKeyStatus(hasReference: Bool, credentialKind: String) -> String {
@@ -154,6 +177,8 @@ public enum ProviderFormLabels {
             return "Authentication failed · check API key"
         case "model_list_unavailable":
             return "Model list unavailable · check models URL or model ID\(latency)"
+        case "responses_unavailable":
+            return "Responses probe failed · check endpoint or model\(latency)"
         case "network_failed":
             return "Network failed · check API base URL"
         default:

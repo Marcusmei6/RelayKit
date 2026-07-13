@@ -631,32 +631,66 @@ for index, stage in enumerate(stages):
         raise SystemExit(f"stage {index} query_file must have mode 0600")
     if query_metadata.st_size == 0 or query_metadata.st_size > 65536:
         raise SystemExit(f"stage {index} query_file size is invalid")
-    try:
-        query_text = query_path.read_text()
-    except (OSError, UnicodeDecodeError):
-        raise SystemExit(f"stage {index} query_file must contain UTF-8 text")
-    marker = stage["response_marker"]
-    if marker not in query_text:
-        raise SystemExit(f"stage {index} query_file must contain response_marker")
-    if stage["expect"] == "markdown":
-        required_markdown = (
-            "## RelayKit Rich Text Check",
-            "1. First route check",
-            "2. Second route check",
-            "| status | route |",
-            "| ready | official |",
-            "| ready | provider |",
-            "```bash",
-            "echo relaykit",
-            "**RELAYKIT_FORMAT_OK**",
-        )
-        if any(fragment not in query_text for fragment in required_markdown):
-            raise SystemExit(f"stage {index} markdown query does not declare the required render contract")
-    if stage["expect"] == "tool" and "printf" not in query_text:
-        raise SystemExit(f"stage {index} tool query must request the marker through printf")
     normalized.append({key: stage[key] for key in sorted(allowed)})
 print(json.dumps({"version": 1, "stage_timeout_seconds": timeout, "stages": normalized}, sort_keys=True))
 PY
+}
+
+validate_postbinding_query_content() {
+  local query_path="$1"
+  local marker="$2"
+  local expectation="$3"
+  python3 - "${query_path}" "${marker}" "${expectation}" <<'PY'
+import sys
+from pathlib import Path
+
+query_path = Path(sys.argv[1])
+marker = sys.argv[2]
+expectation = sys.argv[3]
+try:
+    query_text = query_path.read_text()
+except (OSError, UnicodeDecodeError):
+    raise SystemExit("query file must contain UTF-8 text")
+if marker not in query_text:
+    raise SystemExit("query file must contain its response marker")
+if expectation == "markdown":
+    required_markdown = (
+        "## RelayKit Rich Text Check",
+        "1. First route check",
+        "2. Second route check",
+        "| status | route |",
+        "| ready | official |",
+        "| ready | provider |",
+        "```bash",
+        "echo relaykit",
+        "**RELAYKIT_FORMAT_OK**",
+    )
+    if any(fragment not in query_text for fragment in required_markdown):
+        raise SystemExit("markdown query does not declare the required render contract")
+elif expectation == "tool":
+    if "printf" not in query_text:
+        raise SystemExit("tool query must declare the marker through printf")
+elif expectation != "plain":
+    raise SystemExit("query expectation is invalid")
+PY
+}
+
+copy_bound_query() {
+  local source_path="$1"
+  local copy_path="$2"
+  local source_hash_before source_hash_after copy_hash
+  source_hash_before="$(file_hash "${source_path}")"
+  cp "${source_path}" "${copy_path}" || return 1
+  chmod 600 "${copy_path}" || return 1
+  source_hash_after="$(file_hash "${source_path}")"
+  copy_hash="$(file_hash "${copy_path}")"
+  if [[ "${source_hash_before}" == "missing" ||
+        "${source_hash_before}" != "${source_hash_after}" ||
+        "${source_hash_before}" != "${copy_hash}" ]]; then
+    rm -f "${copy_path}"
+    return 1
+  fi
+  printf '%s\n' "${copy_hash}"
 }
 
 prepare_automated_provider_inputs() {
@@ -694,6 +728,11 @@ automated_profile_for_scenario() {
          and has_stage("provider-markdown"; "markdown"; $provider_model)
          and has_stage("provider-tool"; "tool"; $provider_model)
       then "standard_four_stage_dogfood"
+      elif ($stages | length) == 1
+         and ($provider_model | length) > 0
+         and $stages[0].expect == "tool"
+         and $stages[0].model_id == $provider_model
+      then "single_tool_scenario"
       else "custom_scenario"
       end
   ' "${scenario_path}"
@@ -727,6 +766,33 @@ automated_stages_complete() {
     and ([.[].evidence_role] | unique | length) == $expected
     and ([.[].rollout_binding.thread_id] | unique | length) == $expected
   ' "${stages_path}" >/dev/null
+}
+
+custom_tool_scenario_complete() {
+  local stages_path="$1"
+  local expected_count="$2"
+  local tool_evidence="$3"
+  local screenshot_evidence="$4"
+  [[ "${expected_count}" == "1" ]] || return 1
+  automated_stages_complete "${stages_path}" "${expected_count}" || return 1
+  local evidence_role
+  evidence_role="$(jq -er 'if length == 1 and .[0].expect == "tool" then .[0].evidence_role else empty end' "${stages_path}")" || return 1
+  jq -e '
+    .proof_found == true
+    and .function_call_found == true
+    and .function_call_output_found == true
+    and .process_exited_zero == true
+    and .xml_leak_found == false
+    and .raw_function_calls_found == false
+  ' "${tool_evidence}" >/dev/null || return 1
+  jq -e --arg role "${evidence_role}" '
+    ([.[] | select(.role == $role)] | last) as $shot
+    | $shot.captured == true
+    and $shot.target_identity_verified == true
+    and $shot.visual_checks.tool_marker_visible == true
+    and $shot.visual_checks.tool_execution_visible == true
+    and $shot.visual_checks.raw_protocol_visible == false
+  ' "${screenshot_evidence}" >/dev/null
 }
 
 driver_failure_code() {
@@ -2419,7 +2485,7 @@ write_evidence() {
       fresh_current_run_usage_event: (($usage[0] | length) > 0),
       desktop_gui_route_proof: (
         if $route_status == "complete" and $input_mode == "automated_ax" and $human_intervention_count == 0 and $automated_profile == "standard_four_stage_dogfood" then "automated_gui_complete"
-        elif $route_status == "complete" and $input_mode == "automated_ax" and $human_intervention_count == 0 then "automated_custom_scenario_complete"
+        elif $route_status == "complete" and $input_mode == "automated_ax" and $human_intervention_count == 0 and ($automated_profile == "single_tool_scenario" or $automated_profile == "custom_scenario") then "automated_custom_scenario_complete"
         elif $route_status == "complete" and $input_mode == "manual_user_only" then "manual_user_assisted_complete"
         elif $route_status == "same_profile_cli_route_complete" then "not_complete_cli_fallback"
         else "not_complete"
@@ -3216,7 +3282,7 @@ run_automated_proof() {
   local catalog_labels="${AUTOMATED_CATALOG_LABELS_FILE}"
   local overall_since stage_timeout desktop_pid workspace_name expected_stage_count standard_route_status gpt55_marker gpt56_marker
   local stage index=0 stage_id model_id model_label query_source query_copy response_marker evidence_role expectation
-  local usage_baseline since_epoch submission_state="not_submitted" wait_status driver_code
+  local usage_baseline since_epoch submission_state="not_submitted" wait_status driver_code query_sha256
 
   [[ "${AX_DRIVER_SOURCE}" == "${driver_source}" ]] || {
     AUTO_ERROR_CODE="ax_driver_path_invalid"
@@ -3248,14 +3314,28 @@ run_automated_proof() {
     AUTO_ERROR_CODE="scenario_stage_count_invalid"
     return 1
   }
-  AUTO_ERROR_CODE="global_state_capture_failed"
-  capture_global_state
-  AUTO_ERROR_CODE="preflight_failed"
-  setup_preflight real
   AUTOMATED_PROFILE="$(automated_profile_for_scenario "${AUTOMATED_SCENARIO_NORMALIZED}" "${PROOF_PROVIDER_MODEL_ID}")" || {
     AUTO_ERROR_CODE="scenario_profile_invalid"
     return 1
   }
+  case "${AUTOMATED_PROFILE}" in
+    standard_four_stage_dogfood) ;;
+    single_tool_scenario)
+      [[ "${expected_stage_count}" == "1" ]] || {
+        AUTO_ERROR_CODE="custom_scenario_stage_count_invalid"
+        return 1
+      }
+      ;;
+    custom_scenario) ;;
+    *)
+      AUTO_ERROR_CODE="scenario_profile_unknown"
+      return 1
+      ;;
+  esac
+  AUTO_ERROR_CODE="global_state_capture_failed"
+  capture_global_state
+  AUTO_ERROR_CODE="preflight_failed"
+  setup_preflight real
   AUTO_ERROR_CODE="preflight_evidence_failed"
   write_evidence "automated_preflight_passed" "not_started" "${CONFIG_BEFORE}" "${AUTH_BEFORE}" "${CONFIG_HASH_BEFORE}" "${AUTH_HASH_BEFORE}" "${NOTIFY_HASH_BEFORE}"
   AUTO_ERROR_CODE="ax_driver_build_failed"
@@ -3292,8 +3372,13 @@ run_automated_proof() {
     evidence_role="$(jq -er '.evidence_role' <<<"${stage}")" || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
     expectation="$(jq -er '.expect' <<<"${stage}")" || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
     query_copy="${RUN_DIR}/automated-query-${index}.txt"
-    cp "${query_source}" "${query_copy}" || { AUTO_ERROR_CODE="query_staging_failed"; return 1; }
-    chmod 600 "${query_copy}" || { AUTO_ERROR_CODE="query_staging_failed"; return 1; }
+    AUTO_ERROR_CODE="query_window_binding_invalid"
+    verify_desktop_window_identity || return 1
+    AUTO_ERROR_CODE="query_content_invalid"
+    validate_postbinding_query_content "${query_source}" "${response_marker}" "${expectation}" || return 1
+    AUTO_ERROR_CODE="query_staging_failed"
+    query_sha256="$(copy_bound_query "${query_source}" "${query_copy}")" || return 1
+    [[ "${query_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
     AUTO_ERROR_CODE="usage_summary_failed"
     summarize_usage
     usage_baseline="$(jq -er 'length' "${OUT}/usage-events.json")" || { AUTO_ERROR_CODE="usage_baseline_failed"; return 1; }
@@ -3363,26 +3448,39 @@ run_automated_proof() {
     AUTO_ERROR_CODE="scenario_stage_completion_mismatch"
     return 1
   fi
-  gpt55_marker="$(jq -er '.stages[] | select(.evidence_role == "gpt55-response" and .model_id == "gpt-5.5") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || {
-    AUTO_ERROR_CODE="gpt55_marker_missing"
-    return 1
-  }
-  gpt56_marker="$(jq -er '.stages[] | select(.evidence_role == "gpt56-response" and .model_id == "gpt-5.6-luna") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || {
-    AUTO_ERROR_CODE="gpt56_marker_missing"
-    return 1
-  }
-  AUTO_ERROR_CODE="render_evidence_failed"
-  write_desktop_render_evidence "${overall_since}" "${PROOF_PROVIDER_MODEL_ID}" "${SCREENSHOT_EVIDENCE}" "${gpt55_marker}" "${gpt56_marker}"
-  if [[ "${AUTOMATED_PROFILE}" == "standard_four_stage_dogfood" ]]; then
-    standard_route_status="$(route_outcome_from_usage_file "${OUT}/usage-events.json" "${PROOF_PROVIDER_MODEL_ID}" "${DESKTOP_TOOL_EVIDENCE}" "${SCREENSHOT_EVIDENCE}" "${DESKTOP_RENDER_EVIDENCE}")" || {
-      AUTO_ERROR_CODE="standard_route_evaluation_failed"
+  case "${AUTOMATED_PROFILE}" in
+    standard_four_stage_dogfood)
+      gpt55_marker="$(jq -er '.stages[] | select(.evidence_role == "gpt55-response" and .model_id == "gpt-5.5") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || {
+        AUTO_ERROR_CODE="gpt55_marker_missing"
+        return 1
+      }
+      gpt56_marker="$(jq -er '.stages[] | select(.evidence_role == "gpt56-response" and .model_id == "gpt-5.6-luna") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || {
+        AUTO_ERROR_CODE="gpt56_marker_missing"
+        return 1
+      }
+      AUTO_ERROR_CODE="render_evidence_failed"
+      write_desktop_render_evidence "${overall_since}" "${PROOF_PROVIDER_MODEL_ID}" "${SCREENSHOT_EVIDENCE}" "${gpt55_marker}" "${gpt56_marker}"
+      standard_route_status="$(route_outcome_from_usage_file "${OUT}/usage-events.json" "${PROOF_PROVIDER_MODEL_ID}" "${DESKTOP_TOOL_EVIDENCE}" "${SCREENSHOT_EVIDENCE}" "${DESKTOP_RENDER_EVIDENCE}")" || {
+        AUTO_ERROR_CODE="standard_route_evaluation_failed"
+        return 1
+      }
+      if [[ "${standard_route_status}" != "complete" ]]; then
+        AUTO_ERROR_CODE="standard_route_${standard_route_status}"
+        return 1
+      fi
+      ;;
+    single_tool_scenario)
+      if ! custom_tool_scenario_complete "${AUTOMATED_STAGE_EVIDENCE}" "${expected_stage_count}" "${DESKTOP_TOOL_EVIDENCE}" "${SCREENSHOT_EVIDENCE}"; then
+        AUTO_ERROR_CODE="custom_tool_evidence_incomplete"
+        return 1
+      fi
+      ;;
+    custom_scenario) ;;
+    *)
+      AUTO_ERROR_CODE="scenario_profile_unknown"
       return 1
-    }
-    if [[ "${standard_route_status}" != "complete" ]]; then
-      AUTO_ERROR_CODE="standard_route_${standard_route_status}"
-      return 1
-    fi
-  fi
+      ;;
+  esac
   cleanup_processes
   AUTO_ERROR_CODE="final_evidence_failed"
   write_evidence "route_complete" "complete" "${CONFIG_BEFORE}" "${AUTH_BEFORE}" "${CONFIG_HASH_BEFORE}" "${AUTH_HASH_BEFORE}" "${NOTIFY_HASH_BEFORE}"
@@ -3674,6 +3772,10 @@ EOF
     [[ -n "${2:-}" ]] || exit 2
     validate_auto_scenario "$2"
     ;;
+  --test-postbinding-query-content)
+    [[ -n "${4:-}" && -z "${5:-}" ]] || exit 2
+    validate_postbinding_query_content "$2" "$3" "$4"
+    ;;
   --test-fresh-stage-usage)
     [[ -n "${4:-}" ]] || exit 2
     fresh_stage_usage "$2" "$3" "$4"
@@ -3693,6 +3795,10 @@ EOF
   --test-automated-stages-complete)
     [[ -n "${3:-}" ]] || exit 2
     automated_stages_complete "$2" "$3"
+    ;;
+  --test-custom-tool-scenario-complete)
+    [[ -n "${5:-}" && -z "${6:-}" ]] || exit 2
+    custom_tool_scenario_complete "$2" "$3" "$4" "$5"
     ;;
   --test-write-codex-config)
     [[ -n "${2:-}" ]] || exit 2

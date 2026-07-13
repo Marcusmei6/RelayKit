@@ -5,15 +5,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -167,6 +170,23 @@ func activateCodexConfig(args []string, stdout, stderr io.Writer) int {
 
 const maximumCredentialHandoffBytes = 1 << 20
 
+func parseParentPID(value string) (int, error) {
+	pid, err := strconv.Atoi(value)
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("parent PID must be a positive integer")
+	}
+	return pid, nil
+}
+
+func parentProcessAlive(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
 type credentialHandoff struct {
 	Version     int               `json:"version"`
 	Credentials map[string]string `json:"credentials"`
@@ -209,8 +229,20 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	configPath := fs.String("config", "../examples/providers.example.json", "provider profile JSON path")
 	usageLogPath := fs.String("usage-log", defaultUsageLogPath(), "local usage JSONL path")
 	credentialStdin := fs.Bool("credential-stdin", false, "read App-provided credentials from standard input")
+	parentPIDValue := fs.String("parent-pid", "", "optional positive parent process ID")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	parentPID := 0
+	if *parentPIDValue != "" {
+		var err error
+		parentPID, err = parseParentPID(*parentPIDValue)
+		if err != nil {
+			return err
+		}
+		if !parentProcessAlive(parentPID) {
+			return fmt.Errorf("parent process is not running")
+		}
 	}
 
 	var handler http.Handler
@@ -228,34 +260,78 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		return fmt.Errorf("gateway config failed: %w", err)
 	}
 
+	listener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return fmt.Errorf("gateway listen failed: %w", err)
+	}
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
 	srv := &http.Server{
 		Addr:              *listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext: func(net.Listener) context.Context {
+			return rootCtx
+		},
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("relaykit gateway listening on http://%s", *listen)
-		errCh <- srv.ListenAndServe()
+		errCh <- srv.Serve(listener)
+	}()
+	parentLost := make(chan struct{})
+	parentMonitorDone := make(chan struct{})
+	if parentPID > 0 {
+		go func() {
+			defer close(parentMonitorDone)
+			ticker := time.NewTicker(250 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-rootCtx.Done():
+					return
+				case <-ticker.C:
+					if !parentProcessAlive(parentPID) {
+						cancelRoot()
+						close(parentLost)
+						_ = listener.Close()
+						return
+					}
+				}
+			}
+		}()
+	} else {
+		close(parentMonitorDone)
+	}
+	defer func() {
+		cancelRoot()
+		<-parentMonitorDone
 	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
 
 	select {
 	case sig := <-stop:
 		log.Printf("shutting down after %s", sig)
+	case <-parentLost:
+		log.Printf("shutting down after parent process exited")
 	case err := <-errCh:
+		if rootCtx.Err() != nil {
+			break
+		}
 		if err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("gateway failed: %w", err)
 		}
 		return nil
 	}
+	cancelRoot()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
+		_ = srv.Close()
 		return fmt.Errorf("shutdown failed: %w", err)
 	}
 	return nil

@@ -21,6 +21,11 @@ RelayKit must be publishable without cleanup.
 - Real usage logs.
 - Private provider probes.
 - Copied code, icons, wording, screenshots, or private provider lists from another product.
+- Personal absolute home paths, private-network host addresses, SSH targets, serial numbers, hardware UUIDs, or other machine identifiers in tracked acceptance material.
+
+## Fixture Sentinel Policy
+
+Public tests may use an explicit marker such as `RELAYKIT_FAKE_SENTINEL_DO_NOT_USE`. Fake markers must be unmistakably synthetic and must not resemble a real API key, bearer token, cookie, or credential file. The boundary contract must continue to reject credential-shaped content and forcibly tracked `docs/private/`, `scripts/private/`, `dist/`, gateway build, or App build paths.
 
 ## Adapter Policy
 
@@ -37,3 +42,5 @@ Run this before public push, beta package handoff, or GitHub Release drafting:
 ```
 
 The check scans tracked files only. Ignored `dist/`, `docs/private/`, `scripts/private/`, build output, and local proof artifacts may exist on a developer machine, but they must not be tracked.
+
+Run `./scripts/public-boundary-check-test.sh` after changing the scanner or its fixture contract.

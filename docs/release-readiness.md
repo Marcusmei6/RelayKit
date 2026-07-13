@@ -26,10 +26,21 @@ Status summary:
 - local beta: ready.
 - open-source public-safe: ready.
 - local beta packaging pipeline: ready.
+- local ad-hoc RC1 public proof: accepted; the final matrix and fresh Test/independent CR gates passed.
 - signed beta scaffolding: present, blocked until real Apple distribution inputs exist.
 - signed beta: blocked by Apple Developer Program approval.
 - public release: not complete.
 - updater runtime: deferred until a signed and notarized artifact exists.
+
+RC1 public-proof status is separate from the older local-beta result. The final matrix passed in a fresh `relaykit_test` lane, and an independent `relaykit_cr` review passed. The visual review type was `independent_visual_review`; `automated_classifier=false` was preserved and was not relabeled. This is local ad-hoc RC1 acceptance, not Signed Beta or public-release acceptance. Planner completion still requires a final release inspection of the current artifact. The accepted matrix was selected by:
+
+```bash
+./scripts/relaykit-validate.sh --plan-only --rc1
+```
+
+That profile builds one local package, then reuses its extracted `dist/verify-release/RelayKitApp.app` for the menu smoke, loopback-only native Responses proof, and abrupt-parent helper lifecycle proof. It does not use a real provider, send a paid Desktop request, run the four-stage Desktop scenario, sign with Developer ID, notarize, publish, or update shared Codex/LaunchAgent state.
+
+Signed Beta still requires real Apple distribution inputs. Developer ID signing, notarization, stapling, updater runtime, and publishing are incomplete.
 
 Current signed beta blocker: external Apple approval pending. Apple Developer Account still shows membership pending /待处理, the Certificates page shows Access Unavailable, this Mac has no Developer ID Application identity, and `./script/package_signed_release.sh` correctly exits 64 without Apple signing inputs. Do not delete or overwrite this evidence, do not describe `dist/RelayKitApp-local.zip` as a signed beta, and do not mock notarization success.
 

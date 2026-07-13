@@ -52,11 +52,35 @@ git diff --check
 
 Also run the scans listed in `docs/public-boundary-checklist.md`.
 
+## RC1 Public Proof Handoff
+
+The RC1 public-proof final matrix passed in a fresh `relaykit_test` lane, and an independent `relaykit_cr` review passed. The visual review type was `independent_visual_review`; `automated_classifier=false` was preserved and was not relabeled. This accepts the public-proof evidence for the local ad-hoc RC1 candidate only. Planner completion still requires a final release inspection of the current artifact.
+
+The accepted unique matrix used no paid or real-provider request and was selected with:
+
+```bash
+./scripts/relaykit-validate.sh --plan-only --rc1
+```
+
+The fixed order builds and verifies one package, then reuses `dist/verify-release/RelayKitApp.app` for:
+
+- `scripts/menu-bar-e2e-smoke.sh` with `RELAYKIT_REUSE_FINAL_BUNDLE=1`;
+- `scripts/rc1-native-responses-proof.sh`, which proves App-first `openai_responses` routing against a local fake upstream;
+- `scripts/rc1-helper-lifecycle-proof.sh`, which proves the App-owned helper exits after abrupt parent loss.
+
+Both proofs fail if `19777` is already occupied, preserve the listener snapshot on `18787`, hash-check global Codex config/auth before and after, do not touch LaunchAgents, and write aggregate public-safe evidence under ignored `dist/`. The native proof sends only a loopback fixture request; the lifecycle proof sends no provider request.
+
+The tracked remote-Mac acceptance material is now portable and requires explicit local `RELAYKIT_ACCEPTANCE_HOST`. The machine-specific originals remain ignored archives and must not be staged or regenerated.
+
+Signed Beta remains pending real Apple distribution inputs. Developer ID signing, notarization, stapling, updater runtime, and publishing are incomplete.
+
 ## Proof Layers
 
 Public-safe scripts:
 
 - `scripts/menu-bar-e2e-smoke.sh`: launches the local app with isolated fixtures, verifies the Connect/Usage/Settings product surface, and writes evidence to `dist/ui-smoke/`.
+- `scripts/rc1-native-responses-proof.sh`: proves the final extracted App can start its bundled helper and preserve a native Responses request/response contract through a loopback fake upstream.
+- `scripts/rc1-helper-lifecycle-proof.sh`: proves the helper is parent-bound to the final extracted App and exits after abrupt App loss without LaunchAgent or shared-service control.
 - `scripts/local-beta-dogfood-smoke.sh`: rebuilds `dist/RelayKitApp-local.zip`, extracts it under `dist/dogfood-local-beta/install/`, launches that extracted app bundle, records Gatekeeper rejection as expected local beta friction, and writes public-safe evidence/screenshots to `dist/dogfood-local-beta/`.
 - `scripts/export-diagnostics.sh`: writes a redacted aggregate diagnostics bundle under `dist/diagnostics/` with version, bundle id, gateway health, provider/model counts, usage aggregate, and allowlisted recent error types. Unknown or contaminated error labels become `other`; a failed sensitive-content scan removes `diagnostics.json`. It must not export provider URLs, credentials, headers, raw request/response bodies, copied Codex auth files, or Keychain item names.
 - `scripts/export-diagnostics-test.sh`: injects private URL, Keychain, header, request/response, provider, and error-label sentinels into isolated fixtures and proves none appear in the exported bundle.

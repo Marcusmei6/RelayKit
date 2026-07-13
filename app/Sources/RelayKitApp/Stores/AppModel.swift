@@ -128,7 +128,8 @@ final class AppModel: ObservableObject {
                 binaryPath: gatewayBinaryPath,
                 configPath: configPath,
                 usageLogPath: usageLogPath,
-                credentialHandoff: credentialHandoff
+                credentialHandoff: credentialHandoff,
+                parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
             )
             gatewayStatus = "running"
             message = "Gateway started on 127.0.0.1:19777"

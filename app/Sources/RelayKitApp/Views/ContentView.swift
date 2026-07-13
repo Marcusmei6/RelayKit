@@ -1536,6 +1536,7 @@ private struct ProviderFormView: View {
     @State private var source = "custom"
     @State private var displayPrefix = "custom/"
     @State private var apiFormat = "openai_chat"
+    @State private var upstreamProtocolSelectedExplicitly = false
     @State private var baseURL = ""
     @State private var modelsURL = ""
     @State private var credentialReference = ""
@@ -1594,6 +1595,7 @@ private struct ProviderFormView: View {
             _source = State(initialValue: provider.source)
             _displayPrefix = State(initialValue: provider.modelPrefix)
             _apiFormat = State(initialValue: provider.apiFormat)
+            _upstreamProtocolSelectedExplicitly = State(initialValue: true)
             _baseURL = State(initialValue: provider.baseURL)
             _modelsURL = State(initialValue: provider.modelsURL)
             _credentialReference = State(initialValue: provider.credentialReference)
@@ -1610,6 +1612,7 @@ private struct ProviderFormView: View {
             _source = State(initialValue: group.source)
             _displayPrefix = State(initialValue: "\(group.source)/")
             _apiFormat = State(initialValue: group.protocolSummary)
+            _upstreamProtocolSelectedExplicitly = State(initialValue: true)
             _baseURL = State(initialValue: group.executionBaseURL)
             _modelsURL = State(initialValue: catalogURL)
             _credentialReference = State(initialValue: "")
@@ -1743,6 +1746,12 @@ private struct ProviderFormView: View {
                         }
                         .pickerStyle(.menu)
                         .labelsHidden()
+                        .onTapGesture {
+                            upstreamProtocolSelectedExplicitly = true
+                        }
+                        .onChange(of: apiFormat) { _, _ in
+                            upstreamProtocolSelectedExplicitly = true
+                        }
                         .smokeSection("provider-upstream-protocol-selector", recorder: smokeSectionRecorder)
                     }
                     VStack(alignment: .leading, spacing: 10) {
@@ -2280,14 +2289,11 @@ private struct ProviderFormView: View {
     private var apiFormatForSave: String {
         let haystack = ([providerName, baseURL] + modelRows.flatMap { [$0.modelId, $0.displayName, $0.upstreamModel] })
             .joined(separator: " ")
-            .lowercased()
-        if haystack.contains("anthropic") || haystack.contains("claude") {
-            return "anthropic_messages"
-        }
-        if apiFormat == "anthropic_messages" || apiFormat == "openai_chat" {
-            return apiFormat
-        }
-        return "openai_chat"
+        return ProviderFormLabels.resolvedUpstreamProtocol(
+            selected: apiFormat,
+            providerText: haystack,
+            selectionIsExplicit: upstreamProtocolSelectedExplicitly
+        )
     }
 
     private var firstModelPlaceholder: String {
@@ -2383,7 +2389,10 @@ private struct ProviderFormView: View {
             connectionUsedReachableRows = false
             return
         }
-        let discovery = await discoverModels(endpoints: modelDetectionEndpoints, key: key)
+        var discovery = await discoverModels(endpoints: modelDetectionEndpoints, key: key)
+        if discovery.kind == "connected", apiFormatForSave == "openai_responses" {
+            discovery = await probeResponses(discovery, key: key)
+        }
         if discovery.kind == "connected" {
             model.startGateway()
             await model.refreshModels()
@@ -2504,6 +2513,51 @@ private struct ProviderFormView: View {
         return ProviderModelDiscoveryResult(kind: "network_failed", rows: [], endpoint: "", status: nil, latencyMS: nil)
     }
 
+    private func probeResponses(_ discovery: ProviderModelDiscoveryResult, key: String) async -> ProviderModelDiscoveryResult {
+        guard let baseURL = providerBaseURL,
+              let model = connectionProbeModel(from: discovery.rows) else {
+            return ProviderModelDiscoveryResult(kind: "responses_unavailable", rows: [], endpoint: "", status: discovery.status, latencyMS: discovery.latencyMS)
+        }
+        let trimmedPath = baseURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let endpoint = trimmedPath.split(separator: "/").last == "v1"
+            ? baseURL.appendingPathComponent("responses")
+            : baseURL.appendingPathComponent("v1/responses")
+        let body: [String: Any] = [
+            "model": model,
+            "input": "RelayKit connection probe",
+            "max_output_tokens": 1,
+        ]
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
+            return ProviderModelDiscoveryResult(kind: "responses_unavailable", rows: [], endpoint: "", status: discovery.status, latencyMS: discovery.latencyMS)
+        }
+        do {
+            let probe = try await sendProbe(url: endpoint, key: key, timeout: 8, method: "POST", body: bodyData)
+            if probe.status == 401 || probe.status == 403 {
+                return ProviderModelDiscoveryResult(kind: "auth_failed", rows: [], endpoint: "", status: probe.status, latencyMS: probe.latencyMS)
+            }
+            guard (200..<300).contains(probe.status) else {
+                return ProviderModelDiscoveryResult(kind: "responses_unavailable", rows: [], endpoint: "", status: probe.status, latencyMS: probe.latencyMS)
+            }
+            return discovery
+        } catch {
+            return ProviderModelDiscoveryResult(kind: "responses_unavailable", rows: [], endpoint: "", status: nil, latencyMS: nil)
+        }
+    }
+
+    private func connectionProbeModel(from discoveredRows: [ProviderModelRowDraft]) -> String? {
+        for row in modelRows + discoveredRows {
+            let upstream = row.upstreamModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !upstream.isEmpty {
+                return upstream
+            }
+            let identifier = row.modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !identifier.isEmpty {
+                return identifier
+            }
+        }
+        return nil
+    }
+
     private func parseModelRows(from data: Data) -> [ProviderModelRowDraft] {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return []
@@ -2518,11 +2572,21 @@ private struct ProviderFormView: View {
         }
     }
 
-    private func sendProbe(url: URL, key: String?, timeout: TimeInterval) async throws -> ProviderHTTPProbe {
+    private func sendProbe(
+        url: URL,
+        key: String?,
+        timeout: TimeInterval,
+        method: String = "GET",
+        body: Data? = nil
+    ) async throws -> ProviderHTTPProbe {
         var lastError: Error?
         for attempt in 0..<2 {
             var request = URLRequest(url: url, timeoutInterval: timeout)
-            request.httpMethod = "GET"
+            request.httpMethod = method
+            request.httpBody = body
+            if body != nil {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
             if let key, !key.isEmpty {
                 applyProviderAuthHeaders(to: &request, key: key)
             }

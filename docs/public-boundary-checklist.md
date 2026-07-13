@@ -6,11 +6,12 @@ Run this before any commit, public push, package handoff, or beta share.
 
 ```bash
 ./scripts/public-boundary-check.sh
+./scripts/public-boundary-check-test.sh
 ```
 
 Expected: `RelayKit public boundary check passed`.
 
-The script scans tracked files only and fails on private provider/domain references, credential-shaped content, tracked auth/log/usage artifacts, or ignored private/build paths that accidentally entered git.
+The script scans tracked files only and fails on private provider/domain references, credential-shaped content, machine-local paths or identifiers, tracked auth/log/usage artifacts, or ignored private/build paths that accidentally entered git. Its contract uses `RELAYKIT_FAKE_SENTINEL_DO_NOT_USE` as a deliberately non-credential-shaped fixture and forcibly tracks private/build paths to prove they remain rejected.
 
 ## Private Provider Scan
 
@@ -68,9 +69,17 @@ Expected: private/local artifacts are ignored or absent from tracked files.
 ./scripts/full-merged-catalog-proof.sh
 ./scripts/codex-desktop-acceptance.sh
 ./scripts/menu-bar-e2e-smoke.sh
+./scripts/rc1-native-responses-proof.sh
+./scripts/rc1-helper-lifecycle-proof.sh
 ```
 
-Expected: scripts use demo providers, loopback upstreams, isolated config, and `dist/` evidence. They must not write global `~/.codex/config.toml`, copy `~/.codex/auth.json`, bind `18787`, or print provider secrets.
+Expected: scripts use demo providers, loopback upstreams, isolated config, and `dist/` evidence. They must not write global `~/.codex/config.toml`, copy `~/.codex/auth.json`, bind `18787`, or print provider secrets. The two RC1 proofs must use the same final extracted bundle produced by the matrix; only the native proof sends one loopback fixture request.
+
+Plan that final matrix with:
+
+```bash
+./scripts/relaykit-validate.sh --plan-only --rc1
+```
 
 ## Package Readiness
 

@@ -758,6 +758,14 @@ JSON
 chmod 600 "${scenario_file}"
 "${PROOF_SCRIPT}" --test-auto-scenario "${scenario_file}" >"${scenario_dir}/normalized.json"
 jq -e '.version == 1 and (.stages | length) == 1 and .stages[0].id == "route-check"' "${scenario_dir}/normalized.json" >/dev/null
+scenario_validation_body="$(sed -n '/^validate_auto_scenario() {/,/^}/p' "${PROOF_SCRIPT}")"
+if grep -Eq 'query_path\.read_text|open\(query_path|cat .*query_file|jq .*query_file' <<<"${scenario_validation_body}"; then
+  fail "automated scenario metadata preflight must not read query content"
+fi
+postbinding_validation_body="$(sed -n '/^validate_postbinding_query_content() {/,/^}/p' "${PROOF_SCRIPT}")"
+grep -Fq 'query_path.read_text()' <<<"${postbinding_validation_body}" ||
+  fail "automated query content must be validated only by the postbinding validator"
+"${PROOF_SCRIPT}" --test-postbinding-query-content "${query_file}" RELAYKIT_AUTO_TEST plain
 
 scenario_guard_file="${scenario_dir}/scenario-guard.json"
 cp "${scenario_file}" "${scenario_guard_file}"
@@ -902,7 +910,18 @@ printf 'Reply with an unrelated value\n' >"${missing_marker_query}"
 chmod 600 "${missing_marker_query}"
 jq --arg query_file "${missing_marker_query}" '.stages[0].query_file = $query_file' "${scenario_file}" >"${scenario_dir}/missing-marker.json"
 chmod 600 "${scenario_dir}/missing-marker.json"
-expect_failure "automated scenario accepted a query that omitted response_marker" "${PROOF_SCRIPT}" --test-auto-scenario "${scenario_dir}/missing-marker.json"
+"${PROOF_SCRIPT}" --test-auto-scenario "${scenario_dir}/missing-marker.json" >/dev/null
+expect_failure "postbinding validation accepted a query that omitted response_marker" \
+  "${PROOF_SCRIPT}" --test-postbinding-query-content "${missing_marker_query}" RELAYKIT_AUTO_TEST plain
+
+non_utf8_query="${scenario_dir}/non-utf8-query.txt"
+printf '\377\376\375\n' >"${non_utf8_query}"
+chmod 600 "${non_utf8_query}"
+jq --arg query_file "${non_utf8_query}" '.stages[0].query_file = $query_file' "${scenario_file}" >"${scenario_dir}/non-utf8-scenario.json"
+chmod 600 "${scenario_dir}/non-utf8-scenario.json"
+"${PROOF_SCRIPT}" --test-auto-scenario "${scenario_dir}/non-utf8-scenario.json" >/dev/null
+expect_failure "postbinding validation accepted non-UTF-8 query content" \
+  "${PROOF_SCRIPT}" --test-postbinding-query-content "${non_utf8_query}" RELAYKIT_AUTO_TEST plain
 
 chmod 644 "${query_file}"
 expect_failure "automated scenario accepted a non-0600 query file" "${PROOF_SCRIPT}" --test-auto-scenario "${scenario_file}"
@@ -969,6 +988,10 @@ cat >"${scenario_dir}/standard-profile.json" <<'JSON'
 ]}
 JSON
 test "$("${PROOF_SCRIPT}" --test-automated-profile "${scenario_dir}/standard-profile.json" "public/provider-model")" = "standard_four_stage_dogfood"
+cat >"${scenario_dir}/custom-tool-profile.json" <<'JSON'
+{"stages":[{"model_id":"public/provider-model","evidence_role":"one-tool","expect":"tool"}]}
+JSON
+test "$("${PROOF_SCRIPT}" --test-automated-profile "${scenario_dir}/custom-tool-profile.json" "public/provider-model")" = "single_tool_scenario"
 test "$("${PROOF_SCRIPT}" --test-automated-profile "${scenario_file}" "public/provider-model")" = "custom_scenario"
 
 cat >"${scenario_dir}/complete-stages.json" <<'JSON'
@@ -985,6 +1008,25 @@ jq '.[1].state = "submitted"' "${scenario_dir}/complete-stages.json" >"${scenari
 expect_failure "automated stages accepted an incomplete stage" \
   "${PROOF_SCRIPT}" --test-automated-stages-complete "${scenario_dir}/incomplete-stages.json" 2
 
+cat >"${scenario_dir}/custom-tool-stage.json" <<'JSON'
+[
+  {"id":"one","evidence_role":"one-tool","expect":"tool","state":"evidence_verified","submission_state":"submitted","rollout_binding":{"proof_found":true,"thread_id":"thread-one","user_marker_count":1,"assistant_marker_count":1}}
+]
+JSON
+cat >"${scenario_dir}/custom-tool-screenshot.json" <<'JSON'
+[
+  {"role":"one-tool","captured":true,"target_identity_verified":true,"visual_checks":{"tool_marker_visible":true,"tool_execution_visible":true,"raw_protocol_visible":false}}
+]
+JSON
+"${PROOF_SCRIPT}" --test-custom-tool-scenario-complete \
+  "${scenario_dir}/custom-tool-stage.json" 1 "${usage_dir}/tool-complete.json" "${scenario_dir}/custom-tool-screenshot.json"
+expect_failure "custom tool completion accepted a non-one-stage profile" \
+  "${PROOF_SCRIPT}" --test-custom-tool-scenario-complete \
+  "${scenario_dir}/custom-tool-stage.json" 2 "${usage_dir}/tool-complete.json" "${scenario_dir}/custom-tool-screenshot.json"
+expect_failure "custom tool completion accepted raw protocol" \
+  "${PROOF_SCRIPT}" --test-custom-tool-scenario-complete \
+  "${scenario_dir}/custom-tool-stage.json" 1 "${usage_dir}/tool-xml-leak.json" "${scenario_dir}/custom-tool-screenshot.json"
+
 auto_body="$(sed -n '/^run_automated_proof() {/,/^}/p' "${PROOF_SCRIPT}")"
 auto_wait_body="$(sed -n '/^wait_for_automated_stage() {/,/^}/p' "${PROOF_SCRIPT}")"
 if grep -Eq 'wait_for_user_continue|read -r _|continue_file' <<<"${auto_body}"; then
@@ -996,6 +1038,27 @@ grep -Fq '"${AX_DRIVER_BINARY}" reveal' <<<"${auto_wait_body}" ||
   fail "Markdown proof must reveal an exact off-screen heading through AX"
 grep -Fq 'submission_state="submitted"' <<<"${auto_body}" ||
   fail "automated proof must record the point after which it cannot safely resend"
+setup_line="$(grep -n 'setup_preflight real' <<<"${auto_body}" | cut -d: -f1 | head -1)"
+bound_desktop_line="$(grep -n 'verify_desktop_window_identity' <<<"${auto_body}" | cut -d: -f1 | head -1)"
+postbinding_validation_line="$(grep -n 'validate_postbinding_query_content' <<<"${auto_body}" | cut -d: -f1 | head -1)"
+query_copy_line="$(grep -n 'copy_bound_query' <<<"${auto_body}" | cut -d: -f1 | head -1)"
+[[ -n "${setup_line}" && -n "${bound_desktop_line}" && -n "${postbinding_validation_line}" && -n "${query_copy_line}" &&
+   "${setup_line}" -lt "${bound_desktop_line}" && "${bound_desktop_line}" -lt "${postbinding_validation_line}" &&
+   "${postbinding_validation_line}" -lt "${query_copy_line}" ]] ||
+  fail "query content validation must occur after exact Desktop binding and before the bound copy"
+query_copy_body="$(sed -n '/^copy_bound_query() {/,/^}/p' "${PROOF_SCRIPT}")"
+grep -Fq 'source_hash_before' <<<"${query_copy_body}" || fail "bound query copy must hash its source before copying"
+grep -Fq 'source_hash_after' <<<"${query_copy_body}" || fail "bound query copy must rehash its source after copying"
+grep -Fq 'copy_hash' <<<"${query_copy_body}" || fail "bound query copy must hash the staged copy"
+if grep -Eq 'query_text|query_content|cat ' <<<"${query_copy_body}"; then
+  fail "bound query copy must never move query content through argv, environment, logs, or evidence"
+fi
+grep -Fq 'case "${AUTOMATED_PROFILE}" in' <<<"${auto_body}" ||
+  fail "automated profile handling must fail closed"
+grep -Fq 'single_tool_scenario)' <<<"${auto_body}" ||
+  fail "single provider tool scenarios need a distinct completion profile"
+grep -Fq 'custom_tool_scenario_complete' <<<"${auto_body}" ||
+  fail "single provider tool completion must recheck existing tool and screenshot evidence"
 grep -Fq 'codex-desktop-ax-driver.swift' <<<"${auto_body}" ||
   fail "automated proof must invoke the deterministic AX driver"
 test "$(rg -c '"\$\{AX_DRIVER_BINARY\}" submit' <<<"${auto_body}")" -eq 1 ||

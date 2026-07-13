@@ -12,6 +12,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +34,8 @@ type Server struct {
 	keychainCredentials      map[string]string
 	allowKeychainCLIFallback bool
 }
+
+const maximumResponsesRequestBytes = 16 << 20
 
 var runSecurityFindGenericPassword = func(args ...string) ([]byte, error) {
 	return exec.Command("/usr/bin/security", args...).Output()
@@ -411,19 +414,17 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		defer closeBody()
 	}
 
-	var rawRequest map[string]json.RawMessage
-	if err := json.NewDecoder(body).Decode(&rawRequest); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", err.Error()))
-		return
-	}
-	rawBody, err := json.Marshal(rawRequest)
+	rawRequest, req, err := decodeResponsesRequest(body)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "invalid request body"))
+		status := http.StatusBadRequest
+		if err == errResponsesRequestTooLarge {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, errorBody("invalid_request_error", "invalid request body"))
 		return
 	}
-	var req responsesRequest
-	if err := json.Unmarshal(rawBody, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "invalid request body"))
+	if body := s.validateResponsesModel(req.Model, start, "responses_http"); body != nil {
+		writeJSON(w, http.StatusBadRequest, body)
 		return
 	}
 	if provider, model, ok := s.providerForModel(req.Model); ok && provider.APIFormat == config.APIFormatOpenAIResponses {
@@ -584,14 +585,27 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
-			var req responsesRequest
-			if err := json.Unmarshal(requestJSON, &req); err != nil {
-				_ = writeWebSocketJSON(rw.Writer, map[string]any{"type": "response.error", "message": "invalid websocket response request"})
+			parsedBody, req, err := decodeResponsesRequest(bytes.NewReader(requestJSON))
+			if err != nil {
+				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
+			requestBody = parsedBody
+			if body := s.validateResponsesModel(req.Model, start, "responses_websocket"); body != nil {
+				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("invalid_request_error"))
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
+			requestCtx, cancelRequest := context.WithCancel(r.Context())
+			monitorDone := monitorWebSocketClientClose(conn, rw.Reader, cancelRequest)
+			defer func() {
+				cancelRequest()
+				_ = conn.Close()
+				<-monitorDone
+			}()
 			if provider, model, ok := s.providerForModel(req.Model); ok && provider.APIFormat == config.APIFormatOpenAIResponses {
-				s.nativeOpenAIResponsesWebSocket(rw.Writer, r.Context(), requestBody, req, provider, model, start)
+				s.nativeOpenAIResponsesWebSocket(rw.Writer, requestCtx, requestBody, req, provider, model, start)
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
@@ -601,7 +615,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
-			result, status, body := s.completeResponse(r.Context(), req, messages, start, "responses_websocket")
+			result, status, body := s.completeResponse(requestCtx, req, messages, start, "responses_websocket")
 			if status != http.StatusOK {
 				_ = writeWebSocketFailedEvent(rw.Writer, req.Model, body)
 				_ = writeWebSocketClose(rw.Writer)
@@ -1154,6 +1168,85 @@ func requestBodyReader(r *http.Request) (io.Reader, func(), error) {
 	default:
 		return nil, nil, fmt.Errorf("unsupported content encoding")
 	}
+}
+
+var errResponsesRequestTooLarge = fmt.Errorf("responses request exceeds size limit")
+
+func decodeResponsesRequest(body io.Reader) (map[string]json.RawMessage, responsesRequest, error) {
+	encoded, err := io.ReadAll(io.LimitReader(body, maximumResponsesRequestBytes+1))
+	if err != nil {
+		return nil, responsesRequest{}, fmt.Errorf("read request body")
+	}
+	if len(encoded) > maximumResponsesRequestBytes {
+		return nil, responsesRequest{}, errResponsesRequestTooLarge
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	first, err := decoder.Token()
+	if err != nil {
+		return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+	}
+	delim, ok := first.(json.Delim)
+	if !ok || delim != '{' {
+		return nil, responsesRequest{}, fmt.Errorf("request body must be an object")
+	}
+	raw := make(map[string]json.RawMessage)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+		}
+		if (key == "model" || key == "stream") && raw[key] != nil {
+			return nil, responsesRequest{}, fmt.Errorf("duplicate request field")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+		}
+		raw[key] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+	}
+	var req responsesRequest
+	if raw["model"] != nil {
+		if err := json.Unmarshal(raw["model"], &req.Model); err != nil {
+			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+		}
+	}
+	if raw["stream"] != nil {
+		if err := json.Unmarshal(raw["stream"], &req.Stream); err != nil {
+			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+		}
+	}
+	req.Input = raw["input"]
+	if raw["tools"] != nil {
+		if err := json.Unmarshal(raw["tools"], &req.Tools); err != nil {
+			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+		}
+	}
+	return raw, req, nil
+}
+
+func (s *Server) validateResponsesModel(model string, start time.Time, transport string) map[string]any {
+	if strings.TrimSpace(model) == "" {
+		s.recordFailedUsage("unknown", model, "invalid_request_error", http.StatusBadRequest, start, transport)
+		return errorBody("invalid_request_error", "model is required")
+	}
+	if _, _, ok := s.providerForModel(model); ok {
+		return nil
+	}
+	if _, ok := s.officialModelForModel(model); ok {
+		return nil
+	}
+	s.recordFailedUsage("unknown", model, "unknown_model", http.StatusBadRequest, start, transport)
+	return errorBody("invalid_request_error", "unknown model")
 }
 
 func upstreamPath(apiFormat string) string {
@@ -2641,7 +2734,7 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
-func acceptWebSocket(w http.ResponseWriter, r *http.Request) (io.Closer, *bufio.ReadWriter, error) {
+func acceptWebSocket(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.ReadWriter, error) {
 	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
 	if key == "" {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "Sec-WebSocket-Key is required"))
@@ -2666,6 +2759,22 @@ func acceptWebSocket(w http.ResponseWriter, r *http.Request) (io.Closer, *bufio.
 		return nil, nil, err
 	}
 	return conn, rw, nil
+}
+
+func monitorWebSocketClientClose(conn net.Conn, reader *bufio.Reader, cancel context.CancelFunc) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			opcode, _, err := readWebSocketFrame(reader)
+			if err != nil || opcode == websocketOpcodeClose {
+				cancel()
+				_ = conn.Close()
+				return
+			}
+		}
+	}()
+	return done
 }
 
 func websocketAcceptKey(key string) string {

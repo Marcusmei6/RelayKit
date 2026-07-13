@@ -27,7 +27,7 @@ public enum ProviderConfigValidator {
             guard !id.isEmpty, !name.isEmpty, !baseURL.isEmpty, !apiFormat.isEmpty else {
                 throw ProviderConfigError.invalid("provider id, name, base_url, and api_format are required")
             }
-            guard apiFormat == "openai_chat" || apiFormat == "anthropic_messages" else {
+            guard apiFormat == "openai_chat" || apiFormat == "openai_responses" || apiFormat == "anthropic_messages" else {
                 throw ProviderConfigError.invalid("unsupported api_format: \(apiFormat)")
             }
             if let parts = URLComponents(string: baseURL),

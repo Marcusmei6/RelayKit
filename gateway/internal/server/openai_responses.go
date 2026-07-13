@@ -25,6 +25,8 @@ type nativeResponsesStreamResult struct {
 	eventType string
 }
 
+const maximumNativeResponsesResponseBytes = 16 << 20
+
 func (s *Server) nativeOpenAIResponses(w http.ResponseWriter, r *http.Request, raw map[string]json.RawMessage, req responsesRequest, provider config.ProviderProfile, model config.Model, start time.Time) {
 	resp, status, failure := s.nativeResponsesUpstream(r.Context(), raw, provider, model, req.Stream)
 	if failure != nil {
@@ -178,7 +180,14 @@ type nativeResponsesResponse struct {
 }
 
 func rewriteNativeResponsesResponse(reader io.Reader, publicModel string) (nativeResponsesResponse, error) {
-	decoder := json.NewDecoder(io.LimitReader(reader, 16<<20))
+	body, err := io.ReadAll(io.LimitReader(reader, maximumNativeResponsesResponseBytes+1))
+	if err != nil {
+		return nativeResponsesResponse{}, err
+	}
+	if len(body) > maximumNativeResponsesResponseBytes {
+		return nativeResponsesResponse{}, fmt.Errorf("native response exceeds size limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	var response map[string]json.RawMessage
 	if err := decoder.Decode(&response); err != nil {
 		return nativeResponsesResponse{}, err
@@ -193,11 +202,11 @@ func rewriteNativeResponsesResponse(reader io.Reader, publicModel string) (nativ
 	if _, ok := response["model"]; ok {
 		response["model"] = json.RawMessage(strconvQuote(publicModel))
 	}
-	body, err := json.Marshal(response)
+	rewritten, err := json.Marshal(response)
 	if err != nil {
 		return nativeResponsesResponse{}, err
 	}
-	result := nativeResponsesResponse{body: body, id: id, status: status}
+	result := nativeResponsesResponse{body: rewritten, id: id, status: status}
 	_ = json.Unmarshal(response["usage"], &result.usage)
 	return result, nil
 }

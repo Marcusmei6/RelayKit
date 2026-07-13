@@ -9,6 +9,7 @@ changed_files_file=""
 full=false
 live_query=false
 include_worktree=false
+rc1=false
 
 fail() {
   jq -n --arg code "$1" '{status:"failed",error_code:$code}' >&2
@@ -28,11 +29,19 @@ while [[ "$#" -gt 0 ]]; do
     --full) full=true; shift ;;
     --live-query) live_query=true; shift ;;
     --worktree) include_worktree=true; shift ;;
+    --rc1) rc1=true; shift ;;
     *) fail "invalid_arguments" ;;
   esac
 done
 
-[[ -n "${base}" && -n "${head}" && -n "${mode}" ]] || fail "invalid_arguments"
+[[ -n "${mode}" ]] || fail "invalid_arguments"
+if [[ "${rc1}" == true ]]; then
+  [[ "${full}" == false && "${live_query}" == false && "${include_worktree}" == false ]] || fail "rc1_profile_not_unique"
+  base="${base:-HEAD}"
+  head="${head:-HEAD}"
+else
+  [[ -n "${base}" && -n "${head}" ]] || fail "invalid_arguments"
+fi
 base_sha="$(git -C "${ROOT}" rev-parse --verify "${base}^{commit}" 2>/dev/null)" || fail "base_invalid"
 head_sha="$(git -C "${ROOT}" rev-parse --verify "${head}^{commit}" 2>/dev/null)" || fail "head_invalid"
 
@@ -61,13 +70,13 @@ fi
 
 plan="${tmp}/plan.json"
 set +e
-python3 - "${ROOT}" "${base_sha}" "${head_sha}" "${changed_input}" "${changed_format}" "${full}" "${live_query}" >"${plan}" <<'PY'
+python3 - "${ROOT}" "${base_sha}" "${head_sha}" "${changed_input}" "${changed_format}" "${full}" "${live_query}" "${rc1}" >"${plan}" <<'PY'
 import json
 import shlex
 import sys
 from pathlib import Path, PurePosixPath
 
-root, base, head, changed_path, changed_format, full_raw, live_raw = sys.argv[1:]
+root, base, head, changed_path, changed_format, full_raw, live_raw, rc1_raw = sys.argv[1:]
 raw = open(changed_path, "rb").read()
 if changed_format == "nul":
     files = [part.decode("utf-8") for part in raw.split(b"\0") if part]
@@ -76,6 +85,7 @@ else:
 files = sorted(set(files))
 full = full_raw == "true"
 live = live_raw == "true"
+rc1 = rc1_raw == "true"
 
 classes = set()
 shell_files = []
@@ -165,6 +175,48 @@ def add(command_id, command, reason):
 
 quoted_base = shlex.quote(base)
 quoted_head = shlex.quote(head)
+if rc1:
+    add("diff-check", "git diff --check", "RC1 final validation requires a clean whitespace/error check")
+    add("public-boundary", "./scripts/public-boundary-check.sh", "RC1 must remain publishable without cleanup")
+    add("swift-build", "cd app && swift build", "RC1 builds the Apple-native App source")
+    add("swift-validation", "cd app && swift run RelayKitAppValidationTests", "RC1 runs focused App contracts")
+    add("go-all", "cd gateway && go test ./... -count=1", "RC1 runs the complete gateway test suite")
+    add("go-vet", "cd gateway && go vet ./...", "RC1 runs gateway static analysis")
+    add("gofmt-check", "cd gateway && test -z \"$(gofmt -l .)\"", "RC1 rejects unformatted Go source")
+    add("package-verify", "./script/package_release.sh --verify", "RC1 builds one final zip and extracted App bundle")
+    add(
+        "menu-ui-smoke-final-bundle",
+        "RELAYKIT_REUSE_FINAL_BUNDLE=1 RELAYKIT_APP_BUNDLE=dist/verify-release/RelayKitApp.app ./scripts/menu-bar-e2e-smoke.sh",
+        "RC1 menu smoke reuses the final extracted bundle",
+    )
+    add(
+        "rc1-native-responses-proof",
+        "RELAYKIT_RC1_APP_BUNDLE=dist/verify-release/RelayKitApp.app ./scripts/rc1-native-responses-proof.sh",
+        "RC1 proves App-first native Responses routing against a loopback fixture",
+    )
+    add(
+        "rc1-helper-lifecycle-proof",
+        "RELAYKIT_RC1_APP_BUNDLE=dist/verify-release/RelayKitApp.app ./scripts/rc1-helper-lifecycle-proof.sh",
+        "RC1 proves the App-owned helper exits after abrupt parent loss",
+    )
+    print(json.dumps({
+        "status": "planned",
+        "validation_profile": "rc1",
+        "base": base,
+        "head": head,
+        "changed_files": files,
+        "change_classes": ["rc1"],
+        "selected_commands": selected,
+        "skipped_commands": [],
+        "reasons": reasons,
+        "requires_build": True,
+        "requires_package": True,
+        "requires_gui": True,
+        "requires_live_query": False,
+        "requires_full_e2e": False,
+    }, sort_keys=True))
+    raise SystemExit(0)
+
 add("diff-check", f"git diff --check {quoted_base} {quoted_head} --", "all changes require a whitespace/error check")
 add("public-boundary", "./scripts/public-boundary-check.sh", "all plans preserve the public repository boundary")
 
@@ -246,6 +298,7 @@ requires_gui = bool(classes & {"app_ui", "keychain", "gateway_lifecycle", "packa
 
 print(json.dumps({
     "status": "planned",
+    "validation_profile": "changed-files",
     "base": base,
     "head": head,
     "changed_files": files,

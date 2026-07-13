@@ -34,6 +34,36 @@ new_git_repo() {
   git -C "${repo}" commit -qm baseline
 }
 
+rc1_repo="${tmp}/rc1-repo"
+new_git_repo "${rc1_repo}"
+"${rc1_repo}/scripts/relaykit-validate.sh" --plan-only --rc1 >"${tmp}/rc1.json"
+jq -e '
+  .status == "planned" and
+  .validation_profile == "rc1" and
+  .change_classes == ["rc1"] and
+  [.selected_commands[].id] == [
+    "diff-check",
+    "public-boundary",
+    "swift-build",
+    "swift-validation",
+    "go-all",
+    "go-vet",
+    "gofmt-check",
+    "package-verify",
+    "menu-ui-smoke-final-bundle",
+    "rc1-native-responses-proof",
+    "rc1-helper-lifecycle-proof"
+  ] and
+  .requires_build == true and
+  .requires_package == true and
+  .requires_gui == true and
+  .requires_live_query == false and
+  .requires_full_e2e == false and
+  any(.selected_commands[]; .id == "menu-ui-smoke-final-bundle" and (.command | contains("dist/verify-release/RelayKitApp.app"))) and
+  any(.selected_commands[]; .id == "rc1-native-responses-proof") and
+  any(.selected_commands[]; .id == "rc1-helper-lifecycle-proof")
+' "${tmp}/rc1.json" >/dev/null || fail "RC1 profile did not select the unique final matrix"
+
 plan_fixture() {
   local name="$1"
   shift

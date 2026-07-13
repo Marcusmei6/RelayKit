@@ -31,6 +31,143 @@ MANUAL_PROOF_USAGE_PROOF="${ROOT}/dist/codex-desktop-manual-proof/usage-proof.js
 MANUAL_PROOF_EVIDENCE_BACKUP=""
 MANUAL_PROOF_USAGE_PROOF_BACKUP=""
 SMOKE_KEYCHAIN_SERVICE="relaykit.ui-smoke.provider.fixture"
+REUSE_FINAL_BUNDLE="${RELAYKIT_REUSE_FINAL_BUNDLE:-0}"
+DESKTOP_ACCEPTANCE_SOURCE="${ROOT}/dist/codex-desktop-acceptance/evidence.json"
+DESKTOP_ACCEPTANCE_DESTINATION=""
+DESKTOP_ACCEPTANCE_BACKUP_DIR=""
+DESKTOP_ACCEPTANCE_DESTINATION_DIR_EXISTED=0
+DESKTOP_ACCEPTANCE_DESTINATION_EXISTED=0
+DESKTOP_ACCEPTANCE_PLACED=0
+
+desktop_acceptance_evidence_is_valid() {
+  local evidence="$1"
+  [[ -f "${evidence}" && ! -L "${evidence}" ]] || return 1
+  jq -e '
+    (keys | sort) == ([
+      "acceptance_scope",
+      "app_server_demo_models",
+      "desktop_gui_picker_proof",
+      "desktop_gui_route_proof",
+      "full_merged_gateway_models",
+      "gateway_health_ok",
+      "gateway_models_include_demo",
+      "gateway_port_released",
+      "generated_config_model",
+      "global_auth_signature_after",
+      "global_auth_signature_before",
+      "global_auth_unchanged",
+      "global_config_signature_after",
+      "global_config_signature_before",
+      "global_config_unchanged",
+      "isolated_app_server_lists_official_and_provider",
+      "official_auth_not_in_provider_config_or_logs_or_evidence",
+      "official_request_hit_fake_official",
+      "proof_source",
+      "provider_request_hit_fake_provider",
+      "shared_18787_free_after",
+      "shared_19777_free_after",
+      "unknown_model_rejected"
+    ] | sort) and
+    .acceptance_scope == "public_safe_headless" and
+    .full_merged_gateway_models == true and
+    .isolated_app_server_lists_official_and_provider == true and
+    .official_request_hit_fake_official == true and
+    .provider_request_hit_fake_provider == true and
+    .unknown_model_rejected == true and
+    .official_auth_not_in_provider_config_or_logs_or_evidence == true and
+    .global_config_unchanged == true and
+    .global_auth_unchanged == true and
+    .gateway_port_released == true and
+    .shared_18787_free_after == true and
+    .shared_19777_free_after == true and
+    .gateway_health_ok == true and
+    .gateway_models_include_demo == true and
+    .generated_config_model == "gpt-5.5" and
+    .desktop_gui_picker_proof == "not_attempted" and
+    .desktop_gui_route_proof == "not_attempted" and
+    .proof_source == "scripts/full-merged-catalog-proof.sh" and
+    (.global_config_signature_before | type == "string") and
+    (.global_config_signature_after | type == "string") and
+    (.global_auth_signature_before | type == "string") and
+    (.global_auth_signature_after | type == "string") and
+    .global_config_signature_before == .global_config_signature_after and
+    .global_auth_signature_before == .global_auth_signature_after and
+    (.app_server_demo_models | type == "array" and length > 0) and
+    (all(.app_server_demo_models[];
+      (keys | sort) == ["displayName", "hidden", "model"] and
+      (.displayName | type == "string" and test("^Demo [A-Za-z0-9 ._/-]+$")) and
+      (.model | type == "string" and startswith("demo/")) and
+      .hidden == false
+    ))
+  ' "${evidence}" >/dev/null 2>&1
+}
+
+cleanup_final_bundle_desktop_acceptance_evidence() {
+  [[ "${DESKTOP_ACCEPTANCE_PLACED}" == "1" ]] || return 0
+
+  rm -f "${DESKTOP_ACCEPTANCE_DESTINATION}"
+  if [[ "${DESKTOP_ACCEPTANCE_DESTINATION_EXISTED}" == "1" ]]; then
+    mv "${DESKTOP_ACCEPTANCE_BACKUP_DIR}/evidence.json" "${DESKTOP_ACCEPTANCE_DESTINATION}"
+  elif [[ "${DESKTOP_ACCEPTANCE_DESTINATION_DIR_EXISTED}" == "0" ]]; then
+    rmdir "$(dirname "${DESKTOP_ACCEPTANCE_DESTINATION}")" 2>/dev/null || true
+  fi
+  if [[ -n "${DESKTOP_ACCEPTANCE_BACKUP_DIR}" ]]; then
+    rmdir "${DESKTOP_ACCEPTANCE_BACKUP_DIR}"
+  fi
+
+  DESKTOP_ACCEPTANCE_DESTINATION=""
+  DESKTOP_ACCEPTANCE_BACKUP_DIR=""
+  DESKTOP_ACCEPTANCE_DESTINATION_DIR_EXISTED=0
+  DESKTOP_ACCEPTANCE_DESTINATION_EXISTED=0
+  DESKTOP_ACCEPTANCE_PLACED=0
+}
+
+prepare_final_bundle_desktop_acceptance_evidence() {
+  local app_parent destination_dir source_path destination_path temporary_path
+  [[ "${DESKTOP_ACCEPTANCE_PLACED}" == "0" ]] || {
+    echo "desktop acceptance evidence is already prepared" >&2
+    return 1
+  }
+  if ! desktop_acceptance_evidence_is_valid "${DESKTOP_ACCEPTANCE_SOURCE}"; then
+    echo "reusable final App desktop acceptance evidence is missing or invalid" >&2
+    return 1
+  fi
+
+  app_parent="$(cd "$(dirname "${APP_BUNDLE}")" && pwd -P)"
+  destination_dir="${app_parent}/codex-desktop-acceptance"
+  DESKTOP_ACCEPTANCE_DESTINATION="${destination_dir}/evidence.json"
+  source_path="$(cd "$(dirname "${DESKTOP_ACCEPTANCE_SOURCE}")" && pwd -P)/$(basename "${DESKTOP_ACCEPTANCE_SOURCE}")"
+  destination_path="${DESKTOP_ACCEPTANCE_DESTINATION}"
+  if [[ -d "${destination_dir}" ]]; then
+    destination_path="$(cd "${destination_dir}" && pwd -P)/evidence.json"
+  fi
+  if [[ "${source_path}" == "${destination_path}" ]]; then
+    return 0
+  fi
+
+  [[ -d "${destination_dir}" ]] && DESKTOP_ACCEPTANCE_DESTINATION_DIR_EXISTED=1
+  mkdir -p "${destination_dir}"
+  DESKTOP_ACCEPTANCE_PLACED=1
+  if [[ -e "${DESKTOP_ACCEPTANCE_DESTINATION}" || -L "${DESKTOP_ACCEPTANCE_DESTINATION}" ]]; then
+    DESKTOP_ACCEPTANCE_DESTINATION_EXISTED=1
+    DESKTOP_ACCEPTANCE_BACKUP_DIR="$(mktemp -d /tmp/relaykit-menu-evidence-backup.XXXXXX)"
+    mv "${DESKTOP_ACCEPTANCE_DESTINATION}" "${DESKTOP_ACCEPTANCE_BACKUP_DIR}/evidence.json"
+  fi
+
+  temporary_path="${destination_dir}/.evidence.json.relaykit-menu-smoke.$$"
+  if ! cp "${DESKTOP_ACCEPTANCE_SOURCE}" "${temporary_path}" ||
+     ! mv "${temporary_path}" "${DESKTOP_ACCEPTANCE_DESTINATION}" ||
+     ! cmp -s "${DESKTOP_ACCEPTANCE_SOURCE}" "${DESKTOP_ACCEPTANCE_DESTINATION}"; then
+    rm -f "${temporary_path}"
+    cleanup_final_bundle_desktop_acceptance_evidence
+    echo "failed to place reusable final App desktop acceptance evidence" >&2
+    return 1
+  fi
+}
+
+if [[ "${RELAYKIT_MENU_BAR_E2E_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 is_relaykit_tmp_provider_config() {
   [[ "$1" == /tmp/relaykit-* || "$1" == /private/tmp/relaykit-* ]]
@@ -130,7 +267,7 @@ restore_manual_proof_files() {
   fi
 }
 
-trap 'restore_defaults; cleanup; cleanup_official_login_processes; cleanup_fake_catalog; cleanup_smoke_keychain_credential; restore_manual_proof_files; cleanup_smoke_config; cleanup_manual_proof' EXIT
+trap 'restore_defaults; cleanup; cleanup_final_bundle_desktop_acceptance_evidence; cleanup_official_login_processes; cleanup_fake_catalog; cleanup_smoke_keychain_credential; restore_manual_proof_files; cleanup_smoke_config; cleanup_manual_proof' EXIT
 
 file_signature() {
   local path="$1"
@@ -209,12 +346,8 @@ func exactIdentity(_ element: AXUIElement) -> Bool {
 
 func pressDescendant(_ element: AXUIElement, depth: Int = 0) -> Bool {
     if depth > 8 { return false }
-    var actionsRef: CFArray?
     let role = text(element, kAXRoleAttribute)
-    if (role == kAXButtonRole as String || role == kAXRadioButtonRole as String),
-       AXUIElementCopyActionNames(element, &actionsRef) == .success,
-       let actions = actionsRef as? [String],
-       actions.contains(kAXPressAction) {
+    if role == kAXButtonRole as String || role == kAXRadioButtonRole as String {
         return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
     }
     for child in children(element) where pressDescendant(child, depth: depth + 1) {
@@ -523,7 +656,7 @@ capture() {
   fi
   if [[ "${name}" == "official-sheet" || "${name}" == "official-light" || "${name}" == "official-dark" ]]; then
     manual_proof_signature_before="$(file_signature "${MANUAL_PROOF_EVIDENCE}")"
-    press_ax_label "OpenAI Official / Codex Official"
+    press_ax_label "official-provider-row"
     wait_for_jq "${evidence}" '.connect.official_sheet_opened == true'
     press_ax_label "Check status"
     wait_for_jq "${evidence}" '
@@ -700,8 +833,8 @@ capture() {
       .connect.advanced_has_upstream_model_override == true and
       .connect.advanced_raw_fields_hidden == true and
       .connect.ordinary_advanced_labels == ["Upstream protocol","Custom models URL","Custom auth header","Upstream model override"] and
-      .connect.enabled_gateway_provider_protocols == ["anthropic_messages","openai_chat"] and
-      .connect.planned_provider_protocols == ["OpenAI Responses (planned)"]
+      .connect.enabled_gateway_provider_protocols == ["anthropic_messages","openai_chat","openai_responses"] and
+      .connect.planned_provider_protocols == []
     ' "${evidence}" >/dev/null
     /usr/sbin/screencapture -x "${OUT}/provider-advanced-simplified.png"
     test -s "${OUT}/provider-advanced-simplified.png"
@@ -1057,9 +1190,27 @@ cd "${ROOT}"
 ORIGINAL_CODEX_CONFIG_SIGNATURE="$(file_signature "${CODEX_CONFIG_PATH}")"
 ORIGINAL_CODEX_AUTH_SIGNATURE="$(file_signature "${CODEX_AUTH_PATH}")"
 ORIGINAL_OFFICIAL_LOGIN_PIDS="$(official_login_pids)"
-if [[ "${RELAYKIT_SKIP_BUILD_VERIFY:-0}" != "1" ]]; then
-  ./script/build_and_run.sh --verify >/dev/null
-fi
+case "${REUSE_FINAL_BUNDLE}" in
+  0)
+    case "${RELAYKIT_SKIP_BUILD_VERIFY:-0}" in
+      0) ./script/build_and_run.sh --verify >/dev/null ;;
+      1) ;;
+      *) echo "RELAYKIT_SKIP_BUILD_VERIFY must be 0 or 1" >&2; exit 2 ;;
+    esac
+    ;;
+  1)
+    [[ -x "${APP_REAL}" && -x "${BUNDLED_RELAY}" ]] || {
+      echo "reusable final App bundle is incomplete: ${APP_BUNDLE}" >&2
+      exit 1
+    }
+    /usr/bin/codesign --verify --deep --strict "${APP_BUNDLE}"
+    prepare_final_bundle_desktop_acceptance_evidence
+    ;;
+  *)
+    echo "RELAYKIT_REUSE_FINAL_BUNDLE must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
 SMOKE_CONFIG_DIR="$(mktemp -d /tmp/relaykit-ui-smoke-config.XXXXXX)"
