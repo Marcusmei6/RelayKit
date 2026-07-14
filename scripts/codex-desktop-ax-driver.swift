@@ -545,11 +545,36 @@ private func boundWindowIndex(
 
 private func resolveBoundWindowIndex(
     context: DriverContext,
-    windowServerWindowCount: Int,
-    axWindowNumbers: [UInt32?]
+    currentIdentity: WindowIdentity,
+    processIsRunning: Bool,
+    bundleIdentifier: String?,
+    windowServerMetadata: () -> [WindowServerMetadata],
+    frontmostPID: () -> pid_t?,
+    accessibilityTrusted: () -> Bool,
+    axWindowNumbers: () -> [UInt32?]
 ) throws -> Int {
+    guard currentIdentity == context.identity, currentIdentity.pid == context.pid else {
+        throw DriverFailure("window_identity_changed", exitStatus: 4)
+    }
+    guard processIsRunning else {
+        throw DriverFailure("process_unavailable", exitStatus: 4)
+    }
+    guard bundleIdentifier == context.applicationMode.expectedBundleIdentifier else {
+        throw DriverFailure("process_identity_mismatch", exitStatus: 4)
+    }
+    let windowServerWindowCount = try verifyWindowServerIdentity(
+        context,
+        windows: windowServerMetadata()
+    )
+    let currentFrontmostPID = frontmostPID()
+    if context.applicationMode == .desktop, currentFrontmostPID != context.pid {
+        throw DriverFailure("frontmost_identity_mismatch", exitStatus: 4)
+    }
+    guard accessibilityTrusted() else {
+        throw DriverFailure("accessibility_permission_unavailable", exitStatus: 4)
+    }
     return try boundWindowIndex(
-        windowNumbers: axWindowNumbers,
+        windowNumbers: axWindowNumbers(),
         expectedWindowID: context.identity.windowID,
         windowServerWindowCount: windowServerWindowCount
     )
@@ -557,33 +582,24 @@ private func resolveBoundWindowIndex(
 
 private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
     let currentIdentity = try readWindowIdentity(context.identityPath)
-    guard currentIdentity == context.identity, currentIdentity.pid == context.pid else {
-        throw DriverFailure("window_identity_changed", exitStatus: 4)
-    }
-    guard let running = NSRunningApplication(processIdentifier: context.pid), !running.isTerminated else {
-        throw DriverFailure("process_unavailable", exitStatus: 4)
-    }
-    guard running.bundleIdentifier == context.applicationMode.expectedBundleIdentifier else {
-        throw DriverFailure("process_identity_mismatch", exitStatus: 4)
-    }
-    let windowServerMetadata = currentWindowServerMetadata()
-    let windowServerWindowCount = try verifyWindowServerIdentity(
-        context,
-        windows: windowServerMetadata
-    )
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == context.pid else {
-        throw DriverFailure("frontmost_identity_mismatch", exitStatus: 4)
-    }
-    guard AXIsProcessTrusted() else {
-        throw DriverFailure("accessibility_permission_unavailable", exitStatus: 4)
-    }
-
-    let application = AXUIElementCreateApplication(context.pid)
-    let windows = copyAXAttribute(application, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+    let running = NSRunningApplication(processIdentifier: context.pid)
+    var windows: [AXUIElement] = []
     let selectedIndex = try resolveBoundWindowIndex(
         context: context,
-        windowServerWindowCount: windowServerWindowCount,
-        axWindowNumbers: windows.map(axWindowNumber)
+        currentIdentity: currentIdentity,
+        processIsRunning: running.map { !$0.isTerminated } ?? false,
+        bundleIdentifier: running?.bundleIdentifier,
+        windowServerMetadata: currentWindowServerMetadata,
+        frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+        accessibilityTrusted: { AXIsProcessTrusted() },
+        axWindowNumbers: {
+            let application = AXUIElementCreateApplication(context.pid)
+            windows = copyAXAttribute(
+                application,
+                kAXWindowsAttribute as CFString
+            ) as? [AXUIElement] ?? []
+            return windows.map(axWindowNumber)
+        }
     )
     return BoundWindow(window: windows[selectedIndex])
 }
@@ -1687,11 +1703,21 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
 
 #if RELAYKIT_AX_DRIVER_TESTING
 private struct BoundWindowTestInput: Decodable {
+    let currentIdentity: WindowIdentity
+    let processRunning: Bool
+    let bundleIdentifier: String?
     let windows: [WindowServerMetadata]
+    let frontmostPID: pid_t?
+    let accessibilityTrusted: Bool
     let axWindowNumbers: [UInt32?]
 
     enum CodingKeys: String, CodingKey {
+        case currentIdentity = "current_identity"
+        case processRunning = "process_running"
+        case bundleIdentifier = "bundle_identifier"
         case windows
+        case frontmostPID = "frontmost_pid"
+        case accessibilityTrusted = "accessibility_trusted"
         case axWindowNumbers = "ax_window_numbers"
     }
 }
@@ -1713,14 +1739,15 @@ private func executeBoundWindowTest(
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
     let context = try makeContext(options: parsed.options, command: parsed.command)
-    let windowServerWindowCount = try verifyWindowServerIdentity(
-        context,
-        windows: input.windows
-    )
     _ = try resolveBoundWindowIndex(
         context: context,
-        windowServerWindowCount: windowServerWindowCount,
-        axWindowNumbers: input.axWindowNumbers
+        currentIdentity: input.currentIdentity,
+        processIsRunning: input.processRunning,
+        bundleIdentifier: input.bundleIdentifier,
+        windowServerMetadata: { input.windows },
+        frontmostPID: { input.frontmostPID },
+        accessibilityTrusted: { input.accessibilityTrusted },
+        axWindowNumbers: { input.axWindowNumbers }
     )
     return .success(
         command: parsed.command.rawValue,

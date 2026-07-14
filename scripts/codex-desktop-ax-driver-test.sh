@@ -147,7 +147,25 @@ relaykit_verify_options=(
   --model-id "dogfood/dynamic-window"
 )
 
-relaykit_layer25_metadata='{
+relaykit_layer25_other_frontmost_metadata='{
+  "current_identity": {"pid":4201,"window_id":42},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": 9999,
+  "accessibility_trusted": true,
+  "windows": [
+    {"owner_pid":4201,"window_id":41,"layer":0},
+    {"owner_pid":4201,"window_id":42,"layer":25},
+    {"owner_pid":9999,"window_id":42,"layer":0}
+  ],
+  "ax_window_numbers": [42,null]
+}'
+relaykit_layer25_nil_frontmost_metadata='{
+  "current_identity": {"pid":4201,"window_id":42},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
   "windows": [
     {"owner_pid":4201,"window_id":41,"layer":0},
     {"owner_pid":4201,"window_id":42,"layer":25},
@@ -156,27 +174,38 @@ relaykit_layer25_metadata='{
   "ax_window_numbers": [42,null]
 }'
 for relaykit_command in relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start; do
-  case "${relaykit_command}" in
-    relaykit-provider-configure)
-      run_bound_window_success \
-        "${relaykit_command}-layer25" "${relaykit_command}" 4201 42 \
-        "${relaykit_configure_options[@]}" <<<"${relaykit_layer25_metadata}"
-      ;;
-    relaykit-provider-verify)
-      run_bound_window_success \
-        "${relaykit_command}-layer25" "${relaykit_command}" 4201 42 \
-        "${relaykit_verify_options[@]}" <<<"${relaykit_layer25_metadata}"
-      ;;
-    relaykit-gateway-start)
-      run_bound_window_success \
-        "${relaykit_command}-layer25" "${relaykit_command}" 4201 42 \
-        <<<"${relaykit_layer25_metadata}"
-      ;;
-  esac
+  for frontmost_case in other nil; do
+    case "${frontmost_case}" in
+      other) relaykit_metadata="${relaykit_layer25_other_frontmost_metadata}" ;;
+      nil) relaykit_metadata="${relaykit_layer25_nil_frontmost_metadata}" ;;
+    esac
+    case "${relaykit_command}" in
+      relaykit-provider-configure)
+        run_bound_window_success \
+          "${relaykit_command}-layer25-${frontmost_case}-frontmost" "${relaykit_command}" 4201 42 \
+          "${relaykit_configure_options[@]}" <<<"${relaykit_metadata}"
+        ;;
+      relaykit-provider-verify)
+        run_bound_window_success \
+          "${relaykit_command}-layer25-${frontmost_case}-frontmost" "${relaykit_command}" 4201 42 \
+          "${relaykit_verify_options[@]}" <<<"${relaykit_metadata}"
+        ;;
+      relaykit-gateway-start)
+        run_bound_window_success \
+          "${relaykit_command}-layer25-${frontmost_case}-frontmost" "${relaykit_command}" 4201 42 \
+          <<<"${relaykit_metadata}"
+        ;;
+    esac
+  done
 done
 
 run_bound_window_success relaykit-unnumbered-fallback relaykit-gateway-start 4202 52 <<'JSON'
 {
+  "current_identity": {"pid":4202,"window_id":52},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
   "windows": [
     {"owner_pid":4202,"window_id":51,"layer":0},
     {"owner_pid":4202,"window_id":52,"layer":25},
@@ -188,6 +217,11 @@ JSON
 
 run_bound_window_success desktop-layer0 inspect 4301 61 <<'JSON'
 {
+  "current_identity": {"pid":4301,"window_id":61},
+  "process_running": true,
+  "bundle_identifier": "com.openai.codex",
+  "frontmost_pid": 4301,
+  "accessibility_trusted": true,
   "windows": [
     {"owner_pid":4301,"window_id":61,"layer":0},
     {"owner_pid":4301,"window_id":62,"layer":25},
@@ -197,8 +231,49 @@ run_bound_window_success desktop-layer0 inspect 4301 61 <<'JSON'
 }
 JSON
 
+run_bound_window_failure window_identity_changed relaykit-identity-reread-mismatch relaykit-gateway-start 4400 70 <<'JSON'
+{
+  "current_identity": {"pid":4400,"window_id":71},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
+  "windows": [{"owner_pid":4400,"window_id":70,"layer":25}],
+  "ax_window_numbers": [70]
+}
+JSON
+
+run_bound_window_failure process_unavailable relaykit-process-missing relaykit-gateway-start 4400 70 <<'JSON'
+{
+  "current_identity": {"pid":4400,"window_id":70},
+  "process_running": false,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
+  "windows": [{"owner_pid":4400,"window_id":70,"layer":25}],
+  "ax_window_numbers": [70]
+}
+JSON
+
+run_bound_window_failure process_identity_mismatch relaykit-bundle-wrong relaykit-gateway-start 4400 70 <<'JSON'
+{
+  "current_identity": {"pid":4400,"window_id":70},
+  "process_running": true,
+  "bundle_identifier": "com.openai.codex",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
+  "windows": [{"owner_pid":4400,"window_id":70,"layer":25}],
+  "ax_window_numbers": [70]
+}
+JSON
+
 run_bound_window_failure window_identity_changed relaykit-wrong-id relaykit-gateway-start 4401 71 <<'JSON'
 {
+  "current_identity": {"pid":4401,"window_id":71},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
   "windows": [{"owner_pid":4401,"window_id":72,"layer":25}],
   "ax_window_numbers": [71]
 }
@@ -208,6 +283,11 @@ jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
 
 run_bound_window_failure window_identity_changed relaykit-missing-id relaykit-gateway-start 4402 81 <<'JSON'
 {
+  "current_identity": {"pid":4402,"window_id":81},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
   "windows": [
     {"owner_pid":4402,"layer":25},
     {"owner_pid":9999,"window_id":81,"layer":25}
@@ -220,6 +300,11 @@ jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
 
 run_bound_window_failure window_identity_changed relaykit-multiple-exact relaykit-gateway-start 4403 91 <<'JSON'
 {
+  "current_identity": {"pid":4403,"window_id":91},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
   "windows": [
     {"owner_pid":4403,"window_id":91,"layer":0},
     {"owner_pid":4403,"window_id":91,"layer":25}
@@ -232,6 +317,11 @@ jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null ||
 
 run_bound_window_failure window_selector_not_unique relaykit-multiple-unnumbered relaykit-gateway-start 4404 101 <<'JSON'
 {
+  "current_identity": {"pid":4404,"window_id":101},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
   "windows": [{"owner_pid":4404,"window_id":101,"layer":25}],
   "ax_window_numbers": [null,null]
 }
@@ -239,8 +329,25 @@ JSON
 jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null ||
   fail "RelayKit multiple unnumbered AX windows did not fail closed"
 
+run_bound_window_failure accessibility_permission_unavailable relaykit-ax-untrusted relaykit-gateway-start 4405 102 <<'JSON'
+{
+  "current_identity": {"pid":4405,"window_id":102},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": false,
+  "windows": [{"owner_pid":4405,"window_id":102,"layer":25}],
+  "ax_window_numbers": [102]
+}
+JSON
+
 run_bound_window_failure window_identity_changed desktop-nonzero-layer inspect 4501 111 <<'JSON'
 {
+  "current_identity": {"pid":4501,"window_id":111},
+  "process_running": true,
+  "bundle_identifier": "com.openai.codex",
+  "frontmost_pid": 4501,
+  "accessibility_trusted": true,
   "windows": [{"owner_pid":4501,"window_id":111,"layer":25}],
   "ax_window_numbers": [111]
 }
@@ -250,6 +357,11 @@ jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
 
 run_bound_window_failure window_selector_not_unique desktop-fallback-count inspect 4502 121 <<'JSON'
 {
+  "current_identity": {"pid":4502,"window_id":121},
+  "process_running": true,
+  "bundle_identifier": "com.openai.codex",
+  "frontmost_pid": 4502,
+  "accessibility_trusted": true,
   "windows": [
     {"owner_pid":4502,"window_id":121,"layer":0},
     {"owner_pid":4502,"window_id":122,"layer":0}
@@ -259,6 +371,43 @@ run_bound_window_failure window_selector_not_unique desktop-fallback-count inspe
 JSON
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
   fail "Desktop fallback stopped counting same-PID layer-zero windows"
+
+run_bound_window_failure frontmost_identity_mismatch desktop-other-frontmost inspect 4503 131 <<'JSON'
+{
+  "current_identity": {"pid":4503,"window_id":131},
+  "process_running": true,
+  "bundle_identifier": "com.openai.codex",
+  "frontmost_pid": 9999,
+  "accessibility_trusted": true,
+  "windows": [{"owner_pid":4503,"window_id":131,"layer":0}],
+  "ax_window_numbers": [131]
+}
+JSON
+
+run_bound_window_failure frontmost_identity_mismatch desktop-nil-frontmost inspect 4504 141 <<'JSON'
+{
+  "current_identity": {"pid":4504,"window_id":141},
+  "process_running": true,
+  "bundle_identifier": "com.openai.codex",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
+  "windows": [{"owner_pid":4504,"window_id":141,"layer":0}],
+  "ax_window_numbers": [141]
+}
+JSON
+
+bound_window_test_body="$(sed -n '/private func executeBoundWindowTest/,/^}/p' "${SOURCE}")"
+test "$(rg -c 'resolveBoundWindowIndex' <<<"${bound_window_test_body}")" -eq 1 ||
+  fail "dynamic tests must enter the production shared full resolver exactly once"
+if rg -Fq 'verifyWindowServerIdentity' <<<"${bound_window_test_body}"; then
+  fail "dynamic tests must not assemble a partial WindowServer-only resolver"
+fi
+
+bound_window_production_body="$(sed -n '/private func verifyBoundWindow/,/private struct SemanticRecord/p' "${SOURCE}")"
+grep -Fq 'NSWorkspace.shared.frontmostApplication?.processIdentifier' <<<"${bound_window_production_body}" ||
+  fail "normal production resolution must use the real NSWorkspace frontmost application"
+grep -Fq 'resolveBoundWindowIndex' <<<"${bound_window_production_body}" ||
+  fail "normal production resolution must enter the shared full resolver"
 
 run_success "${self_test[@]}" --scenario exact
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
