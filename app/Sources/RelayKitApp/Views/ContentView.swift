@@ -120,8 +120,8 @@ struct ContentView: View {
                     smokeSectionRecorder: smokeSectionRecorder
                 )
                 .environmentObject(model)
-                .smokeSection("tab-provider", recorder: smokeSectionRecorder)
-                .smokeSection("provider-modal", recorder: smokeSectionRecorder)
+                .smokeRecordOnly("tab-provider", recorder: smokeSectionRecorder)
+                .smokeRecordOnly("provider-modal", recorder: smokeSectionRecorder)
                 .padding(18)
             }
 
@@ -137,9 +137,8 @@ struct ContentView: View {
                     smokeSectionRecorder: smokeSectionRecorder
                 )
                 .environmentObject(model)
-                .accessibilityIdentifier("provider-edit-\(editingProvider.id)")
-                .smokeSection("provider-edit-modal", recorder: smokeSectionRecorder)
-                .smokeSection("provider-modal", recorder: smokeSectionRecorder)
+                .smokeRecordOnly("provider-edit-modal", recorder: smokeSectionRecorder)
+                .smokeRecordOnly("provider-modal", recorder: smokeSectionRecorder)
                 .padding(18)
             }
 
@@ -382,8 +381,8 @@ struct ContentView: View {
                 smokeSectionRecorder: smokeSectionRecorder
             )
             .environmentObject(model)
-            .smokeSection("provider-import-modal", recorder: smokeSectionRecorder)
-            .smokeSection("provider-modal", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("provider-import-modal", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("provider-modal", recorder: smokeSectionRecorder)
             .padding(18)
         }
     }
@@ -1632,10 +1631,26 @@ private struct ProviderFormView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                        field("Provider name", $providerName, "My gateway", identifier: "provider-provider-name-field")
-                            .smokeSection("provider-name-field", recorder: smokeSectionRecorder)
-                        field("API base URL", $baseURL, "https://gateway.example/api", identifier: "provider-api-base-url-field")
-                            .smokeSection("provider-base-url-field", recorder: smokeSectionRecorder)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Provider name")
+                                .font(.caption)
+                                .foregroundStyle(secondaryText)
+                            TextField("My gateway", text: $providerName)
+                                .textFieldStyle(ProductTextFieldStyle())
+                                .accessibilityLabel("Provider name field")
+                                .accessibilityIdentifier("provider-provider-name-field")
+                        }
+                            .smokeRecordOnly("provider-name-field", recorder: smokeSectionRecorder)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("API base URL")
+                                .font(.caption)
+                                .foregroundStyle(secondaryText)
+                            TextField("https://gateway.example/api", text: $baseURL)
+                                .textFieldStyle(ProductTextFieldStyle())
+                                .accessibilityLabel("API base URL field")
+                                .accessibilityIdentifier("provider-api-base-url-field")
+                        }
+                            .smokeRecordOnly("provider-base-url-field", recorder: smokeSectionRecorder)
                     }
 
                     AnyView(apiKeyField)
@@ -1649,7 +1664,7 @@ private struct ProviderFormView: View {
                 .padding(.trailing, 4)
             }
             .frame(maxHeight: isAdvancedExpanded ? 520 : 420)
-            .smokeSection(isAdvancedExpanded ? "provider-advanced-scroll-container" : "", recorder: smokeSectionRecorder)
+            .smokeRecordOnly(isAdvancedExpanded ? "provider-advanced-scroll-container" : "", recorder: smokeSectionRecorder)
 
             HStack {
                 Spacer()
@@ -1670,12 +1685,14 @@ private struct ProviderFormView: View {
         .background(sheetBackground, in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
         .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
-        .smokeSection(mode.smokeSection, recorder: smokeSectionRecorder)
-        .smokeSection(importPrefilledSection, recorder: smokeSectionRecorder)
-        .smokeSection(importMissingRequiredSection, recorder: smokeSectionRecorder)
-        .smokeSection(editPrefilledBaseURLSection, recorder: smokeSectionRecorder)
-        .smokeSection(editLoadedModelsSection, recorder: smokeSectionRecorder)
-        .smokeSection(isAdvancedExpanded ? "provider-advanced-expanded" : "provider-advanced-default-collapsed", recorder: smokeSectionRecorder)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("provider-form-container")
+        .smokeRecordOnly(mode.smokeSection, recorder: smokeSectionRecorder)
+        .smokeRecordOnly(importPrefilledSection, recorder: smokeSectionRecorder)
+        .smokeRecordOnly(importMissingRequiredSection, recorder: smokeSectionRecorder)
+        .smokeRecordOnly(editPrefilledBaseURLSection, recorder: smokeSectionRecorder)
+        .smokeRecordOnly(editLoadedModelsSection, recorder: smokeSectionRecorder)
+        .smokeRecordOnly(isAdvancedExpanded ? "provider-advanced-expanded" : "provider-advanced-default-collapsed", recorder: smokeSectionRecorder)
         .onChange(of: isAdvancedExpanded) { _, expanded in
             if expanded {
                 hasExpandedAdvanced = true
@@ -1726,7 +1743,8 @@ private struct ProviderFormView: View {
             .buttonStyle(.plain)
             .font(.caption)
             .foregroundStyle(secondaryText)
-            .smokeSection("provider-advanced-toggle-row", recorder: smokeSectionRecorder)
+            .accessibilityIdentifier("provider-advanced-toggle-row")
+            .smokeRecordOnly("provider-advanced-toggle-row", recorder: smokeSectionRecorder)
 
             if isAdvancedExpanded {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1748,27 +1766,28 @@ private struct ProviderFormView: View {
                         }
                         .pickerStyle(.menu)
                         .labelsHidden()
+                        .accessibilityIdentifier("provider-upstream-protocol-selector")
                         .onTapGesture {
                             upstreamProtocolSelectedExplicitly = true
                         }
                         .onChange(of: apiFormat) { _, _ in
                             upstreamProtocolSelectedExplicitly = true
                         }
-                        .smokeSection("provider-upstream-protocol-selector", recorder: smokeSectionRecorder)
+                        .smokeRecordOnly("provider-upstream-protocol-selector", recorder: smokeSectionRecorder)
                     }
                     VStack(alignment: .leading, spacing: 10) {
                         field("Custom models URL", $modelsURL, "Default: <base>/models")
-                            .smokeSection("provider-models-url-field", recorder: smokeSectionRecorder)
+                            .smokeRecordOnly("provider-models-url-field", recorder: smokeSectionRecorder)
                         field("Custom auth header", $keyHeader, "Authorization")
-                            .smokeSection("provider-auth-header-field", recorder: smokeSectionRecorder)
+                            .smokeRecordOnly("provider-auth-header-field", recorder: smokeSectionRecorder)
                         field("Upstream model override", firstUpstreamModelBinding, firstModelPlaceholder)
-                            .smokeSection("provider-upstream-model-override-field", recorder: smokeSectionRecorder)
+                            .smokeRecordOnly("provider-upstream-model-override-field", recorder: smokeSectionRecorder)
                     }
                 }
                 .padding(.top, 2)
             }
         }
-        .smokeSection("provider-advanced-options", recorder: smokeSectionRecorder)
+        .smokeRecordOnly("provider-advanced-options", recorder: smokeSectionRecorder)
     }
 
     private func save() {
@@ -1807,14 +1826,14 @@ private struct ProviderFormView: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(primaryText.opacity(0.86))
                 .accessibilityIdentifier(hasExistingKeychainReference ? "provider-saved-key-state" : "provider-new-key-state")
-                .smokeSection(hasExistingKeychainReference ? "api-key-saved-state" : "", recorder: smokeSectionRecorder)
+                .smokeRecordOnly(hasExistingKeychainReference ? "api-key-saved-state" : "", recorder: smokeSectionRecorder)
             apiKeyEntryField
             Text(apiKeyHelpText)
                 .font(.system(size: 10))
                 .foregroundStyle(secondaryText)
-                .smokeSection(savedKeyDisabledReasonSmokeSection, recorder: smokeSectionRecorder)
+                .smokeRecordOnly(savedKeyDisabledReasonSmokeSection, recorder: smokeSectionRecorder)
         }
-        .smokeSection("provider-api-key-field", recorder: smokeSectionRecorder)
+        .smokeRecordOnly("provider-api-key-field", recorder: smokeSectionRecorder)
     }
 
     private var apiKeyEntryField: some View {
@@ -1835,13 +1854,13 @@ private struct ProviderFormView: View {
             .foregroundStyle(primaryText.opacity(keychainCredential.isEmpty ? 0.36 : 0.72))
             .disabled(keychainCredential.isEmpty)
             .help("Show or hide this API key")
-            .smokeSection(hasExistingKeychainReference ? "api-key-eye-saved-state" : "api-key-eye-new-input", recorder: smokeSectionRecorder)
+            .smokeRecordOnly(hasExistingKeychainReference ? "api-key-eye-saved-state" : "api-key-eye-new-input", recorder: smokeSectionRecorder)
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 8)
         .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor))
-        .smokeSection(apiKeyInputSmokeSection, recorder: smokeSectionRecorder)
+        .smokeRecordOnly(apiKeyInputSmokeSection, recorder: smokeSectionRecorder)
         .onChange(of: keychainCredential) { _, value in
             if value.isEmpty {
                 showsNewAPIKey = false
@@ -1892,9 +1911,9 @@ private struct ProviderFormView: View {
                             .font(.caption)
                             .foregroundStyle(secondaryText)
                         protocolChip(ProviderFormLabels.codexRoute)
-                            .smokeSection("provider-codex-route-chip", recorder: smokeSectionRecorder)
+                            .smokeRecordOnly("provider-codex-route-chip", recorder: smokeSectionRecorder)
                         protocolChip(ProviderFormLabels.upstreamProtocol(apiFormat: apiFormatForSave))
-                            .smokeSection("provider-upstream-protocol-chip", recorder: smokeSectionRecorder)
+                            .smokeRecordOnly("provider-upstream-protocol-chip", recorder: smokeSectionRecorder)
                     }
                     Text(modelDetectionStatus)
                         .font(.caption)
@@ -1910,7 +1929,7 @@ private struct ProviderFormView: View {
                     .accessibilityLabel("provider-connection-test-entry")
                     .accessibilityIdentifier("provider-connection-test-entry")
                     .disabled(baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTestingConnection || isDetectingModels)
-                    .smokeSection("provider-connection-test-entry", recorder: smokeSectionRecorder)
+                    .smokeRecordOnly("provider-connection-test-entry", recorder: smokeSectionRecorder)
 
                     Button(isDetectingModels ? "Detecting..." : "Detect models") {
                         Task { await detectModels() }
@@ -1920,7 +1939,7 @@ private struct ProviderFormView: View {
                     .accessibilityLabel("provider-model-detection-entry")
                     .accessibilityIdentifier("provider-model-detection-entry")
                     .disabled(baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isDetectingModels || isTestingConnection)
-                    .smokeSection("provider-model-detection-entry", recorder: smokeSectionRecorder)
+                    .smokeRecordOnly("provider-model-detection-entry", recorder: smokeSectionRecorder)
                     Spacer(minLength: 0)
                 }
                 if apiFormatForSave == "openai_responses" {
@@ -1932,7 +1951,7 @@ private struct ProviderFormView: View {
             }
             if !connectionTestKind.isEmpty {
                 connectionTestStatusRow
-                    .smokeSection("provider-connection-\(connectionTestKind)", recorder: smokeSectionRecorder)
+                    .smokeRecordOnly("provider-connection-\(connectionTestKind)", recorder: smokeSectionRecorder)
             }
             if let provider = editingProvider {
                 providerHealthPanel(provider)
@@ -1945,7 +1964,7 @@ private struct ProviderFormView: View {
                                 .textFieldStyle(ProductTextFieldStyle())
                                 .accessibilityLabel("Model ID field")
                                 .accessibilityIdentifier("provider-model-id-field")
-                                .smokeSection("provider-model-id-main-field", recorder: smokeSectionRecorder)
+                                .smokeRecordOnly("provider-model-id-main-field", recorder: smokeSectionRecorder)
                             if modelRows.count > 1 {
                                 Button {
                                     removeModelRow(row.id)
@@ -1962,8 +1981,8 @@ private struct ProviderFormView: View {
                             .foregroundStyle(secondaryText)
                             .lineLimit(1)
                     }
-                    .smokeSection("provider-model-row", recorder: smokeSectionRecorder)
-                    .smokeSection(modelReachabilitySmokeSection(row), recorder: smokeSectionRecorder)
+                    .smokeRecordOnly("provider-model-row", recorder: smokeSectionRecorder)
+                    .smokeRecordOnly(modelReachabilitySmokeSection(row), recorder: smokeSectionRecorder)
                 }
                 if manualModelEntryEnabled {
                     Button {
@@ -1973,10 +1992,10 @@ private struct ProviderFormView: View {
                     }
                     .buttonStyle(ControlButtonStyle())
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .smokeSection("provider-add-model-manual-action", recorder: smokeSectionRecorder)
+                    .smokeRecordOnly("provider-add-model-manual-action", recorder: smokeSectionRecorder)
                 }
             }
-            .smokeSection("provider-model-table", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("provider-model-table", recorder: smokeSectionRecorder)
         }
     }
 
@@ -2016,8 +2035,8 @@ private struct ProviderFormView: View {
         .padding(.horizontal, 9)
         .padding(.vertical, 7)
         .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 8))
-        .smokeSection(connectionCountsSmokeSection, recorder: smokeSectionRecorder)
-        .smokeSection(connectionUsedReachableRows ? "provider-connection-used-reachable-models-only" : "", recorder: smokeSectionRecorder)
+        .smokeRecordOnly(connectionCountsSmokeSection, recorder: smokeSectionRecorder)
+        .smokeRecordOnly(connectionUsedReachableRows ? "provider-connection-used-reachable-models-only" : "", recorder: smokeSectionRecorder)
     }
 
     private var connectionTestText: String {
@@ -2061,7 +2080,7 @@ private struct ProviderFormView: View {
                     .lineLimit(1)
                 Spacer()
             }
-            .smokeSection("provider-health-counts", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("provider-health-counts", recorder: smokeSectionRecorder)
             if !health.hidden.isEmpty {
                 Button {
                     isHiddenModelsExpanded.toggle()
@@ -2076,7 +2095,7 @@ private struct ProviderFormView: View {
                 .buttonStyle(.plain)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(secondaryText)
-                .smokeSection("provider-hidden-models-toggle", recorder: smokeSectionRecorder)
+                .smokeRecordOnly("provider-hidden-models-toggle", recorder: smokeSectionRecorder)
                 if isHiddenModelsExpanded {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(health.hidden) { hidden in
@@ -2087,7 +2106,7 @@ private struct ProviderFormView: View {
                                 .truncationMode(.middle)
                         }
                     }
-                    .smokeSection("provider-hidden-model-reasons", recorder: smokeSectionRecorder)
+                    .smokeRecordOnly("provider-hidden-model-reasons", recorder: smokeSectionRecorder)
                 }
             }
         }
@@ -2900,7 +2919,12 @@ private extension View {
         }
     }
 
+    @ViewBuilder
     func smokeRecordOnly(_ id: String, recorder: ((String) -> Void)?) -> some View {
-        modifier(SmokeRecordOnlyModifier(id: id, recorder: recorder))
+        if id.isEmpty {
+            self
+        } else {
+            modifier(SmokeRecordOnlyModifier(id: id, recorder: recorder))
+        }
     }
 }

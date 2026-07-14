@@ -381,7 +381,6 @@ func expectResponsesConnectionUsesGatewayOnly() throws {
         "provider-upstream-protocol-option-\\(option.id)",
         "provider-form-save",
         "provider-\\(provider.id)",
-        "provider-edit-\\(editingProvider.id)",
         "provider-saved-key-state",
         "provider-provider-name-field",
         "provider-api-base-url-field",
@@ -390,6 +389,117 @@ func expectResponsesConnectionUsesGatewayOnly() throws {
         if !source.contains(required) {
             fatalError("provider harness accessibility identifier or local gateway connection path is missing: \(required)")
         }
+    }
+}
+
+func expectProviderModalAccessibilityContract() throws {
+    let sourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift")
+    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+    guard let formStart = source.range(of: "private struct ProviderFormView: View"),
+          let formEnd = source.range(of: "private struct SectionCard", range: formStart.upperBound..<source.endIndex) else {
+        fatalError("ProviderFormView boundaries are missing")
+    }
+    let form = source[formStart.lowerBound..<formEnd.lowerBound]
+
+    if form.contains(".smokeSection(") {
+        fatalError("provider form telemetry must not create accessibility ancestors")
+    }
+    guard form.contains(".accessibilityElement(children: .contain)"),
+          form.contains(".accessibilityIdentifier(\"provider-form-container\")") else {
+        fatalError("provider form must expose one contained accessibility root")
+    }
+    if form.components(separatedBy: "provider-form-container").count - 1 != 1 {
+        fatalError("provider form container identifier must remain unique")
+    }
+    guard let providerNameStart = form.range(of: "TextField(\"My gateway\", text: $providerName)"),
+          let providerNameEnd = form.range(of: ".smokeRecordOnly(\"provider-name-field\"", range: providerNameStart.upperBound..<form.endIndex),
+          let baseURLStart = form.range(of: "TextField(\"https://gateway.example/api\", text: $baseURL)"),
+          let baseURLEnd = form.range(of: ".smokeRecordOnly(\"provider-base-url-field\"", range: baseURLStart.upperBound..<form.endIndex),
+          let apiKeyStart = form.range(of: "private var apiKeyReplacementInput: AnyView"),
+          let apiKeyEnd = form.range(of: "private var modelsSection", range: apiKeyStart.upperBound..<form.endIndex),
+          let modelIDStart = form.range(of: "TextField(\"model id\", text: $row.modelId)"),
+          let modelIDEnd = form.range(of: "if modelRows.count > 1", range: modelIDStart.upperBound..<form.endIndex),
+          let advancedToggleStart = form.range(of: "Button {\n                isAdvancedExpanded.toggle()"),
+          let advancedToggleEnd = form.range(of: "if isAdvancedExpanded", range: advancedToggleStart.upperBound..<form.endIndex),
+          let saveStart = form.range(of: "Button(mode.saveTitle) { save() }"),
+          let saveEnd = form.range(of: ".padding(.top, 12)", range: saveStart.upperBound..<form.endIndex) else {
+        fatalError("provider form accessibility child boundaries are missing")
+    }
+    let accessibilityChildren: [(identifier: String, source: Substring, expectedCount: Int)] = [
+        ("provider-provider-name-field", form[providerNameStart.lowerBound..<providerNameEnd.lowerBound], 1),
+        ("provider-api-base-url-field", form[baseURLStart.lowerBound..<baseURLEnd.lowerBound], 1),
+        ("api-key-new-input-field", form[apiKeyStart.lowerBound..<apiKeyEnd.lowerBound], 2),
+        ("provider-model-id-field", form[modelIDStart.lowerBound..<modelIDEnd.lowerBound], 1),
+        ("provider-advanced-toggle-row", form[advancedToggleStart.lowerBound..<advancedToggleEnd.lowerBound], 1),
+        ("provider-form-save", form[saveStart.lowerBound..<saveEnd.lowerBound], 1),
+    ]
+    for child in accessibilityChildren {
+        let exactModifier = ".accessibilityIdentifier(\"\(child.identifier)\")"
+        let count = child.source.components(separatedBy: exactModifier).count - 1
+        if count != child.expectedCount {
+            fatalError("provider form accessibility child must use exact modifier in its control boundary: \(child.identifier)")
+        }
+    }
+
+    guard let protocolPickerStart = form.range(of: "Picker(\"\", selection: $apiFormat) {"),
+          let protocolPickerEnd = form.range(of: "\n                    VStack", range: protocolPickerStart.upperBound..<form.endIndex) else {
+        fatalError("upstream protocol Picker boundaries are missing")
+    }
+    let protocolPicker = form[protocolPickerStart.lowerBound..<protocolPickerEnd.lowerBound]
+    guard protocolPicker.contains(".accessibilityIdentifier(\"provider-upstream-protocol-selector\")"),
+          protocolPicker.contains(".smokeRecordOnly(\"provider-upstream-protocol-selector\", recorder: smokeSectionRecorder)") else {
+        fatalError("upstream protocol Picker must retain its explicit accessibility identifier and telemetry recorder")
+    }
+
+    guard let addStart = source.range(of: "if showingProviderForm"),
+          let editStart = source.range(of: "if let editingProvider", range: addStart.upperBound..<source.endIndex),
+          let officialStart = source.range(of: "if showingOfficialChannel", range: editStart.upperBound..<source.endIndex),
+          let importStart = source.range(of: "private var providerImportOverlay"),
+          let importEnd = source.range(of: "private func cliSwitch", range: importStart.upperBound..<source.endIndex) else {
+        fatalError("provider modal presentation boundaries are missing")
+    }
+    let modalContracts: [(name: String, source: Substring, mode: String, recorders: [String])] = [
+        (
+            "add",
+            source[addStart.lowerBound..<editStart.lowerBound],
+            "mode: .add",
+            ["tab-provider", "provider-modal"]
+        ),
+        (
+            "edit",
+            source[editStart.lowerBound..<officialStart.lowerBound],
+            "mode: .edit(editingProvider)",
+            ["provider-edit-modal", "provider-modal"]
+        ),
+        (
+            "import",
+            source[importStart.lowerBound..<importEnd.lowerBound],
+            "mode: .import(importingGroup, catalogURL: model.localCatalogURL.absoluteString)",
+            ["provider-import-modal", "provider-modal"]
+        ),
+    ]
+    for modal in modalContracts {
+        if modal.source.contains(".smokeSection(") {
+            fatalError("provider \(modal.name) modal telemetry must not create accessibility ancestors")
+        }
+        if !modal.source.contains(modal.mode) {
+            fatalError("provider \(modal.name) modal accessibility contract is missing mode: \(modal.mode)")
+        }
+        for recorder in modal.recorders {
+            let exactRecorder = ".smokeRecordOnly(\"\(recorder)\", recorder: smokeSectionRecorder)"
+            if modal.source.components(separatedBy: exactRecorder).count - 1 != 1 {
+                fatalError("provider \(modal.name) modal must preserve fixed telemetry recorder: \(recorder)")
+            }
+        }
+    }
+    guard let recordOnlyStart = source.range(of: "func smokeRecordOnly("),
+          let recordOnlyEnd = source.range(of: "\n    }\n}", range: recordOnlyStart.upperBound..<source.endIndex) else {
+        fatalError("smokeRecordOnly helper boundaries are missing")
+    }
+    if !source[recordOnlyStart.lowerBound..<recordOnlyEnd.lowerBound].contains("if id.isEmpty") {
+        fatalError("smokeRecordOnly must preserve empty telemetry conditions")
     }
 }
 
@@ -912,6 +1022,7 @@ try expectProviderTestEnumMapping()
 expectProviderTestSaveActionIsIdempotent()
 try expectProviderTestSinglePostLifecycle()
 try expectResponsesConnectionUsesGatewayOnly()
+try expectProviderModalAccessibilityContract()
 expectProviderDraftRejectsCredentialValue()
 try expectLocalCatalogSummary()
 try expectCredentialRefContract()
