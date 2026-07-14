@@ -85,6 +85,11 @@ run_failure invalid_command "${binary}" self-test --scenario exact
 run_failure invalid_arguments "${binary}" relaykit-provider-configure --pid 1 --window-identity "${tmp_dir}/window.json"
 run_failure invalid_arguments "${binary}" relaykit-provider-verify --pid 1 --window-identity "${tmp_dir}/window.json"
 run_failure invalid_arguments "${binary}" relaykit-gateway-start --pid 1
+run_failure invalid_command \
+  "${binary}" relaykit-ax-inspect --pid 1 --window-identity "${tmp_dir}/window.json" \
+  --diagnostic-output "${tmp_dir}/ax-inspect.json"
+run_failure invalid_arguments env RELAYKIT_AX_DRIVER_DIAGNOSTIC=1 \
+  "${binary}" relaykit-ax-inspect --pid 1 --window-identity "${tmp_dir}/window.json"
 
 self_test=(env RELAYKIT_AX_DRIVER_SELF_TEST=1 "${binary}" self-test)
 
@@ -214,6 +219,268 @@ run_bound_window_success relaykit-unnumbered-fallback relaykit-gateway-start 420
   "ax_window_numbers": [null]
 }
 JSON
+
+relaykit_empty_windows_single_popover_metadata='{
+  "current_identity": {"pid":4203,"window_id":53},
+  "process_running": true,
+  "bundle_identifier": "dev.relaykit.app",
+  "frontmost_pid": null,
+  "accessibility_trusted": true,
+  "windows": [{"owner_pid":4203,"window_id":53,"layer":25}],
+  "ax_windows_available": true,
+  "ax_windows_malformed": false,
+  "ax_window_numbers": [],
+  "ax_window_node_ids": [],
+  "root_id": 0,
+  "nodes": [
+    {"id":0,"role":"AXApplication","children_status":"success","children":[1,2]},
+    {"id":1,"role":"AXPopover","children_status":"success","children":[3]},
+    {"id":2,"role":"AXButton","children_status":"success","children":[]},
+    {"id":3,"role":"AXButton","children_status":"success","children":[]}
+  ],
+  "expected_action_root_id": 1,
+  "semantic_target_ids": [2,3],
+  "expected_semantic_target_count": 1
+}'
+for relaykit_command in relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start; do
+  case "${relaykit_command}" in
+    relaykit-provider-configure)
+      run_bound_window_success \
+        "${relaykit_command}-empty-windows-single-popover" "${relaykit_command}" 4203 53 \
+        "${relaykit_configure_options[@]}" <<<"${relaykit_empty_windows_single_popover_metadata}"
+      ;;
+    relaykit-provider-verify)
+      run_bound_window_success \
+        "${relaykit_command}-empty-windows-single-popover" "${relaykit_command}" 4203 53 \
+        "${relaykit_verify_options[@]}" <<<"${relaykit_empty_windows_single_popover_metadata}"
+      ;;
+    relaykit-gateway-start)
+      run_bound_window_success \
+        "${relaykit_command}-empty-windows-single-popover" "${relaykit_command}" 4203 53 \
+        <<<"${relaykit_empty_windows_single_popover_metadata}"
+      ;;
+  esac
+  jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+    fail "${relaykit_command} did not bind exactly one RelayKit popover"
+done
+
+for children_failure_location in root below-popover sibling-after-popover; do
+  for children_failure_kind in error malformed; do
+    case "${children_failure_location}" in
+      root)
+        children_failure_nodes='[
+          {"id":0,"role":"AXApplication","children_status":"'"${children_failure_kind}"'","children":[1]},
+          {"id":1,"role":"AXPopover","children_status":"success","children":[]}
+        ]'
+        expected_children_failure_count=0
+        ;;
+      below-popover)
+        children_failure_nodes='[
+          {"id":0,"role":"AXApplication","children_status":"success","children":[1]},
+          {"id":1,"role":"AXPopover","children_status":"'"${children_failure_kind}"'","children":[2]},
+          {"id":2,"role":"AXButton","children_status":"success","children":[]}
+        ]'
+        expected_children_failure_count=1
+        ;;
+      sibling-after-popover)
+        children_failure_nodes='[
+          {"id":0,"role":"AXApplication","children_status":"success","children":[1,2]},
+          {"id":1,"role":"AXPopover","children_status":"success","children":[]},
+          {"id":2,"role":"AXGroup","children_status":"'"${children_failure_kind}"'","children":[3]},
+          {"id":3,"role":"AXButton","children_status":"success","children":[]}
+        ]'
+        expected_children_failure_count=1
+        ;;
+    esac
+    run_bound_window_failure window_selector_not_unique \
+      "relaykit-children-${children_failure_location}-${children_failure_kind}" \
+      relaykit-gateway-start 4212 64 <<JSON
+{
+  "current_identity":{"pid":4212,"window_id":64},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4212,"window_id":64,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,"nodes":${children_failure_nodes}
+}
+JSON
+    jq -e --argjson count "${expected_children_failure_count}" \
+      '.candidate_count == $count' "${last_stdout}" >/dev/null ||
+      fail "${children_failure_location} ${children_failure_kind} children did not fail closed"
+  done
+done
+
+run_bound_window_failure window_selector_not_unique relaykit-empty-windows-zero-popovers relaykit-gateway-start 4204 54 <<'JSON'
+{
+  "current_identity":{"pid":4204,"window_id":54},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4204,"window_id":54,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[{"id":0,"role":"AXApplication","children":[1]},{"id":1,"role":"AXGroup","children":[]}]
+}
+JSON
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+  fail "zero RelayKit popovers did not report count 0"
+
+run_bound_window_failure window_selector_not_unique relaykit-empty-windows-two-popovers relaykit-gateway-start 4205 55 <<'JSON'
+{
+  "current_identity":{"pid":4205,"window_id":55},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4205,"window_id":55,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children":[1,2]},
+    {"id":1,"role":"AXPopover","children":[]},
+    {"id":2,"role":"AXPopover","children":[]}
+  ]
+}
+JSON
+jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null ||
+  fail "multiple RelayKit popovers did not report the exact count"
+
+run_bound_window_failure window_selector_not_unique relaykit-empty-windows-truncated relaykit-gateway-start 4206 56 <<'JSON'
+{
+  "current_identity":{"pid":4206,"window_id":56},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4206,"window_id":56,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children":[1]},
+    {"id":1,"role":"AXPopover","children":[2]},
+    {"id":2,"role":"AXGroup","children":[3]},
+    {"id":3,"role":"AXGroup","children":[4]},
+    {"id":4,"role":"AXGroup","children":[5]},
+    {"id":5,"role":"AXGroup","children":[6]},
+    {"id":6,"role":"AXGroup","children":[7]},
+    {"id":7,"role":"AXGroup","children":[8]},
+    {"id":8,"role":"AXGroup","children":[9]},
+    {"id":9,"role":"AXGroup","children":[10]},
+    {"id":10,"role":"AXGroup","children":[11]},
+    {"id":11,"role":"AXGroup","children":[12]},
+    {"id":12,"role":"AXGroup","children":[13]},
+    {"id":13,"role":"AXGroup","children":[14]},
+    {"id":14,"role":"AXGroup","children":[]}
+  ]
+}
+JSON
+jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+  fail "truncated RelayKit traversal did not preserve the observed popover count"
+
+run_bound_window_failure window_selector_not_unique relaykit-empty-windows-cycle relaykit-gateway-start 4207 57 <<'JSON'
+{
+  "current_identity":{"pid":4207,"window_id":57},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4207,"window_id":57,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children":[1]},
+    {"id":1,"role":"AXPopover","children":[0]}
+  ]
+}
+JSON
+jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+  fail "cycle-safe RelayKit traversal lost the observed popover count"
+
+for unavailable_case in unavailable malformed; do
+  if [[ "${unavailable_case}" == "unavailable" ]]; then
+    ax_windows_available=false
+    ax_windows_malformed=false
+  else
+    ax_windows_available=true
+    ax_windows_malformed=true
+  fi
+  run_bound_window_failure window_selector_not_unique \
+    "relaykit-ax-windows-${unavailable_case}" relaykit-gateway-start 4208 58 <<JSON
+{
+  "current_identity":{"pid":4208,"window_id":58},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4208,"window_id":58,"layer":25}],
+  "ax_windows_available":${ax_windows_available},"ax_windows_malformed":${ax_windows_malformed},
+  "ax_window_numbers":[],"ax_window_node_ids":[],"root_id":0,
+  "nodes":[{"id":0,"role":"AXApplication","children":[1]},{"id":1,"role":"AXPopover","children":[]}]
+}
+JSON
+  jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+    fail "RelayKit ${unavailable_case} AX windows did not fail closed with count 0"
+done
+
+run_bound_window_success relaykit-nonempty-window-match relaykit-gateway-start 4209 59 <<'JSON'
+{
+  "current_identity":{"pid":4209,"window_id":59},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4209,"window_id":59,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[59],
+  "ax_window_node_ids":[2],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children":[1,2]},
+    {"id":1,"role":"AXPopover","children":[]},
+    {"id":2,"role":"AXWindow","children":[3]},
+    {"id":3,"role":"AXButton","children":[]}
+  ],
+  "expected_action_root_id":2,"semantic_target_ids":[1,3],"expected_semantic_target_count":1
+}
+JSON
+jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+  fail "nonempty matching AX window did not preserve the existing binding path"
+
+for nonempty_case in mismatch ambiguous; do
+  if [[ "${nonempty_case}" == "mismatch" ]]; then
+    ax_window_numbers='[999]'
+    ax_window_node_ids='[2]'
+    expected_count=1
+  else
+    ax_window_numbers='[null,null]'
+    ax_window_node_ids='[2,3]'
+    expected_count=2
+  fi
+  run_bound_window_failure window_selector_not_unique \
+    "relaykit-nonempty-${nonempty_case}-no-popover-fallback" relaykit-gateway-start 4210 60 <<JSON
+{
+  "current_identity":{"pid":4210,"window_id":60},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4210,"window_id":60,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,
+  "ax_window_numbers":${ax_window_numbers},"ax_window_node_ids":${ax_window_node_ids},"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children":[1,2,3]},
+    {"id":1,"role":"AXPopover","children":[]},
+    {"id":2,"role":"AXWindow","children":[]},
+    {"id":3,"role":"AXWindow","children":[]}
+  ]
+}
+JSON
+  jq -e --argjson count "${expected_count}" '.candidate_count == $count' "${last_stdout}" >/dev/null ||
+    fail "nonempty ${nonempty_case} AX windows did not fail without popover fallback"
+done
+
+run_bound_window_failure window_selector_not_unique desktop-empty-windows-popover inspect 4302 62 <<'JSON'
+{
+  "current_identity":{"pid":4302,"window_id":62},"process_running":true,
+  "bundle_identifier":"com.openai.codex","frontmost_pid":4302,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4302,"window_id":62,"layer":0}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[{"id":0,"role":"AXApplication","children":[1]},{"id":1,"role":"AXPopover","children":[]}]
+}
+JSON
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+  fail "Desktop incorrectly used the RelayKit popover binding"
+
+run_bound_window_failure window_selector_not_unique relaykit-application-root-popover relaykit-gateway-start 4211 63 <<'JSON'
+{
+  "current_identity":{"pid":4211,"window_id":63},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4211,"window_id":63,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[{"id":0,"role":"AXPopover","children":[]}]
+}
+JSON
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+  fail "RelayKit application root was accepted as the action root"
 
 run_bound_window_success desktop-layer0 inspect 4301 61 <<'JSON'
 {
@@ -396,8 +663,239 @@ run_bound_window_failure frontmost_identity_mismatch desktop-nil-frontmost inspe
 }
 JSON
 
+assert_ax_inspect_schema() {
+  local path="$1"
+  [[ "$(stat -f '%Lp' "${path}")" == "600" ]] ||
+    fail "AX inspect output permissions are not 0600"
+  jq -e '
+    (keys | sort) == [
+      "ax_windows_available","ax_windows_count","depth_counts",
+      "matching_window_count","nodes","numbered_window_count",
+      "role_counts","status","truncated"
+    ] and
+    .status == "ok" and
+    (.ax_windows_available | type == "boolean") and
+    (.ax_windows_count | type == "number") and
+    (.numbered_window_count | type == "number") and
+    (.matching_window_count | type == "number") and
+    (.truncated | type == "boolean") and
+    (.nodes | all(.[];
+      (keys | sort) == [
+        "child_count","depth","matches_expected_window","ordinal","parent",
+        "role","subrole","window_number_present"
+      ] and
+      (.ordinal | type == "number") and
+      ((.parent | type) == "number" or .parent == null) and
+      (.depth | type == "number") and
+      (.role | type == "string") and
+      ((.subrole | type) == "string" or .subrole == null) and
+      (.child_count | type == "number") and
+      (.window_number_present | type == "boolean") and
+      (.matches_expected_window | type == "boolean"))) and
+    (.role_counts | all(.[];
+      (keys | sort) == ["count","role"] and
+      (.role | type == "string") and (.count | type == "number"))) and
+    (.depth_counts | all(.[];
+      (keys | sort) == ["count","depth"] and
+      (.depth | type == "number") and (.count | type == "number")))
+  ' "${path}" >/dev/null || fail "AX inspect output escaped its allowlisted schema"
+}
+
+run_ax_inspect_success() {
+  local name="$1"
+  local pid="$2"
+  local window_id="$3"
+  local identity="${tmp_dir}/${name}-identity.json"
+  local metadata="${tmp_dir}/${name}-metadata.json"
+  local output="${tmp_dir}/${name}-ax-inspect.json"
+  write_window_identity "${identity}" "${pid}" "${window_id}"
+  cat >"${metadata}"
+  chmod 600 "${metadata}"
+  run_success env \
+    RELAYKIT_AX_DRIVER_SELF_TEST=1 \
+    RELAYKIT_AX_DRIVER_DIAGNOSTIC=1 \
+    RELAYKIT_AX_DRIVER_DIAGNOSTIC_TEST_INPUT="${metadata}" \
+    "${binary}" relaykit-ax-inspect --pid "${pid}" --window-identity "${identity}" \
+    --diagnostic-output "${output}"
+  jq -e '.command == "relaykit-ax-inspect" and .window_verified == true and .action_count == 0' \
+    "${last_stdout}" >/dev/null || fail "AX inspect stdout was not redacted"
+  assert_ax_inspect_schema "${output}"
+  last_ax_inspect="${output}"
+}
+
+run_ax_inspect_failure() {
+  local expected_code="$1"
+  local name="$2"
+  local pid="$3"
+  local window_id="$4"
+  local identity="${tmp_dir}/${name}-identity.json"
+  local metadata="${tmp_dir}/${name}-metadata.json"
+  local output="${tmp_dir}/${name}-ax-inspect.json"
+  write_window_identity "${identity}" "${pid}" "${window_id}"
+  cat >"${metadata}"
+  chmod 600 "${metadata}"
+  run_failure "${expected_code}" env \
+    RELAYKIT_AX_DRIVER_SELF_TEST=1 \
+    RELAYKIT_AX_DRIVER_DIAGNOSTIC=1 \
+    RELAYKIT_AX_DRIVER_DIAGNOSTIC_TEST_INPUT="${metadata}" \
+    "${binary}" relaykit-ax-inspect --pid "${pid}" --window-identity "${identity}" \
+    --diagnostic-output "${output}"
+  [[ ! -e "${output}" ]] || fail "${name} traversed or wrote diagnostics after identity failure"
+}
+
+run_ax_inspect_success relaykit-ax-structure 4601 42 <<'JSON'
+{
+  "current_identity":{"pid":4601,"window_id":42},
+  "process_running":true,
+  "bundle_identifier":"dev.relaykit.app",
+  "frontmost_pid":4601,
+  "accessibility_trusted":true,
+  "windows":[{"owner_pid":4601,"window_id":42,"layer":25}],
+  "ax_windows_available":true,
+  "ax_windows_count":2,
+  "root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children":[1,2]},
+    {"id":1,"role":"AXWindow","subrole":"AXStandardWindow","window_number":42,"children":[]},
+    {"id":2,"role":"AXButton","subrole":null,"children":[],"sensitive_value":"RELAYKIT_PRIVATE_SENTINEL"}
+  ]
+}
+JSON
+jq -e '
+  .ax_windows_available == true and .ax_windows_count == 2 and
+  .numbered_window_count == 1 and .matching_window_count == 1 and
+  .truncated == false and (.nodes | length) == 3 and
+  .nodes[0] == {
+    ordinal:0,parent:null,depth:0,role:"AXApplication",subrole:null,child_count:2,
+    window_number_present:false,matches_expected_window:false
+  } and
+  .nodes[1].parent == 0 and .nodes[1].matches_expected_window == true and
+  .role_counts == [
+    {role:"AXApplication",count:1},{role:"AXButton",count:1},{role:"AXWindow",count:1}
+  ] and
+  .depth_counts == [{depth:0,count:1},{depth:1,count:2}]
+' "${last_ax_inspect}" >/dev/null || fail "AX inspect structural summary is incorrect"
+if rg -Fq 'RELAYKIT_PRIVATE_SENTINEL' "${last_ax_inspect}"; then
+  fail "AX inspect serialized a non-allowlisted sensitive attribute"
+fi
+
+run_ax_inspect_failure process_identity_mismatch relaykit-ax-wrong-bundle 4602 52 <<'JSON'
+{
+  "current_identity":{"pid":4602,"window_id":52},
+  "process_running":true,
+  "bundle_identifier":"com.openai.codex",
+  "frontmost_pid":4602,
+  "accessibility_trusted":true,
+  "windows":[{"owner_pid":4602,"window_id":52,"layer":25}],
+  "ax_windows_available":true,"ax_windows_count":1,"root_id":0,
+  "nodes":[{"id":0,"role":"AXApplication","children":[]}]
+}
+JSON
+
+run_ax_inspect_failure window_identity_changed relaykit-ax-wrong-window 4603 62 <<'JSON'
+{
+  "current_identity":{"pid":4603,"window_id":62},
+  "process_running":true,
+  "bundle_identifier":"dev.relaykit.app",
+  "frontmost_pid":4603,
+  "accessibility_trusted":true,
+  "windows":[{"owner_pid":4603,"window_id":63,"layer":25}],
+  "ax_windows_available":true,"ax_windows_count":1,"root_id":0,
+  "nodes":[{"id":0,"role":"AXApplication","children":[]}]
+}
+JSON
+
+run_ax_inspect_failure frontmost_identity_mismatch relaykit-ax-not-frontmost 4604 72 <<'JSON'
+{
+  "current_identity":{"pid":4604,"window_id":72},
+  "process_running":true,
+  "bundle_identifier":"dev.relaykit.app",
+  "frontmost_pid":9999,
+  "accessibility_trusted":true,
+  "windows":[{"owner_pid":4604,"window_id":72,"layer":25}],
+  "ax_windows_available":true,"ax_windows_count":1,"root_id":0,
+  "nodes":[{"id":0,"role":"AXApplication","children":[]}]
+}
+JSON
+
+run_ax_inspect_failure accessibility_permission_unavailable relaykit-ax-untrusted-diagnostic 4605 82 <<'JSON'
+{
+  "current_identity":{"pid":4605,"window_id":82},
+  "process_running":true,
+  "bundle_identifier":"dev.relaykit.app",
+  "frontmost_pid":4605,
+  "accessibility_trusted":false,
+  "windows":[{"owner_pid":4605,"window_id":82,"layer":25}],
+  "ax_windows_available":true,"ax_windows_count":1,"root_id":0,
+  "nodes":[{"id":0,"role":"AXApplication","children":[]}]
+}
+JSON
+
+run_ax_inspect_success relaykit-ax-cycle 4610 92 <<'JSON'
+{
+  "current_identity":{"pid":4610,"window_id":92},
+  "process_running":true,
+  "bundle_identifier":"dev.relaykit.app",
+  "frontmost_pid":4610,
+  "accessibility_trusted":true,
+  "windows":[{"owner_pid":4610,"window_id":92,"layer":25}],
+  "ax_windows_available":false,"ax_windows_count":0,"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children":[1]},
+    {"id":1,"role":"AXGroup","children":[0]}
+  ]
+}
+JSON
+jq -e '.truncated == true and (.nodes | length) == 2 and ([.nodes[].ordinal] == [0,1])' \
+  "${last_ax_inspect}" >/dev/null || fail "AX inspect did not stop a cycle"
+
+depth_metadata="${tmp_dir}/relaykit-ax-depth-generated.json"
+jq -n '{
+  current_identity:{pid:4611,window_id:102},process_running:true,
+  bundle_identifier:"dev.relaykit.app",frontmost_pid:4611,accessibility_trusted:true,
+  windows:[{owner_pid:4611,window_id:102,layer:25}],
+  ax_windows_available:true,ax_windows_count:1,root_id:0,
+  nodes:[range(0;15) as $id | {id:$id,role:"AXGroup",children:(if $id < 14 then [$id + 1] else [] end)}]
+}' >"${depth_metadata}"
+run_ax_inspect_success relaykit-ax-depth 4611 102 <"${depth_metadata}"
+jq -e '.truncated == true and (.nodes | length) == 13 and ([.nodes[].depth] | max) == 12' \
+  "${last_ax_inspect}" >/dev/null || fail "AX inspect exceeded depth 12"
+
+node_metadata="${tmp_dir}/relaykit-ax-nodes-generated.json"
+jq -n '{
+  current_identity:{pid:4612,window_id:112},process_running:true,
+  bundle_identifier:"dev.relaykit.app",frontmost_pid:4612,accessibility_trusted:true,
+  windows:[{owner_pid:4612,window_id:112,layer:25}],
+  ax_windows_available:true,ax_windows_count:1,root_id:0,
+  nodes:([{id:0,role:"AXApplication",children:[range(1;520)]}] +
+    [range(1;520) as $id | {id:$id,role:"AXGroup",children:[]}])
+}' >"${node_metadata}"
+run_ax_inspect_success relaykit-ax-nodes 4612 112 <"${node_metadata}"
+jq -e '.truncated == true and (.nodes | length) == 512' "${last_ax_inspect}" >/dev/null ||
+  fail "AX inspect exceeded 512 nodes"
+
+diagnostic_source_body="$(sed -n '/private struct AXDiagnosticNodeRecord/,/private func executeInspect/p' "${SOURCE}")"
+for forbidden_attribute in \
+  kAXTitleAttribute kAXDescriptionAttribute kAXHelpAttribute kAXValueAttribute \
+  AXIdentifier AXLabel AXPlaceholderValue AXURL AXDocument NSPasteboard CGWindowBounds; do
+  if rg -Fq "${forbidden_attribute}" <<<"${diagnostic_source_body}"; then
+    fail "AX inspect queried or serialized forbidden detail: ${forbidden_attribute}"
+  fi
+done
+for required_attribute in kAXRoleAttribute kAXSubroleAttribute kAXChildrenAttribute axWindowNumber kAXWindowsAttribute; do
+  rg -Fq "${required_attribute}" <<<"${diagnostic_source_body}" ||
+    fail "AX inspect omitted required structural attribute: ${required_attribute}"
+done
+if rg -Fq 'boundWindowIndex' <<<"${diagnostic_source_body}"; then
+  fail "AX inspect must not select or fall back to an AX window index"
+fi
+grep -Fq 'AXUIElementCreateApplication(context.pid)' <<<"${diagnostic_source_body}" ||
+  fail "AX inspect must traverse from the exact App AX root"
+grep -Fq 'maximumAXDiagnosticDepth = 12' "${SOURCE}" || fail "AX inspect depth bound changed"
+grep -Fq 'maximumAXDiagnosticNodes = 512' "${SOURCE}" || fail "AX inspect node bound changed"
+
 bound_window_test_body="$(sed -n '/private func executeBoundWindowTest/,/^}/p' "${SOURCE}")"
-test "$(rg -c 'resolveBoundWindowIndex' <<<"${bound_window_test_body}")" -eq 1 ||
+test "$(rg -c 'resolveBoundActionRoot' <<<"${bound_window_test_body}")" -eq 1 ||
   fail "dynamic tests must enter the production shared full resolver exactly once"
 if rg -Fq 'verifyWindowServerIdentity' <<<"${bound_window_test_body}"; then
   fail "dynamic tests must not assemble a partial WindowServer-only resolver"
@@ -406,8 +904,37 @@ fi
 bound_window_production_body="$(sed -n '/private func verifyBoundWindow/,/private struct SemanticRecord/p' "${SOURCE}")"
 grep -Fq 'NSWorkspace.shared.frontmostApplication?.processIdentifier' <<<"${bound_window_production_body}" ||
   fail "normal production resolution must use the real NSWorkspace frontmost application"
-grep -Fq 'resolveBoundWindowIndex' <<<"${bound_window_production_body}" ||
+grep -Fq 'resolveBoundActionRoot' <<<"${bound_window_production_body}" ||
   fail "normal production resolution must enter the shared full resolver"
+
+relaykit_binding_body="$(sed -n '/private func uniqueRelayKitPopoverRoot/,/private func verifyBoundWindow/p' "${SOURCE}")"
+grep -Fq 'maximumRelayKitBindingDepth = 12' "${SOURCE}" ||
+  fail "RelayKit popover binding depth must remain 12"
+grep -Fq 'maximumRelayKitBindingNodes = 512' "${SOURCE}" ||
+  fail "RelayKit popover binding node limit must remain 512"
+for required_binding_text in AXPopover kAXRoleAttribute kAXChildrenAttribute identical; do
+  rg -Fq "${required_binding_text}" <<<"${relaykit_binding_body}" ||
+    fail "RelayKit popover binding is missing ${required_binding_text}"
+done
+grep -Fq 'AXUIElementCopyAttributeValue' <<<"${relaykit_binding_body}" ||
+  fail "production RelayKit children provider must preserve AX query status"
+if rg -F 'kAXChildrenAttribute' <<<"${relaykit_binding_body}" | rg -Fq '?? []'; then
+  fail "production RelayKit children provider collapsed query failure into an empty leaf"
+fi
+grep -Fq 'CFEqual' <<<"${relaykit_binding_body}" ||
+  fail "production RelayKit popover traversal is not cycle-safe by AX identity"
+for forbidden_binding_text in \
+  kAXTitleAttribute kAXDescriptionAttribute kAXHelpAttribute kAXValueAttribute \
+  AXIdentifier AXLabel AXPlaceholderValue kAXPositionAttribute kAXSizeAttribute \
+  CGWindowBounds localizedCaseInsensitiveContains localizedStandardContains 'range(of:'; do
+  if rg -Fq "${forbidden_binding_text}" <<<"${relaykit_binding_body}"; then
+    fail "RelayKit popover binding used a weak selector: ${forbidden_binding_text}"
+  fi
+done
+grep -Fq 'depth > 0' <<<"${relaykit_binding_body}" ||
+  fail "RelayKit popover binding may return the application root"
+grep -Fq 'collectAXNodes(from: bound.window)' "${SOURCE}" ||
+  fail "semantic search must remain scoped to the rebound action root"
 
 run_success "${self_test[@]}" --scenario exact
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||

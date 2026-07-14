@@ -21,6 +21,21 @@ APP_PID=""
 FIXTURE_PID=""
 HELPER_PID=""
 KEYCHAIN_CREATED=false
+AX_INSPECT_TEMP=""
+AX_INSPECT_OUT=""
+AX_INSPECT_FINALIZED=false
+AX_INSPECT_FINAL_STATUS=1
+AX_INSPECT_APP_LAUNCHED=false
+AX_INSPECT_LAUNCHED_PID=""
+AX_INSPECT_FAILURE="repro_failed"
+AX_INSPECT_GLOBAL_CONFIG_BEFORE=""
+AX_INSPECT_GLOBAL_AUTH_BEFORE=""
+AX_INSPECT_18787_BEFORE=""
+AX_INSPECT_19777_BEFORE=""
+CONFIG_REBASELINE_EVIDENCE="${RELAYKIT_RC1_CONFIG_REBASELINE_EVIDENCE:-}"
+CONFIG_REBASELINE_EVIDENCE_SHA256="${RELAYKIT_RC1_CONFIG_REBASELINE_EVIDENCE_SHA256:-}"
+GLOBAL_CONFIG_BASELINE_SHA256=""
+GLOBAL_AUTH_BASELINE_SHA256=""
 
 print_contract() {
   jq -n '{
@@ -56,6 +71,38 @@ sha256() {
   else
     printf 'missing\n'
   fi
+}
+
+validate_config_rebaseline() {
+  [[ "${CONFIG_REBASELINE_EVIDENCE}" == /* && -f "${CONFIG_REBASELINE_EVIDENCE}" &&
+     ! -L "${CONFIG_REBASELINE_EVIDENCE}" ]] ||
+    fail "config rebaseline evidence must be an explicit regular absolute path"
+  [[ "${CONFIG_REBASELINE_EVIDENCE_SHA256}" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "config rebaseline evidence SHA-256 is invalid"
+  [[ "$(stat -f '%Lp' "${CONFIG_REBASELINE_EVIDENCE}")" == "600" ]] ||
+    fail "config rebaseline evidence permissions are not 0600"
+  [[ "$(sha256 "${CONFIG_REBASELINE_EVIDENCE}")" == "${CONFIG_REBASELINE_EVIDENCE_SHA256}" ]] ||
+    fail "config rebaseline evidence SHA-256 changed"
+  jq -e '
+    .schema_version == 1 and
+    .observation == "external_pre_run_config_replacement" and
+    (.previous_config_sha256 | test("^[0-9a-f]{64}$")) and
+    (.new_config_sha256 | test("^[0-9a-f]{64}$")) and
+    (.auth_sha256 | test("^[0-9a-f]{64}$")) and
+    (.config_stat | type == "object") and
+    .replacement_predated_relaykit_run == true and
+    .latest_relaykit_run_changed_config == false and
+    .latest_relaykit_run_changed_auth == false and
+    .new_baseline_effective_for_future_fresh_runs == true and
+    .global_files_written == false
+  ' "${CONFIG_REBASELINE_EVIDENCE}" >/dev/null ||
+    fail "config rebaseline evidence contract is invalid"
+  GLOBAL_CONFIG_BASELINE_SHA256="$(jq -er '.new_config_sha256' "${CONFIG_REBASELINE_EVIDENCE}")"
+  GLOBAL_AUTH_BASELINE_SHA256="$(jq -er '.auth_sha256' "${CONFIG_REBASELINE_EVIDENCE}")"
+  [[ "$(sha256 "${HOME}/.codex/config.toml")" == "${GLOBAL_CONFIG_BASELINE_SHA256}" ]] ||
+    fail "global Codex config no longer matches the rebaseline evidence"
+  [[ "$(sha256 "${HOME}/.codex/auth.json")" == "${GLOBAL_AUTH_BASELINE_SHA256}" ]] ||
+    fail "global Codex auth no longer matches the rebaseline evidence"
 }
 
 listener_snapshot() {
@@ -445,6 +492,363 @@ run_window_identity_repro() {
     "${identity_path}" "${diagnostic_path}" "${launched_pid}" "${selector_status}"
 }
 
+atomic_write_private() {
+  local target="$1"
+  local temporary="${target}.tmp.$$.$RANDOM"
+  umask 077
+  /bin/cat >"${temporary}"
+  chmod 600 "${temporary}"
+  mv -f "${temporary}" "${target}"
+}
+
+atomic_copy_private() {
+  local source="$1"
+  local target="$2"
+  local temporary="${target}.tmp.$$.$RANDOM"
+  /bin/cp "${source}" "${temporary}"
+  chmod 600 "${temporary}"
+  mv -f "${temporary}" "${target}"
+}
+
+ax_driver_report_is_redacted() {
+  jq -e '
+    type == "object" and .command == "relaykit-ax-inspect" and
+    (.status == "ok" or .status == "error") and (.code | type == "string") and
+    ((keys - ["action_count","candidate_count","code","command","composer_count",
+      "model_picker_count","send_count","status","window_verified"]) | length == 0) and
+    ((has("candidate_count") | not) or .candidate_count == null or (.candidate_count | type == "number"))
+  ' "$1" >/dev/null 2>&1
+}
+
+ax_tree_is_allowlisted() {
+  jq -e '
+    (keys | sort) == [
+      "ax_windows_available","ax_windows_count","depth_counts",
+      "matching_window_count","nodes","numbered_window_count",
+      "role_counts","status","truncated"
+    ] and .status == "ok" and
+    (.nodes | length <= 512) and ([.nodes[].depth] | max // 0) <= 12 and
+    (.nodes | all(.[];
+      (keys | sort) == [
+        "child_count","depth","matches_expected_window","ordinal","parent",
+        "role","subrole","window_number_present"
+      ])) and
+    (.role_counts | all(.[]; (keys | sort) == ["count","role"])) and
+    (.depth_counts | all(.[]; (keys | sort) == ["count","depth"]))
+  ' "$1" >/dev/null 2>&1
+}
+
+ax_inspect_artifact_hash() {
+  /usr/bin/shasum -a 256 "$1" | awk '{print $1}'
+}
+
+ax_inspect_finalize() {
+  local original_exit="$1"
+  local final_exit="${original_exit}"
+  local stable_identity="${AX_INSPECT_OUT}/window-identity.json"
+  local stable_window_diagnostic="${AX_INSPECT_OUT}/window-diagnostic.json"
+  local stable_driver_report="${AX_INSPECT_OUT}/ax-driver-report.json"
+  local stable_tree="${AX_INSPECT_OUT}/ax-tree.json"
+  local app_stop_attempted=false
+  local app_stopped=true
+  local global_config_unchanged=false
+  local global_auth_unchanged=false
+  local shared_18787_unchanged=false
+  local port_19777_unchanged=false
+  local transient_removed=false
+  local tree_status=not_created
+  local result_status=failed
+  local driver_status=error
+  local driver_code=not_created
+  local driver_command=relaykit-ax-inspect
+  local driver_candidate_count=null
+  local artifact_tree_hash=""
+
+  [[ "${AX_INSPECT_FINALIZED}" == "false" ]] || return 0
+  AX_INSPECT_FINALIZED=true
+  trap - EXIT INT TERM HUP
+
+  if [[ -s "${AX_INSPECT_TEMP}/window-identity.json" ]]; then
+    atomic_copy_private "${AX_INSPECT_TEMP}/window-identity.json" "${stable_identity}"
+  else
+    jq -n '{status:"not_created"}' | atomic_write_private "${stable_identity}"
+  fi
+  if [[ -s "${AX_INSPECT_TEMP}/window-diagnostic.json" ]]; then
+    atomic_copy_private "${AX_INSPECT_TEMP}/window-diagnostic.json" "${stable_window_diagnostic}"
+  else
+    jq -n '{status:"not_created"}' | atomic_write_private "${stable_window_diagnostic}"
+  fi
+  if [[ -s "${AX_INSPECT_TEMP}/ax-driver-report.json" ]] &&
+     ax_driver_report_is_redacted "${AX_INSPECT_TEMP}/ax-driver-report.json"; then
+    atomic_copy_private "${AX_INSPECT_TEMP}/ax-driver-report.json" "${stable_driver_report}"
+  else
+    jq -n '{command:"relaykit-ax-inspect",status:"error",code:"not_created"}' |
+      atomic_write_private "${stable_driver_report}"
+  fi
+  if [[ -s "${AX_INSPECT_TEMP}/ax-tree.json" ]] &&
+     ax_tree_is_allowlisted "${AX_INSPECT_TEMP}/ax-tree.json"; then
+    atomic_copy_private "${AX_INSPECT_TEMP}/ax-tree.json" "${stable_tree}"
+    tree_status=created
+  fi
+
+  if [[ "${AX_INSPECT_APP_LAUNCHED}" == "true" && -n "${AX_INSPECT_LAUNCHED_PID}" ]]; then
+    if kill -0 "${AX_INSPECT_LAUNCHED_PID}" 2>/dev/null; then
+      app_stop_attempted=true
+      kill -TERM "${AX_INSPECT_LAUNCHED_PID}" >/dev/null 2>&1 || true
+      for _ in {1..100}; do
+        kill -0 "${AX_INSPECT_LAUNCHED_PID}" 2>/dev/null || break
+        sleep 0.1
+      done
+    fi
+    if kill -0 "${AX_INSPECT_LAUNCHED_PID}" 2>/dev/null; then
+      app_stopped=false
+    fi
+  fi
+  APP_PID=""
+
+  [[ "$(sha256 "${HOME}/.codex/config.toml")" == "${AX_INSPECT_GLOBAL_CONFIG_BEFORE}" ]] &&
+    global_config_unchanged=true
+  [[ "$(sha256 "${HOME}/.codex/auth.json")" == "${AX_INSPECT_GLOBAL_AUTH_BEFORE}" ]] &&
+    global_auth_unchanged=true
+  [[ "$(listener_snapshot 18787)" == "${AX_INSPECT_18787_BEFORE}" ]] &&
+    shared_18787_unchanged=true
+  [[ "$(listener_snapshot 19777)" == "${AX_INSPECT_19777_BEFORE}" ]] &&
+    port_19777_unchanged=true
+
+  rm -rf "${AX_INSPECT_TEMP}"
+  [[ ! -e "${AX_INSPECT_TEMP}" ]] && transient_removed=true
+  AX_INSPECT_TEMP=""
+
+  if [[ "${RELAYKIT_RC1_AX_INSPECT_TEST:-0}" == "1" ]]; then
+    [[ "${RELAYKIT_RC1_AX_INSPECT_TEST_FORCE_APP_STOPPED_FALSE:-false}" != "true" ]] ||
+      app_stopped=false
+    [[ "${RELAYKIT_RC1_AX_INSPECT_TEST_FORCE_SHARED_18787_FALSE:-false}" != "true" ]] ||
+      shared_18787_unchanged=false
+    [[ "${RELAYKIT_RC1_AX_INSPECT_TEST_FORCE_PORT_19777_FALSE:-false}" != "true" ]] ||
+      port_19777_unchanged=false
+    [[ "${RELAYKIT_RC1_AX_INSPECT_TEST_FORCE_TRANSIENT_REMOVED_FALSE:-false}" != "true" ]] ||
+      transient_removed=false
+  fi
+
+  if [[ "${original_exit}" -eq 0 &&
+        ("${global_config_unchanged}" != "true" ||
+         "${global_auth_unchanged}" != "true" ||
+         "${app_stopped}" != "true" ||
+         "${shared_18787_unchanged}" != "true" ||
+         "${port_19777_unchanged}" != "true" ||
+         "${transient_removed}" != "true") ]]; then
+    final_exit=4
+    AX_INSPECT_FAILURE=cleanup_invariant_failed
+  fi
+
+  jq -n \
+    --argjson app_launched "${AX_INSPECT_APP_LAUNCHED}" \
+    --argjson app_stop_attempted "${app_stop_attempted}" \
+    --argjson app_stopped "${app_stopped}" \
+    --argjson global_auth_unchanged "${global_auth_unchanged}" \
+    --argjson global_config_unchanged "${global_config_unchanged}" \
+    --argjson port_19777_unchanged "${port_19777_unchanged}" \
+    --argjson shared_18787_unchanged "${shared_18787_unchanged}" \
+    --argjson transient_removed "${transient_removed}" '{
+      schema_version:1,
+      app_launched:$app_launched,
+      app_stop_attempted:$app_stop_attempted,
+      app_stopped:$app_stopped,
+      global_auth_unchanged:$global_auth_unchanged,
+      global_config_unchanged:$global_config_unchanged,
+      port_19777_unchanged:$port_19777_unchanged,
+      shared_18787_unchanged:$shared_18787_unchanged,
+      transient_removed:$transient_removed
+    }' | atomic_write_private "${AX_INSPECT_OUT}/cleanup.json"
+
+  driver_status="$(jq -r '.status' "${stable_driver_report}")"
+  driver_code="$(jq -r '.code' "${stable_driver_report}")"
+  driver_command="$(jq -r '.command' "${stable_driver_report}")"
+  driver_candidate_count="$(jq -c 'if has("candidate_count") then .candidate_count else null end' "${stable_driver_report}")"
+  if [[ "${final_exit}" -eq 0 ]]; then
+    result_status=passed
+    AX_INSPECT_FAILURE=none
+  fi
+  jq -n \
+    --arg status "${result_status}" \
+    --argjson exit_code "${final_exit}" \
+    --arg failure "${AX_INSPECT_FAILURE}" \
+    --arg driver_status "${driver_status}" \
+    --arg driver_code "${driver_code}" \
+    --arg driver_command "${driver_command}" \
+    --argjson driver_candidate_count "${driver_candidate_count}" \
+    --arg ax_tree "${tree_status}" '{
+      schema_version:1,
+      status:$status,
+      exit_code:$exit_code,
+      failure:$failure,
+      driver_status:$driver_status,
+      driver_code:$driver_code,
+      driver_command:$driver_command,
+      driver_candidate_count:$driver_candidate_count,
+      ax_tree:$ax_tree
+    }' | atomic_write_private "${AX_INSPECT_OUT}/result.json"
+
+  if [[ "${tree_status}" == "created" ]]; then
+    artifact_tree_hash="$(ax_inspect_artifact_hash "${stable_tree}")"
+  fi
+  jq -n \
+    --arg inspect_out "${AX_INSPECT_OUT}" \
+    --arg run_metadata_hash "$(ax_inspect_artifact_hash "${AX_INSPECT_OUT}/run-metadata.json")" \
+    --arg identity_hash "$(ax_inspect_artifact_hash "${stable_identity}")" \
+    --arg window_diagnostic_hash "$(ax_inspect_artifact_hash "${stable_window_diagnostic}")" \
+    --arg driver_report_hash "$(ax_inspect_artifact_hash "${stable_driver_report}")" \
+    --arg tree_status "${tree_status}" \
+    --arg tree_hash "${artifact_tree_hash}" \
+    --arg cleanup_hash "$(ax_inspect_artifact_hash "${AX_INSPECT_OUT}/cleanup.json")" \
+    --arg result_hash "$(ax_inspect_artifact_hash "${AX_INSPECT_OUT}/result.json")" '{
+      schema_version:1,
+      inspect_out:$inspect_out,
+      artifacts:[
+        {name:"run_metadata",path:"run-metadata.json",status:"created",sha256:$run_metadata_hash},
+        {name:"window_identity",path:"window-identity.json",status:"created",sha256:$identity_hash},
+        {name:"window_diagnostic",path:"window-diagnostic.json",status:"created",sha256:$window_diagnostic_hash},
+        {name:"driver_report",path:"ax-driver-report.json",status:"created",sha256:$driver_report_hash},
+        {name:"ax_tree",path:"ax-tree.json",status:$tree_status,sha256:(if $tree_status == "created" then $tree_hash else null end)},
+        {name:"cleanup",path:"cleanup.json",status:"created",sha256:$cleanup_hash},
+        {name:"result",path:"result.json",status:"created",sha256:$result_hash}
+      ]
+    }' | atomic_write_private "${AX_INSPECT_OUT}/evidence-manifest.json"
+  AX_INSPECT_FINAL_STATUS="${final_exit}"
+  printf 'INSPECT_OUT=%s\n' "${AX_INSPECT_OUT}"
+}
+
+ax_inspect_exit_handler() {
+  local status="$?"
+  ax_inspect_finalize "${status}"
+  exit "${AX_INSPECT_FINAL_STATUS}"
+}
+
+ax_inspect_signal_handler() {
+  local status="$1"
+  AX_INSPECT_FAILURE=signal
+  ax_inspect_finalize "${status}"
+  exit "${AX_INSPECT_FINAL_STATUS}"
+}
+
+run_window_ax_inspect_repro() {
+  local repro_out="${RELAYKIT_RC1_AX_INSPECT_OUT:-}"
+  local identity_path window_diagnostic_path diagnostic_output report_temporary
+  local driver_binary selector_status driver_exit
+  local test_mode=false
+
+  [[ -n "${RELAYKIT_RC1_APP_BUNDLE:-}" ]] || fail "AX inspect repro requires RELAYKIT_RC1_APP_BUNDLE"
+  [[ -n "${RELAYKIT_RC1_AX_INSPECT_OUT:-}" ]] || fail "AX inspect repro requires RELAYKIT_RC1_AX_INSPECT_OUT"
+  [[ "${repro_out}" == /* && ! -e "${repro_out}" ]] ||
+    fail "AX inspect repro output must be a fresh absolute path"
+  [[ -d "${APP_BUNDLE}" && -x "${APP_REAL}" ]] || fail "AX inspect repro App bundle is incomplete"
+  [[ -f "${AX_SOURCE}" ]] || fail "AX inspect repro driver source is missing"
+  [[ -z "$(pgrep -x RelayKitApp.bin 2>/dev/null || true)" ]] || fail "RelayKit App is already running"
+  validate_config_rebaseline
+
+  if [[ "${RELAYKIT_RC1_AX_INSPECT_TEST:-0}" == "1" ]]; then
+    test_mode=true
+    [[ "${RELAYKIT_RC1_AX_INSPECT_FAKE_DRIVER:-}" == /* &&
+       -x "${RELAYKIT_RC1_AX_INSPECT_FAKE_DRIVER}" ]] ||
+      fail "AX inspect test gate requires an absolute fake driver"
+  fi
+
+  AX_INSPECT_OUT="${repro_out}"
+  AX_INSPECT_FINALIZED=false
+  AX_INSPECT_FINAL_STATUS=1
+  AX_INSPECT_APP_LAUNCHED=false
+  AX_INSPECT_LAUNCHED_PID=""
+  AX_INSPECT_FAILURE=repro_failed
+  AX_INSPECT_GLOBAL_CONFIG_BEFORE="${GLOBAL_CONFIG_BASELINE_SHA256}"
+  AX_INSPECT_GLOBAL_AUTH_BEFORE="${GLOBAL_AUTH_BASELINE_SHA256}"
+  AX_INSPECT_18787_BEFORE="$(listener_snapshot 18787)"
+  AX_INSPECT_19777_BEFORE="$(listener_snapshot 19777)"
+  umask 077
+  mkdir "${AX_INSPECT_OUT}"
+  chmod 700 "${AX_INSPECT_OUT}"
+  AX_INSPECT_TEMP="${AX_INSPECT_OUT}/.run"
+  mkdir "${AX_INSPECT_TEMP}"
+  chmod 700 "${AX_INSPECT_TEMP}"
+  identity_path="${AX_INSPECT_TEMP}/window-identity.json"
+  window_diagnostic_path="${AX_INSPECT_TEMP}/window-diagnostic.json"
+  diagnostic_output="${AX_INSPECT_TEMP}/ax-tree.json"
+  report_temporary="${AX_INSPECT_TEMP}/ax-driver-report.json"
+  driver_binary="${AX_INSPECT_TEMP}/codex-desktop-ax-driver"
+
+  jq -n \
+    --arg inspect_out "${AX_INSPECT_OUT}" \
+    --arg app_binary_sha256 "$(sha256 "${APP_REAL}")" \
+    --arg ax_driver_source_sha256 "$(sha256 "${AX_SOURCE}")" \
+    --arg config_rebaseline_evidence_path "${CONFIG_REBASELINE_EVIDENCE}" \
+    --arg config_rebaseline_evidence_sha256 "${CONFIG_REBASELINE_EVIDENCE_SHA256}" '{
+      schema_version:1,
+      mode:"window_ax_inspect_repro",
+      inspect_out:$inspect_out,
+      app_binary_sha256:$app_binary_sha256,
+      ax_driver_source_sha256:$ax_driver_source_sha256,
+      config_rebaseline_evidence_path:$config_rebaseline_evidence_path,
+      config_rebaseline_evidence_sha256:$config_rebaseline_evidence_sha256
+    }' | atomic_write_private "${AX_INSPECT_OUT}/run-metadata.json"
+  printf 'INSPECT_OUT=%s\n' "${AX_INSPECT_OUT}"
+  trap ax_inspect_exit_handler EXIT
+  trap 'ax_inspect_signal_handler 130' INT
+  trap 'ax_inspect_signal_handler 143' TERM
+  trap 'ax_inspect_signal_handler 129' HUP
+
+  if [[ "${test_mode}" == "true" ]]; then
+    APP_PID=4242
+    jq -n --argjson pid "${APP_PID}" '{pid:$pid,window_id:101,width:640,height:480,captured_at:"test"}' |
+      atomic_write_private "${identity_path}"
+    jq -n --argjson pid "${APP_PID}" '{
+      status:"selected",pid:$pid,owner_window_count:1,eligible_count:1,largest_candidate_count:1,
+      captured_at:"test",selected_window_id:101,
+      candidates:[{window_id:101,layer:25,width:640,height:480,area:307200,eligible:true}]
+    }' | atomic_write_private "${window_diagnostic_path}"
+    driver_binary="${RELAYKIT_RC1_AX_INSPECT_FAKE_DRIVER}"
+  else
+    /usr/bin/open -n "${APP_BUNDLE}" >/dev/null
+    for _ in {1..100}; do
+      APP_PID="$(find_exact_app_pid || true)"
+      [[ -n "${APP_PID}" ]] && break
+      sleep 0.1
+    done
+    [[ -n "${APP_PID}" ]] || fail "AX inspect repro App did not expose an exact PID"
+    AX_INSPECT_APP_LAUNCHED=true
+    AX_INSPECT_LAUNCHED_PID="${APP_PID}"
+    open_exact_app_popover || fail "AX inspect repro did not expose one status item"
+    for _ in {1..100}; do
+      if write_exact_app_window_identity "${identity_path}" "${window_diagnostic_path}" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+    [[ -s "${window_diagnostic_path}" ]] || fail "AX inspect repro selector wrote no diagnostic"
+    selector_status="$(jq -r '.status' "${window_diagnostic_path}")"
+    [[ "${selector_status}" == "selected" && -s "${identity_path}" ]] ||
+      fail "AX inspect repro selector did not produce one exact identity"
+    activate_exact_app
+    /usr/bin/xcrun swiftc "${AX_SOURCE}" -o "${driver_binary}"
+  fi
+
+  if RELAYKIT_AX_DRIVER_DIAGNOSTIC=1 "${driver_binary}" \
+    relaykit-ax-inspect --pid "${APP_PID}" --window-identity "${identity_path}" \
+    --diagnostic-output "${diagnostic_output}" >"${report_temporary}"; then
+    driver_exit=0
+  else
+    driver_exit="$?"
+  fi
+  if [[ "${driver_exit}" -ne 0 ]]; then
+    AX_INSPECT_FAILURE=driver_failed
+    ax_inspect_finalize "${driver_exit}"
+    exit "${AX_INSPECT_FINAL_STATUS}"
+  fi
+  ax_driver_report_is_redacted "${report_temporary}" || fail "AX inspect repro driver stdout was not redacted"
+  ax_tree_is_allowlisted "${diagnostic_output}" || fail "AX inspect repro diagnostic schema was not allowlisted"
+  ax_inspect_finalize 0
+  [[ "${AX_INSPECT_FINAL_STATUS}" -eq 0 ]] || exit "${AX_INSPECT_FINAL_STATUS}"
+  printf '%s\n' 'RelayKit RC1 AX inspect repro passed'
+}
+
 if [[ "${1:-}" == "--print-contract" ]]; then
   [[ "$#" -eq 1 ]] || exit 2
   print_contract
@@ -465,10 +869,36 @@ if [[ "${1:-}" == "--window-identity-repro" ]]; then
   run_window_identity_repro
   exit 0
 fi
+if [[ "${1:-}" == "--window-ax-inspect-repro" ]]; then
+  [[ "$#" -eq 1 ]] || exit 2
+  run_window_ax_inspect_repro
+  exit 0
+fi
 [[ "$#" -eq 0 ]] || exit 2
 
 [[ "${RUN_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{5,63}$ ]] || fail "run id is invalid"
 [[ "${OUT}" == /* && ! -e "${OUT}" ]] || fail "output must be a fresh absolute run-specific path"
+global_config_before="$(sha256 "${HOME}/.codex/config.toml")"
+global_auth_before="$(sha256 "${HOME}/.codex/auth.json")"
+[[ "${global_config_before}" != "missing" ]] || fail "global Codex config baseline is missing"
+[[ "${global_auth_before}" != "missing" ]] || fail "global Codex auth baseline is missing"
+
+if [[ "${RELAYKIT_RC1_FULL_PROOF_TEST_STOP_AFTER_SETUP:-0}" == "1" ]]; then
+  mkdir -p "${OUT}/run" "${OUT}/desktop-root"
+  chmod 700 "${OUT}" "${OUT}/run" "${OUT}/desktop-root"
+  : >"${OUT}/run/full-proof-test-ready"
+  chmod 600 "${OUT}/run/full-proof-test-ready"
+  for _ in {1..500}; do
+    [[ -e "${OUT}/run/full-proof-test-continue" ]] && break
+    sleep 0.01
+  done
+  [[ -e "${OUT}/run/full-proof-test-continue" ]] || fail "public full proof test continuation was not provided"
+  [[ "$(sha256 "${HOME}/.codex/config.toml")" == "${global_config_before}" ]] || fail "global Codex config changed"
+  [[ "$(sha256 "${HOME}/.codex/auth.json")" == "${global_auth_before}" ]] || fail "global Codex auth changed"
+  printf '%s\n' 'RelayKit RC1 public full proof test setup passed'
+  exit 0
+fi
+
 [[ -d "${APP_BUNDLE}" && -x "${APP_REAL}" && -x "${BUNDLED_RELAY}" ]] || fail "extracted App is incomplete"
 [[ -f "${APP_ZIP}" && ! -L "${APP_ZIP}" ]] || fail "App zip is missing"
 [[ -x "${FIXTURE}" && -f "${AX_SOURCE}" && -x "${MANUAL_PROOF}" && -x "${MANIFEST}" ]] || fail "proof harness inputs are incomplete"
@@ -478,8 +908,6 @@ zip_app_sha="$(/usr/bin/unzip -p "${APP_ZIP}" 'RelayKitApp.app/Contents/MacOS/Re
 port_is_free 19777 || fail "127.0.0.1:19777 is already in use"
 [[ -z "$(pgrep -x RelayKitApp.bin 2>/dev/null || true)" ]] || fail "RelayKit App is already running"
 
-global_config_before="$(sha256 "${HOME}/.codex/config.toml")"
-global_auth_before="$(sha256 "${HOME}/.codex/auth.json")"
 shared_18787_before="$(listener_snapshot 18787)"
 mkdir -p "${OUT}/run" "${OUT}/desktop-root"
 chmod 700 "${OUT}" "${OUT}/run" "${OUT}/desktop-root"
