@@ -674,21 +674,35 @@ private func uniqueRelayKitPopoverRoot<Node>(
     return candidates[0]
 }
 
+private func normalizedAXChildren<Node>(
+    status: AXError,
+    children: [Node]?
+) -> [Node]? {
+    switch status {
+    case .success:
+        return children
+    case .noValue:
+        return []
+    default:
+        return nil
+    }
+}
+
 private func uniqueRelayKitPopoverRoot(applicationRoot: AXUIElement) throws -> AXUIElement {
     try uniqueRelayKitPopoverRoot(
         applicationRoot: applicationRoot,
         role: { copyAXString($0, kAXRoleAttribute as CFString) },
         children: {
             var value: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(
+            let status = AXUIElementCopyAttributeValue(
                 $0,
                 kAXChildrenAttribute as CFString,
                 &value
-            ) == .success,
-            let children = value as? [AXUIElement] else {
-                return nil
-            }
-            return children
+            )
+            return normalizedAXChildren(
+                status: status,
+                children: value as? [AXUIElement]
+            )
         },
         identical: { CFEqual($0, $1) }
     )
@@ -2165,13 +2179,34 @@ private struct BoundActionRootTestNode: Decodable {
     let id: Int
     let role: String?
     let childrenStatus: String?
+    let childrenValue: String?
     let children: [Int]
 
     enum CodingKeys: String, CodingKey {
         case id
         case role
         case childrenStatus = "children_status"
+        case childrenValue = "children_value"
         case children
+    }
+}
+
+private func boundActionRootTestAXError(_ value: String?) -> AXError? {
+    switch value ?? "success" {
+    case "success":
+        return .success
+    case "noValue":
+        return .noValue
+    case "cannotComplete":
+        return .cannotComplete
+    case "attributeUnsupported":
+        return .attributeUnsupported
+    case "invalidUIElement":
+        return .invalidUIElement
+    case "failure":
+        return .failure
+    default:
+        return nil
     }
 }
 
@@ -2276,6 +2311,7 @@ private func executeBoundWindowTest(
             id: 10_000 + index,
             role: "AXWindow",
             childrenStatus: nil,
+            childrenValue: nil,
             children: []
         )
     }
@@ -2301,6 +2337,7 @@ private func executeBoundWindowTest(
             id: -1,
             role: "AXApplication",
             childrenStatus: nil,
+            childrenValue: nil,
             children: []
         )
     }
@@ -2327,11 +2364,20 @@ private func executeBoundWindowTest(
                 applicationRoot: applicationRoot,
                 role: { $0.role },
                 children: { node in
-                    guard (node.childrenStatus ?? "success") == "success" else {
+                    guard let status = boundActionRootTestAXError(node.childrenStatus) else {
                         return nil
                     }
-                    let children = node.children.compactMap { nodesByID[$0] }
-                    return children.count == node.children.count ? children : nil
+                    let children: [BoundActionRootTestNode]?
+                    switch node.childrenValue ?? "array" {
+                    case "array":
+                        let resolved = node.children.compactMap { nodesByID[$0] }
+                        children = resolved.count == node.children.count ? resolved : nil
+                    case "missing", "malformed":
+                        children = nil
+                    default:
+                        children = nil
+                    }
+                    return normalizedAXChildren(status: status, children: children)
                 },
                 identical: { $0.id == $1.id }
             )

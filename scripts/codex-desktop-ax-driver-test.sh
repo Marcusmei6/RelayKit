@@ -235,8 +235,8 @@ relaykit_empty_windows_single_popover_metadata='{
   "nodes": [
     {"id":0,"role":"AXApplication","children_status":"success","children":[1,2]},
     {"id":1,"role":"AXPopover","children_status":"success","children":[3]},
-    {"id":2,"role":"AXButton","children_status":"success","children":[]},
-    {"id":3,"role":"AXButton","children_status":"success","children":[]}
+    {"id":2,"role":"AXButton","children_status":"noValue","children":[]},
+    {"id":3,"role":"AXButton","children_status":"noValue","children":[]}
   ],
   "expected_action_root_id": 1,
   "semantic_target_ids": [2,3],
@@ -265,11 +265,18 @@ for relaykit_command in relaykit-provider-configure relaykit-provider-verify rel
 done
 
 for children_failure_location in root below-popover sibling-after-popover; do
-  for children_failure_kind in error malformed; do
+  for children_failure_kind in cannotComplete malformed; do
+    if [[ "${children_failure_kind}" == "malformed" ]]; then
+      children_failure_status=success
+      children_failure_value=',"children_value":"malformed"'
+    else
+      children_failure_status="${children_failure_kind}"
+      children_failure_value=''
+    fi
     case "${children_failure_location}" in
       root)
         children_failure_nodes='[
-          {"id":0,"role":"AXApplication","children_status":"'"${children_failure_kind}"'","children":[1]},
+          {"id":0,"role":"AXApplication","children_status":"'"${children_failure_status}"'"'"${children_failure_value}"',"children":[1]},
           {"id":1,"role":"AXPopover","children_status":"success","children":[]}
         ]'
         expected_children_failure_count=0
@@ -277,7 +284,7 @@ for children_failure_location in root below-popover sibling-after-popover; do
       below-popover)
         children_failure_nodes='[
           {"id":0,"role":"AXApplication","children_status":"success","children":[1]},
-          {"id":1,"role":"AXPopover","children_status":"'"${children_failure_kind}"'","children":[2]},
+          {"id":1,"role":"AXPopover","children_status":"'"${children_failure_status}"'"'"${children_failure_value}"',"children":[2]},
           {"id":2,"role":"AXButton","children_status":"success","children":[]}
         ]'
         expected_children_failure_count=1
@@ -286,7 +293,7 @@ for children_failure_location in root below-popover sibling-after-popover; do
         children_failure_nodes='[
           {"id":0,"role":"AXApplication","children_status":"success","children":[1,2]},
           {"id":1,"role":"AXPopover","children_status":"success","children":[]},
-          {"id":2,"role":"AXGroup","children_status":"'"${children_failure_kind}"'","children":[3]},
+          {"id":2,"role":"AXGroup","children_status":"'"${children_failure_status}"'"'"${children_failure_value}"',"children":[3]},
           {"id":3,"role":"AXButton","children_status":"success","children":[]}
         ]'
         expected_children_failure_count=1
@@ -308,6 +315,72 @@ JSON
       fail "${children_failure_location} ${children_failure_kind} children did not fail closed"
   done
 done
+
+run_bound_window_success relaykit-children-success-empty relaykit-gateway-start 4213 65 <<'JSON'
+{
+  "current_identity":{"pid":4213,"window_id":65},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4213,"window_id":65,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children_status":"success","children":[1]},
+    {"id":1,"role":"AXPopover","children_status":"success","children":[]}
+  ],
+  "expected_action_root_id":1
+}
+JSON
+
+run_bound_window_success relaykit-children-no-value-leaf relaykit-gateway-start 4214 66 <<'JSON'
+{
+  "current_identity":{"pid":4214,"window_id":66},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4214,"window_id":66,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children_status":"success","children":[1]},
+    {"id":1,"role":"AXPopover","children_status":"noValue","children_value":"malformed","children":[99]}
+  ],
+  "expected_action_root_id":1
+}
+JSON
+
+for failing_children_status in attributeUnsupported invalidUIElement failure; do
+  run_bound_window_failure window_selector_not_unique \
+    "relaykit-children-status-${failing_children_status}" relaykit-gateway-start 4215 67 <<JSON
+{
+  "current_identity":{"pid":4215,"window_id":67},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4215,"window_id":67,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children_status":"${failing_children_status}","children":[1]},
+    {"id":1,"role":"AXPopover","children_status":"noValue","children":[]}
+  ]
+}
+JSON
+  jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+    fail "${failing_children_status} children status did not fail closed"
+done
+
+run_bound_window_failure window_selector_not_unique \
+  relaykit-children-success-missing relaykit-gateway-start 4216 68 <<'JSON'
+{
+  "current_identity":{"pid":4216,"window_id":68},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4216,"window_id":68,"layer":25}],
+  "ax_windows_available":true,"ax_windows_malformed":false,"ax_window_numbers":[],
+  "ax_window_node_ids":[],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children_status":"success","children_value":"missing","children":[1]},
+    {"id":1,"role":"AXPopover","children_status":"noValue","children":[]}
+  ]
+}
+JSON
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+  fail "success with missing children value did not fail closed"
 
 run_bound_window_failure window_selector_not_unique relaykit-empty-windows-zero-popovers relaykit-gateway-start 4204 54 <<'JSON'
 {
@@ -918,6 +991,10 @@ for required_binding_text in AXPopover kAXRoleAttribute kAXChildrenAttribute ide
 done
 grep -Fq 'AXUIElementCopyAttributeValue' <<<"${relaykit_binding_body}" ||
   fail "production RelayKit children provider must preserve AX query status"
+for required_children_normalizer_text in 'case .success' 'case .noValue'; do
+  rg -Fq "${required_children_normalizer_text}" <<<"${relaykit_binding_body}" ||
+    fail "production RelayKit children normalizer is missing ${required_children_normalizer_text}"
+done
 if rg -F 'kAXChildrenAttribute' <<<"${relaykit_binding_body}" | rg -Fq '?? []'; then
   fail "production RelayKit children provider collapsed query failure into an empty leaf"
 fi
