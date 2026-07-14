@@ -118,6 +118,29 @@ private enum DriverCommand: String {
     case selfTest = "self-test"
 }
 
+private enum DriverApplicationMode {
+    case desktop
+    case relayKit
+
+    var expectedBundleIdentifier: String {
+        switch self {
+        case .desktop: return codexBundleIdentifier
+        case .relayKit: return relayKitBundleIdentifier
+        }
+    }
+}
+
+private func applicationMode(for command: DriverCommand) -> DriverApplicationMode? {
+    switch command {
+    case .inspect, .reveal, .ready, .prepare, .submit:
+        return .desktop
+    case .relayKitProviderConfigure, .relayKitProviderVerify, .relayKitGatewayStart:
+        return .relayKit
+    case .selfTest:
+        return nil
+    }
+}
+
 private struct ParsedArguments {
     let command: DriverCommand
     let options: [String: String]
@@ -398,17 +421,18 @@ private struct DriverContext {
     let pid: pid_t
     let identityPath: String
     let identity: WindowIdentity
-    let expectedBundleIdentifier: String
+    let applicationMode: DriverApplicationMode
 }
 
 private func makeContext(
     options: [String: String],
-    expectedBundleIdentifier: String = codexBundleIdentifier
+    command: DriverCommand
 ) throws -> DriverContext {
     guard let rawPID = options["--pid"],
           let numericPID = Int32(rawPID),
           numericPID > 0,
-          let identityPath = options["--window-identity"] else {
+          let identityPath = options["--window-identity"],
+          let applicationMode = applicationMode(for: command) else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
     let identity = try readWindowIdentity(identityPath)
@@ -419,7 +443,7 @@ private func makeContext(
         pid: numericPID,
         identityPath: identityPath,
         identity: identity,
-        expectedBundleIdentifier: expectedBundleIdentifier
+        applicationMode: applicationMode
     )
 }
 
@@ -446,25 +470,60 @@ private struct BoundWindow {
     let window: AXUIElement
 }
 
-private func verifyWindowServerIdentity(_ context: DriverContext) throws -> Int {
+private struct WindowServerMetadata: Decodable {
+    let ownerPID: pid_t
+    let windowID: UInt32?
+    let layer: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case ownerPID = "owner_pid"
+        case windowID = "window_id"
+        case layer
+    }
+}
+
+private func currentWindowServerMetadata() -> [WindowServerMetadata] {
     let rawWindows = CGWindowListCopyWindowInfo(
         [.optionOnScreenOnly, .excludeDesktopElements],
         kCGNullWindowID
     ) as? [[String: Any]] ?? []
-    let processWindows = rawWindows.filter { window in
-        guard let ownerPID = number(window[kCGWindowOwnerPID as String])?.int32Value,
-              let layer = number(window[kCGWindowLayer as String])?.intValue else {
-            return false
+    return rawWindows.compactMap { window in
+        guard let ownerPID = number(window[kCGWindowOwnerPID as String])?.int32Value else {
+            return nil
         }
-        return ownerPID == context.pid && layer == 0
+        return WindowServerMetadata(
+            ownerPID: ownerPID,
+            windowID: number(window[kCGWindowNumber as String])?.uint32Value,
+            layer: number(window[kCGWindowLayer as String])?.intValue
+        )
+    }
+}
+
+private func verifyWindowServerIdentity(
+    _ context: DriverContext,
+    windows: [WindowServerMetadata]
+) throws -> Int {
+    let processWindows = windows.filter { window in
+        guard window.ownerPID == context.pid else { return false }
+        switch context.applicationMode {
+        case .desktop:
+            return window.layer == 0
+        case .relayKit:
+            return true
+        }
     }
     let matches = processWindows.filter {
-        number($0[kCGWindowNumber as String])?.uint32Value == context.identity.windowID
+        $0.windowID == context.identity.windowID
     }
     guard matches.count == 1 else {
         throw DriverFailure("window_identity_changed", exitStatus: 4, candidateCount: matches.count)
     }
-    return processWindows.count
+    switch context.applicationMode {
+    case .desktop:
+        return processWindows.count
+    case .relayKit:
+        return matches.count
+    }
 }
 
 private func boundWindowIndex(
@@ -484,6 +543,18 @@ private func boundWindowIndex(
     throw DriverFailure("window_selector_not_unique", exitStatus: 4, candidateCount: windowNumbers.count)
 }
 
+private func resolveBoundWindowIndex(
+    context: DriverContext,
+    windowServerWindowCount: Int,
+    axWindowNumbers: [UInt32?]
+) throws -> Int {
+    return try boundWindowIndex(
+        windowNumbers: axWindowNumbers,
+        expectedWindowID: context.identity.windowID,
+        windowServerWindowCount: windowServerWindowCount
+    )
+}
+
 private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
     let currentIdentity = try readWindowIdentity(context.identityPath)
     guard currentIdentity == context.identity, currentIdentity.pid == context.pid else {
@@ -492,10 +563,14 @@ private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
     guard let running = NSRunningApplication(processIdentifier: context.pid), !running.isTerminated else {
         throw DriverFailure("process_unavailable", exitStatus: 4)
     }
-    guard running.bundleIdentifier == context.expectedBundleIdentifier else {
+    guard running.bundleIdentifier == context.applicationMode.expectedBundleIdentifier else {
         throw DriverFailure("process_identity_mismatch", exitStatus: 4)
     }
-    let windowServerWindowCount = try verifyWindowServerIdentity(context)
+    let windowServerMetadata = currentWindowServerMetadata()
+    let windowServerWindowCount = try verifyWindowServerIdentity(
+        context,
+        windows: windowServerMetadata
+    )
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == context.pid else {
         throw DriverFailure("frontmost_identity_mismatch", exitStatus: 4)
     }
@@ -505,10 +580,10 @@ private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
 
     let application = AXUIElementCreateApplication(context.pid)
     let windows = copyAXAttribute(application, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
-    let selectedIndex = try boundWindowIndex(
-        windowNumbers: windows.map(axWindowNumber),
-        expectedWindowID: context.identity.windowID,
-        windowServerWindowCount: windowServerWindowCount
+    let selectedIndex = try resolveBoundWindowIndex(
+        context: context,
+        windowServerWindowCount: windowServerWindowCount,
+        axWindowNumbers: windows.map(axWindowNumber)
     )
     return BoundWindow(window: windows[selectedIndex])
 }
@@ -1004,7 +1079,7 @@ private func waitForModelSelection(
 }
 
 private func executeInspect(options: [String: String]) throws -> DriverReport {
-    let context = try makeContext(options: options)
+    let context = try makeContext(options: options, command: .inspect)
     let nodes = try currentNodes(context)
     let records = nodes.map(\.semantic)
     let pickerCount = records.filter { $0.role == kAXPopUpButtonRole as String }.count
@@ -1028,7 +1103,7 @@ private func executeReveal(options: [String: String]) throws -> DriverReport {
           !text.contains("\r") else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
-    let context = try makeContext(options: options)
+    let context = try makeContext(options: options, command: .reveal)
     let target = try requireUniqueNode(
         in: currentNodes(context),
         selector: markdownHeadingSelector(text: text)
@@ -1045,7 +1120,7 @@ private func executeReady(options: [String: String]) throws -> DriverReport {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
     let catalogLabels = try readCatalogLabels(catalogPath)
-    let context = try makeContext(options: options)
+    let context = try makeContext(options: options, command: .ready)
     let nodes = try currentNodes(context)
     let records = nodes.map(\.semantic)
     let pickerCount = matchingIndices(in: records, selector: modelPickerSelector(catalogLabels: catalogLabels)).count
@@ -1067,7 +1142,7 @@ private func executePrepare(options: [String: String]) throws -> DriverReport {
     guard let workspace = options["--workspace"] else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
-    let context = try makeContext(options: options)
+    let context = try makeContext(options: options, command: .prepare)
     let previousNodes = try currentNodes(context)
     let previousMatches = matchingIndices(in: previousNodes.map(\.semantic), selector: composerSelector)
     if previousMatches.count > 1 {
@@ -1107,7 +1182,7 @@ private func executeSubmit(options: [String: String]) throws -> DriverReport {
     }
     try validateSecureFile(queryPath, kind: .query)
 
-    let context = try makeContext(options: options)
+    let context = try makeContext(options: options, command: .submit)
     let pickerSelector = modelPickerSelector(catalogLabels: catalogLabels)
     try withSelectorFailureCode("model_picker_not_unique") {
         try waitForUniqueSelector(context: context, selector: pickerSelector)
@@ -1316,7 +1391,7 @@ private func executeRelayKitProviderConfigure(options: [String: String]) throws 
     guard let syntheticKey = provider.syntheticKey else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
-    let context = try makeContext(options: options, expectedBundleIdentifier: relayKitBundleIdentifier)
+    let context = try makeContext(options: options, command: .relayKitProviderConfigure)
     let buttonRoles = Set([kAXButtonRole as String])
     let popupRoles = Set([kAXPopUpButtonRole as String, kAXButtonRole as String])
 
@@ -1395,7 +1470,7 @@ private func executeRelayKitProviderConfigure(options: [String: String]) throws 
 
 private func executeRelayKitProviderVerify(options: [String: String]) throws -> DriverReport {
     let provider = try validatedRelayKitProviderOptions(options, requireSyntheticKey: false)
-    let context = try makeContext(options: options, expectedBundleIdentifier: relayKitBundleIdentifier)
+    let context = try makeContext(options: options, command: .relayKitProviderVerify)
     let buttonRoles = Set([kAXButtonRole as String])
     try performVerifiedPress(
         context: context,
@@ -1442,7 +1517,7 @@ private func executeRelayKitProviderVerify(options: [String: String]) throws -> 
 }
 
 private func executeRelayKitGatewayStart(options: [String: String]) throws -> DriverReport {
-    let context = try makeContext(options: options, expectedBundleIdentifier: relayKitBundleIdentifier)
+    let context = try makeContext(options: options, command: .relayKitGatewayStart)
     let buttonRoles = Set([kAXButtonRole as String])
     try performVerifiedPress(
         context: context,
@@ -1610,7 +1685,58 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
     }
 }
 
+#if RELAYKIT_AX_DRIVER_TESTING
+private struct BoundWindowTestInput: Decodable {
+    let windows: [WindowServerMetadata]
+    let axWindowNumbers: [UInt32?]
+
+    enum CodingKeys: String, CodingKey {
+        case windows
+        case axWindowNumbers = "ax_window_numbers"
+    }
+}
+
+private func executeBoundWindowTest(
+    _ parsed: ParsedArguments,
+    inputPath: String
+) throws -> DriverReport {
+    guard ProcessInfo.processInfo.environment["RELAYKIT_AX_DRIVER_SELF_TEST"] == "1",
+          parsed.command != .selfTest,
+          inputPath.hasPrefix("/") else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let input: BoundWindowTestInput
+    do {
+        let data = try Data(contentsOf: URL(fileURLWithPath: inputPath))
+        input = try JSONDecoder().decode(BoundWindowTestInput.self, from: data)
+    } catch {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let context = try makeContext(options: parsed.options, command: parsed.command)
+    let windowServerWindowCount = try verifyWindowServerIdentity(
+        context,
+        windows: input.windows
+    )
+    _ = try resolveBoundWindowIndex(
+        context: context,
+        windowServerWindowCount: windowServerWindowCount,
+        axWindowNumbers: input.axWindowNumbers
+    )
+    return .success(
+        command: parsed.command.rawValue,
+        windowVerified: true,
+        candidateCount: input.axWindowNumbers.count,
+        actionCount: 0
+    )
+}
+#endif
+
 private func execute(_ parsed: ParsedArguments) throws -> DriverReport {
+#if RELAYKIT_AX_DRIVER_TESTING
+    if let inputPath = ProcessInfo.processInfo.environment["RELAYKIT_AX_DRIVER_BOUND_WINDOW_TEST_INPUT"] {
+        return try executeBoundWindowTest(parsed, inputPath: inputPath)
+    }
+#endif
     switch parsed.command {
     case .inspect:
         return try executeInspect(options: parsed.options)

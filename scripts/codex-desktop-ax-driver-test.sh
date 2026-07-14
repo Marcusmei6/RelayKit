@@ -15,7 +15,7 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/relaykit-ax-driver-test.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
 binary="${tmp_dir}/codex-desktop-ax-driver"
-/usr/bin/xcrun swiftc "${SOURCE}" -o "${binary}"
+/usr/bin/xcrun swiftc -D RELAYKIT_AX_DRIVER_TESTING "${SOURCE}" -o "${binary}"
 
 capture_index=0
 last_stdout=""
@@ -87,6 +87,178 @@ run_failure invalid_arguments "${binary}" relaykit-provider-verify --pid 1 --win
 run_failure invalid_arguments "${binary}" relaykit-gateway-start --pid 1
 
 self_test=(env RELAYKIT_AX_DRIVER_SELF_TEST=1 "${binary}" self-test)
+
+write_window_identity() {
+  local path="$1"
+  local pid="$2"
+  local window_id="$3"
+  jq -n --argjson pid "${pid}" --argjson window_id "${window_id}" \
+    '{pid:$pid,window_id:$window_id}' >"${path}"
+  chmod 600 "${path}"
+}
+
+run_bound_window_success() {
+  local name="$1"
+  local command="$2"
+  local pid="$3"
+  local window_id="$4"
+  shift 4
+  local identity="${tmp_dir}/${name}-identity.json"
+  local metadata="${tmp_dir}/${name}-metadata.json"
+  write_window_identity "${identity}" "${pid}" "${window_id}"
+  cat >"${metadata}"
+  chmod 600 "${metadata}"
+  run_success env \
+    RELAYKIT_AX_DRIVER_SELF_TEST=1 \
+    RELAYKIT_AX_DRIVER_BOUND_WINDOW_TEST_INPUT="${metadata}" \
+    "${binary}" "${command}" --pid "${pid}" --window-identity "${identity}" "$@"
+  jq -e --arg command "${command}" \
+    '.command == $command and .window_verified == true' "${last_stdout}" >/dev/null ||
+    fail "${name} did not prove the production bound window"
+}
+
+run_bound_window_failure() {
+  local expected_code="$1"
+  local name="$2"
+  local command="$3"
+  local pid="$4"
+  local window_id="$5"
+  shift 5
+  local identity="${tmp_dir}/${name}-identity.json"
+  local metadata="${tmp_dir}/${name}-metadata.json"
+  write_window_identity "${identity}" "${pid}" "${window_id}"
+  cat >"${metadata}"
+  chmod 600 "${metadata}"
+  run_failure "${expected_code}" env \
+    RELAYKIT_AX_DRIVER_SELF_TEST=1 \
+    RELAYKIT_AX_DRIVER_BOUND_WINDOW_TEST_INPUT="${metadata}" \
+    "${binary}" "${command}" --pid "${pid}" --window-identity "${identity}" "$@"
+}
+
+relaykit_configure_options=(
+  --provider-name "Dogfood Dynamic Window"
+  --base-url "http://127.0.0.1:19779/v1"
+  --synthetic-key "RELAYKIT_FAKE_DYNAMIC_WINDOW_DO_NOT_USE"
+  --model-id "dogfood/dynamic-window"
+)
+relaykit_verify_options=(
+  --provider-name "Dogfood Dynamic Window"
+  --base-url "http://127.0.0.1:19779/v1"
+  --model-id "dogfood/dynamic-window"
+)
+
+relaykit_layer25_metadata='{
+  "windows": [
+    {"owner_pid":4201,"window_id":41,"layer":0},
+    {"owner_pid":4201,"window_id":42,"layer":25},
+    {"owner_pid":9999,"window_id":42,"layer":0}
+  ],
+  "ax_window_numbers": [42,null]
+}'
+for relaykit_command in relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start; do
+  case "${relaykit_command}" in
+    relaykit-provider-configure)
+      run_bound_window_success \
+        "${relaykit_command}-layer25" "${relaykit_command}" 4201 42 \
+        "${relaykit_configure_options[@]}" <<<"${relaykit_layer25_metadata}"
+      ;;
+    relaykit-provider-verify)
+      run_bound_window_success \
+        "${relaykit_command}-layer25" "${relaykit_command}" 4201 42 \
+        "${relaykit_verify_options[@]}" <<<"${relaykit_layer25_metadata}"
+      ;;
+    relaykit-gateway-start)
+      run_bound_window_success \
+        "${relaykit_command}-layer25" "${relaykit_command}" 4201 42 \
+        <<<"${relaykit_layer25_metadata}"
+      ;;
+  esac
+done
+
+run_bound_window_success relaykit-unnumbered-fallback relaykit-gateway-start 4202 52 <<'JSON'
+{
+  "windows": [
+    {"owner_pid":4202,"window_id":51,"layer":0},
+    {"owner_pid":4202,"window_id":52,"layer":25},
+    {"owner_pid":9999,"window_id":52,"layer":25}
+  ],
+  "ax_window_numbers": [null]
+}
+JSON
+
+run_bound_window_success desktop-layer0 inspect 4301 61 <<'JSON'
+{
+  "windows": [
+    {"owner_pid":4301,"window_id":61,"layer":0},
+    {"owner_pid":4301,"window_id":62,"layer":25},
+    {"owner_pid":9999,"window_id":61,"layer":0}
+  ],
+  "ax_window_numbers": [61,null]
+}
+JSON
+
+run_bound_window_failure window_identity_changed relaykit-wrong-id relaykit-gateway-start 4401 71 <<'JSON'
+{
+  "windows": [{"owner_pid":4401,"window_id":72,"layer":25}],
+  "ax_window_numbers": [71]
+}
+JSON
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+  fail "RelayKit wrong WindowServer ID did not fail with zero exact matches"
+
+run_bound_window_failure window_identity_changed relaykit-missing-id relaykit-gateway-start 4402 81 <<'JSON'
+{
+  "windows": [
+    {"owner_pid":4402,"layer":25},
+    {"owner_pid":9999,"window_id":81,"layer":25}
+  ],
+  "ax_window_numbers": [81]
+}
+JSON
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+  fail "RelayKit missing same-PID WindowServer ID did not fail closed"
+
+run_bound_window_failure window_identity_changed relaykit-multiple-exact relaykit-gateway-start 4403 91 <<'JSON'
+{
+  "windows": [
+    {"owner_pid":4403,"window_id":91,"layer":0},
+    {"owner_pid":4403,"window_id":91,"layer":25}
+  ],
+  "ax_window_numbers": [91]
+}
+JSON
+jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null ||
+  fail "RelayKit duplicate exact WindowServer entries did not fail closed"
+
+run_bound_window_failure window_selector_not_unique relaykit-multiple-unnumbered relaykit-gateway-start 4404 101 <<'JSON'
+{
+  "windows": [{"owner_pid":4404,"window_id":101,"layer":25}],
+  "ax_window_numbers": [null,null]
+}
+JSON
+jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null ||
+  fail "RelayKit multiple unnumbered AX windows did not fail closed"
+
+run_bound_window_failure window_identity_changed desktop-nonzero-layer inspect 4501 111 <<'JSON'
+{
+  "windows": [{"owner_pid":4501,"window_id":111,"layer":25}],
+  "ax_window_numbers": [111]
+}
+JSON
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+  fail "Desktop accepted a nonzero-layer WindowServer identity"
+
+run_bound_window_failure window_selector_not_unique desktop-fallback-count inspect 4502 121 <<'JSON'
+{
+  "windows": [
+    {"owner_pid":4502,"window_id":121,"layer":0},
+    {"owner_pid":4502,"window_id":122,"layer":0}
+  ],
+  "ax_window_numbers": [null]
+}
+JSON
+jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+  fail "Desktop fallback stopped counting same-PID layer-zero windows"
 
 run_success "${self_test[@]}" --scenario exact
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||

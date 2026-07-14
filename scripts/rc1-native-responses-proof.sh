@@ -45,13 +45,6 @@ print_contract() {
   }'
 }
 
-if [[ "${1:-}" == "--print-contract" ]]; then
-  [[ "$#" -eq 1 ]] || exit 2
-  print_contract
-  exit 0
-fi
-[[ "$#" -eq 0 ]] || exit 2
-
 fail() {
   printf 'RC1 native Responses proof failed: %s\n' "$*" >&2
   exit 1
@@ -137,28 +130,213 @@ APPLESCRIPT
 }
 
 write_exact_app_window_identity() {
-  local output="$1"
-  swift - "${APP_PID}" "${output}" <<'SWIFT'
+  local identity_output="$1"
+  local diagnostic_output="$2"
+  local metadata_input="${3:-}"
+  swift - "${APP_PID}" "${identity_output}" "${diagnostic_output}" "${metadata_input}" <<'SWIFT'
 import AppKit
 import CoreGraphics
+import Darwin
 import Foundation
 
 let pid = pid_t(Int(CommandLine.arguments[1])!)
-let output = CommandLine.arguments[2]
-guard let app = NSRunningApplication(processIdentifier: pid),
-      app.bundleIdentifier == "dev.relaykit.app",
-      !app.isTerminated else { exit(2) }
-let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-let candidates = windows.filter {
-    ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid &&
-    ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+let identityOutput = CommandLine.arguments[2]
+let diagnosticOutput = CommandLine.arguments[3]
+let metadataInput = CommandLine.arguments[4]
+let fileManager = FileManager.default
+_ = umask(0o077)
+try? fileManager.removeItem(atPath: identityOutput)
+
+struct WindowMetadata {
+    let ownerPID: pid_t
+    let windowID: UInt32?
+    let layer: Int?
+    let width: Double?
+    let height: Double?
+    let boundsValid: Bool
 }
-guard candidates.count == 1,
-      let windowID = (candidates[0][kCGWindowNumber as String] as? NSNumber)?.uint32Value else { exit(3) }
-let value: [String: Any] = ["pid": pid, "window_id": windowID]
-let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
-try data.write(to: URL(fileURLWithPath: output), options: [.atomic])
-try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output)
+
+struct Candidate {
+    let windowID: UInt32
+    let layer: Int
+    let width: Double
+    let height: Double
+    let area: Double
+    let eligible: Bool
+
+    var dictionary: [String: Any] {
+        [
+            "window_id": windowID,
+            "layer": layer,
+            "width": width,
+            "height": height,
+            "area": area,
+            "eligible": eligible,
+        ]
+    }
+}
+
+func writeAtomicJSON(_ value: [String: Any], to path: String) throws {
+    let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+    try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
+    try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+}
+
+let capturedAtFormatter = ISO8601DateFormatter()
+capturedAtFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+let capturedAt = capturedAtFormatter.string(from: Date())
+var appValid = false
+var windows: [WindowMetadata] = []
+
+if metadataInput.isEmpty {
+    if let app = NSRunningApplication(processIdentifier: pid),
+       app.bundleIdentifier == "dev.relaykit.app",
+       !app.isTerminated {
+        appValid = true
+        let liveWindows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] ?? []
+        windows = liveWindows.compactMap { window in
+            guard let ownerPID = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else {
+                return nil
+            }
+            let windowID = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+            let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue
+            let bounds = window[kCGWindowBounds as String] as? [String: Any]
+            let rect = bounds.flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
+            let width = rect.map { Double($0.width) }
+            let height = rect.map { Double($0.height) }
+            let boundsValid = width?.isFinite == true && height?.isFinite == true &&
+                (width ?? 0) > 0 && (height ?? 0) > 0
+            return WindowMetadata(
+                ownerPID: ownerPID,
+                windowID: windowID,
+                layer: layer,
+                width: width,
+                height: height,
+                boundsValid: boundsValid
+            )
+        }
+    }
+} else {
+    let data = try Data(contentsOf: URL(fileURLWithPath: metadataInput))
+    let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+    appValid = value["app_valid"] as? Bool == true
+    let injectedWindows = value["windows"] as? [[String: Any]] ?? []
+    windows = injectedWindows.compactMap { window in
+        guard let ownerPID = (window["owner_pid"] as? NSNumber)?.int32Value else { return nil }
+        return WindowMetadata(
+            ownerPID: ownerPID,
+            windowID: (window["window_id"] as? NSNumber)?.uint32Value,
+            layer: (window["layer"] as? NSNumber)?.intValue,
+            width: (window["width"] as? NSNumber)?.doubleValue,
+            height: (window["height"] as? NSNumber)?.doubleValue,
+            boundsValid: window["bounds_valid"] as? Bool == true
+        )
+    }
+}
+
+func baseDiagnostic(
+    status: String,
+    ownerWindowCount: Int,
+    candidates: [Candidate],
+    largestCandidateCount: Int
+) -> [String: Any] {
+    [
+        "status": status,
+        "pid": pid,
+        "owner_window_count": ownerWindowCount,
+        "eligible_count": candidates.filter(\.eligible).count,
+        "largest_candidate_count": largestCandidateCount,
+        "captured_at": capturedAt,
+        "candidates": candidates.map(\.dictionary),
+    ]
+}
+
+guard appValid else {
+    try writeAtomicJSON(
+        baseDiagnostic(
+            status: "app_invalid",
+            ownerWindowCount: 0,
+            candidates: [],
+            largestCandidateCount: 0
+        ),
+        to: diagnosticOutput
+    )
+    exit(2)
+}
+
+let ownerWindows = windows.filter { $0.ownerPID == pid }
+let candidates = ownerWindows.compactMap { window -> Candidate? in
+    guard window.boundsValid,
+          let windowID = window.windowID,
+          let layer = window.layer,
+          let width = window.width,
+          let height = window.height,
+          width.isFinite,
+          height.isFinite,
+          width > 0,
+          height > 0 else { return nil }
+    return Candidate(
+        windowID: windowID,
+        layer: layer,
+        width: width,
+        height: height,
+        area: width * height,
+        eligible: width >= 400 && height >= 400
+    )
+}.sorted { $0.windowID < $1.windowID }
+let eligible = candidates.filter(\.eligible)
+
+guard let maximumArea = eligible.map(\.area).max() else {
+    try writeAtomicJSON(
+        baseDiagnostic(
+            status: "no_eligible_window",
+            ownerWindowCount: ownerWindows.count,
+            candidates: candidates,
+            largestCandidateCount: 0
+        ),
+        to: diagnosticOutput
+    )
+    exit(3)
+}
+
+let largest = eligible.filter { $0.area == maximumArea }
+guard largest.count == 1, let selected = largest.first else {
+    try writeAtomicJSON(
+        baseDiagnostic(
+            status: "ambiguous_largest_window",
+            ownerWindowCount: ownerWindows.count,
+            candidates: candidates,
+            largestCandidateCount: largest.count
+        ),
+        to: diagnosticOutput
+    )
+    exit(4)
+}
+
+let identity: [String: Any] = [
+    "pid": pid,
+    "window_id": selected.windowID,
+    "width": selected.width,
+    "height": selected.height,
+    "captured_at": capturedAt,
+]
+var diagnostic = baseDiagnostic(
+    status: "selected",
+    ownerWindowCount: ownerWindows.count,
+    candidates: candidates,
+    largestCandidateCount: 1
+)
+diagnostic["selected_window_id"] = selected.windowID
+do {
+    try writeAtomicJSON(identity, to: identityOutput)
+    try writeAtomicJSON(diagnostic, to: diagnosticOutput)
+} catch {
+    try? fileManager.removeItem(atPath: identityOutput)
+    throw error
+}
 SWIFT
 }
 
@@ -168,6 +346,7 @@ activate_exact_app() {
 
 launch_ordinary_app() {
   local identity_path="$1"
+  local diagnostic_path="$2"
   /usr/bin/open -n \
     --env "RELAYKIT_OFFICIAL_PROOF_ROOT=${OUT}/app-official-proof" \
     "${APP_BUNDLE}" --args \
@@ -181,12 +360,15 @@ launch_ordinary_app() {
   [[ -n "${APP_PID}" ]] || return 1
   open_exact_app_popover
   for _ in {1..100}; do
-    if write_exact_app_window_identity "${identity_path}" 2>/dev/null; then
+    if write_exact_app_window_identity "${identity_path}" "${diagnostic_path}" 2>/dev/null; then
       activate_exact_app
       return 0
     fi
     sleep 0.1
   done
+  if [[ -s "${diagnostic_path}" ]]; then
+    printf 'RelayKit App window selector status: %s\n' "$(jq -r '.status' "${diagnostic_path}")" >&2
+  fi
   return 1
 }
 
@@ -208,6 +390,82 @@ wait_for_gateway() {
   done
   return 1
 }
+
+run_window_identity_repro() {
+  local repro_out="${RELAYKIT_RC1_WINDOW_REPRO_OUT:-}"
+  local identity_path diagnostic_path launched_pid selector_status
+  local shared_18787_before shared_19777_before
+
+  [[ -n "${RELAYKIT_RC1_APP_BUNDLE:-}" ]] || fail "window repro requires RELAYKIT_RC1_APP_BUNDLE"
+  [[ -n "${RELAYKIT_RC1_WINDOW_REPRO_OUT:-}" ]] || fail "window repro requires RELAYKIT_RC1_WINDOW_REPRO_OUT"
+  [[ "${repro_out}" == /* && ! -e "${repro_out}" ]] ||
+    fail "window repro output must be a fresh absolute path"
+  [[ -d "${APP_BUNDLE}" && -x "${APP_REAL}" ]] || fail "window repro App bundle is incomplete"
+  [[ -z "$(pgrep -x RelayKitApp.bin 2>/dev/null || true)" ]] || fail "RelayKit App is already running"
+
+  shared_18787_before="$(listener_snapshot 18787)"
+  shared_19777_before="$(listener_snapshot 19777)"
+  mkdir -p "${repro_out}"
+  chmod 700 "${repro_out}"
+  identity_path="${repro_out}/window-identity.json"
+  diagnostic_path="${repro_out}/window-diagnostic.json"
+  trap cleanup EXIT INT TERM HUP
+
+  /usr/bin/open -n "${APP_BUNDLE}" >/dev/null
+  for _ in {1..100}; do
+    APP_PID="$(find_exact_app_pid || true)"
+    [[ -n "${APP_PID}" ]] && break
+    sleep 0.1
+  done
+  [[ -n "${APP_PID}" ]] || fail "window repro App did not expose an exact PID"
+  launched_pid="${APP_PID}"
+  open_exact_app_popover || fail "window repro did not expose one status item"
+  for _ in {1..100}; do
+    if write_exact_app_window_identity "${identity_path}" "${diagnostic_path}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  [[ -s "${diagnostic_path}" ]] || fail "window repro selector wrote no diagnostic"
+  selector_status="$(jq -r '.status' "${diagnostic_path}")"
+  [[ "${selector_status}" == "selected" && -s "${identity_path}" ]] ||
+    fail "window repro selector status=${selector_status}"
+  [[ "$(listener_snapshot 18787)" == "${shared_18787_before}" ]] ||
+    fail "window repro changed shared 18787"
+  [[ "$(listener_snapshot 19777)" == "${shared_19777_before}" ]] ||
+    fail "window repro changed 19777"
+
+  stop_app
+  kill -0 "${launched_pid}" 2>/dev/null && fail "window repro App cleanup failed"
+  [[ -z "$(pgrep -x RelayKitApp.bin 2>/dev/null || true)" ]] || fail "window repro left RelayKit App running"
+  [[ "$(listener_snapshot 18787)" == "${shared_18787_before}" ]] || fail "window repro cleanup changed shared 18787"
+  [[ "$(listener_snapshot 19777)" == "${shared_19777_before}" ]] || fail "window repro cleanup changed 19777"
+  trap - EXIT INT TERM HUP
+  printf 'RelayKit RC1 window identity repro selected: identity=%s diagnostic=%s pid=%s status=%s\n' \
+    "${identity_path}" "${diagnostic_path}" "${launched_pid}" "${selector_status}"
+}
+
+if [[ "${1:-}" == "--print-contract" ]]; then
+  [[ "$#" -eq 1 ]] || exit 2
+  print_contract
+  exit 0
+fi
+if [[ "${1:-}" == "--select-window-identity" ]]; then
+  [[ "$#" -eq 5 ]] || exit 2
+  APP_PID="$2"
+  if write_exact_app_window_identity "$3" "$4" "$5"; then
+    exit 0
+  else
+    selector_exit="$?"
+    exit "${selector_exit}"
+  fi
+fi
+if [[ "${1:-}" == "--window-identity-repro" ]]; then
+  [[ "$#" -eq 1 ]] || exit 2
+  run_window_identity_repro
+  exit 0
+fi
+[[ "$#" -eq 0 ]] || exit 2
 
 [[ "${RUN_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{5,63}$ ]] || fail "run id is invalid"
 [[ "${OUT}" == /* && ! -e "${OUT}" ]] || fail "output must be a fresh absolute run-specific path"
@@ -242,7 +500,9 @@ base_url="http://127.0.0.1:${fixture_port}/v1"
 
 /usr/bin/xcrun swiftc "${AX_SOURCE}" -o "${OUT}/run/codex-desktop-ax-driver"
 first_identity="${OUT}/run/app-window-first.json"
-launch_ordinary_app "${first_identity}" || fail "ordinary extracted App did not expose one exact window"
+first_window_diagnostic="${OUT}/run/app-window-first-diagnostic.json"
+launch_ordinary_app "${first_identity}" "${first_window_diagnostic}" ||
+  fail "ordinary extracted App window selector status=$(jq -r '.status // "app_invalid"' "${first_window_diagnostic}" 2>/dev/null || printf 'app_invalid')"
 jq -e '.providers == []' "${OUT}/providers.json" >/dev/null || fail "provider destination was not empty before AX setup"
 run_ax "${OUT}/run/ax-provider-configure.json" \
   relaykit-provider-configure --pid "${APP_PID}" --window-identity "${first_identity}" \
@@ -270,7 +530,9 @@ for _ in {1..100}; do
 done
 port_is_free 19777 || fail "first App launch left gateway state behind"
 second_identity="${OUT}/run/app-window-second.json"
-launch_ordinary_app "${second_identity}" || fail "same extracted App did not relaunch"
+second_window_diagnostic="${OUT}/run/app-window-second-diagnostic.json"
+launch_ordinary_app "${second_identity}" "${second_window_diagnostic}" ||
+  fail "same extracted App window selector status=$(jq -r '.status // "app_invalid"' "${second_window_diagnostic}" 2>/dev/null || printf 'app_invalid')"
 [[ "${APP_PID}" != "${first_app_pid}" ]] || fail "App relaunch did not produce a fresh PID"
 [[ "$(sha256 "${OUT}/providers.json")" == "${provider_config_sha}" ]] || fail "provider config changed during relaunch"
 run_ax "${OUT}/run/ax-provider-verify.json" \
