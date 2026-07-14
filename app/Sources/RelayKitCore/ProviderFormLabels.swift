@@ -47,6 +47,7 @@ public enum ProviderFormLabels {
         "Disconnect",
     ]
     public static let gatewayStoppedGuidance = "Gateway is stopped · test a provider connection or start it in Settings"
+    public static let providerTestUsageNotice = "Test may incur very small provider usage."
 
     public static func providerAddedMessage(storedKey: Bool, backupCreated: Bool) -> String {
         let base = storedKey ? "Stored Keychain credential; added provider" : "Added provider"

@@ -1463,3 +1463,34 @@ test ! -e "${marker_run_dir}/tool-marker"
 test ! -e "${marker_run_dir}/tool-since-epoch"
 
 echo "Manual proof run marker reset test passed"
+
+grep -Fq 'rc1_native_responses_three_stage' "${PROOF_SCRIPT}" ||
+  fail "manual proof must expose the dedicated RC1 native Responses profile"
+grep -Fq 'rc1-native-responses-three-stage)' "${PROOF_SCRIPT}" ||
+  fail "manual proof must expose a dedicated RC1 native Responses command"
+grep -Fq 'desktop_websocket_to_gateway' "${PROOF_SCRIPT}" ||
+  fail "RC1 evidence must require Desktop WebSocket ingress"
+grep -Fq 'gateway_sse_to_fixture' "${PROOF_SCRIPT}" ||
+  fail "RC1 evidence must require Gateway SSE egress"
+grep -Fq 'tool_roundtrip_verified' "${PROOF_SCRIPT}" ||
+  fail "RC1 evidence must require function_call_output roundtrip"
+grep -Fq 'submission_count' "${PROOF_SCRIPT}" ||
+  fail "RC1 stages must prove exactly one submission each"
+grep -Fq 'failed_events' "${PROOF_SCRIPT}" ||
+  fail "RC1 evidence must preserve failed events instead of relabeling them"
+grep -Fq 'predicate_ledger' "${PROOF_SCRIPT}" ||
+  fail "RC1 evidence must expose a named predicate ledger"
+
+rc1_contract="$(${PROOF_SCRIPT} --print-rc1-native-responses-contract)"
+jq -e '
+  .profile == "rc1_native_responses_three_stage" and
+  .stage_ids == ["A", "B", "C"] and
+  .submission_count_each == 1 and
+  .stage_A == "text_marker" and
+  .stage_B == "native_markdown_structure" and
+  .stage_C == "exact_shell_printf_marker_plus_pwd" and
+  .desktop_websocket_to_gateway == true and
+  .gateway_sse_to_fixture == true and
+  .tool_roundtrip == true and
+  .attaches_existing_app_gateway == true
+' <<<"${rc1_contract}" >/dev/null || fail "RC1 three-stage contract is invalid"

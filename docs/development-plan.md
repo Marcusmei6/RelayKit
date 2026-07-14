@@ -288,6 +288,17 @@ Status: implementation complete; the fresh final matrix passed in `relaykit_test
 - `./scripts/relaykit-validate.sh --plan-only --rc1` selects one fixed RC1 matrix: diff/public-boundary checks, Swift and Go validation, one package build, then menu/native/lifecycle proof against `dist/verify-release/RelayKitApp.app`. This matrix uses fake loopback traffic only; it does not select a paid live query or the four-stage Desktop proof.
 - Implementation lanes must run only the focused contract commands. Package creation, menu GUI smoke, native App-first proof, helper lifecycle proof, and final matrix execution belong to `relaykit_test`.
 
+## Phase 7.10: RC1 Native Responses Chain Wave 2
+
+Status: Wave 1 focused contracts passed; Wave 2 harness contracts are implemented and remain implementation/focused-validation only. No package, App, Codex Desktop, live proof, or final phase-B E2E was run in the implementation lane.
+
+- The top-level proof begins with an empty isolated provider destination and uses exact RelayKit PID/window-bound AX to save provider name, loopback URL, synthetic key, model, and `openai_responses`. It rejects completed provider injection, `key_file`, and curl-only proof.
+- Saved config must contain `api_format=openai_responses` and a Keychain reference only. The same extracted App must relaunch and expose the restored protocol, URL, model, and saved-key state before its bundled Gateway is started through the UI.
+- The dedicated `rc1_native_responses_three_stage` Desktop profile attaches to the App-owned Gateway and UI-saved config. Stages A/B/C each have exactly one submission and require, respectively, a text marker, native Markdown structure, and the exact shell command plus `pwd` with a verified `function_call_output` roundtrip.
+- Current evidence is run-bound and hash-bound. A PASS manifest requires every named predicate, empty `failed_events`, all three stages in `evidence_verified/submitted` state, Desktop WebSocket ingress, Gateway SSE egress, tool roundtrip, matching run ids, and current harness/scenario/App zip/screenshot/usage/provider-event/provider-config hashes.
+- Historical `observation_failed_*` evidence remains failed and untouched. It cannot be relabeled, copied, or used to derive phase-B PASS.
+- Final fresh App-first plus isolated Codex Desktop native Responses E2E, package/artifact binding, screenshot review, and phase-B PASS production are deferred to `relaykit_test`, followed by independent `relaykit_cr`.
+
 ## Release Gate
 
 First public release requires:

@@ -101,6 +101,7 @@ func newServer(configPath, usageLogPath string, credentials map[string]string, a
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /v1/models", s.models)
+	mux.HandleFunc("POST /_relaykit/provider-test", s.providerTest)
 	mux.HandleFunc("GET /v1/responses", s.responsesWebSocket)
 	mux.HandleFunc("POST /v1/responses", s.responses)
 	return mux, nil
@@ -132,6 +133,126 @@ func (s *Server) models(w http.ResponseWriter, _ *http.Request) {
 		"models":       models,
 		"model_health": health,
 	})
+}
+
+type providerTestRequest struct {
+	ProviderID string
+	ModelID    string
+}
+
+type providerTestResult struct {
+	ProviderID string             `json:"provider_id"`
+	ModelID    string             `json:"model_id"`
+	Status     string             `json:"status"`
+	Error      *providerTestError `json:"error,omitempty"`
+}
+
+type providerTestError struct {
+	Type string `json:"type"`
+}
+
+func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) {
+	request, err := decodeProviderTestRequest(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "invalid provider test request"))
+		return
+	}
+	provider, model, ok := s.providerByIDAndModel(request.ProviderID, request.ModelID)
+	if !ok || !providerEnabled(provider) {
+		writeProviderTestResult(w, http.StatusBadRequest, request, "failed", "unknown_model")
+		return
+	}
+	if provider.APIFormat != config.APIFormatOpenAIResponses {
+		writeProviderTestResult(w, http.StatusBadRequest, request, "failed", "unsupported_provider_format")
+		return
+	}
+
+	raw := map[string]json.RawMessage{
+		"input":             json.RawMessage(`"Return a tiny reachability confirmation."`),
+		"max_output_tokens": json.RawMessage(`1`),
+	}
+	payload, err := nativeResponsesRequestBody(raw, upstreamModelName(model), false)
+	if err != nil {
+		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "responses_unavailable")
+		return
+	}
+	endpoint, err := nativeResponsesURL(provider.BaseURL)
+	if err != nil {
+		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "responses_unavailable")
+		return
+	}
+	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "responses_unavailable")
+		return
+	}
+	upstreamRequest.Header.Set("Content-Type", "application/json")
+	upstreamRequest.Header.Set("Accept", "application/json")
+	if err := s.applyProviderSnapshotAuth(upstreamRequest, provider); err != nil {
+		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "auth_failed")
+		return
+	}
+	client := *s.client
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	response, err := client.Do(upstreamRequest)
+	if err != nil {
+		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "network_failed")
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		status, _, _ := nativeResponsesHTTPFailure(response.StatusCode)
+		errorType := "responses_unavailable"
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			errorType = "auth_failed"
+		}
+		writeProviderTestResult(w, status, request, "failed", errorType)
+		return
+	}
+	if !isJSONContentType(response.Header.Get("Content-Type")) {
+		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "responses_unavailable")
+		return
+	}
+	parsed, err := rewriteNativeResponsesResponse(response.Body, model.ID)
+	if err != nil || parsed.status != "completed" {
+		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "responses_unavailable")
+		return
+	}
+	writeProviderTestResult(w, http.StatusOK, request, "ok", "")
+}
+
+func decodeProviderTestRequest(body io.Reader) (providerTestRequest, error) {
+	encoded, err := io.ReadAll(io.LimitReader(body, maximumResponsesRequestBytes+1))
+	if err != nil || len(encoded) > maximumResponsesRequestBytes {
+		return providerTestRequest{}, fmt.Errorf("invalid provider test request")
+	}
+	raw, err := strictJSONObject(encoded)
+	if err != nil || len(raw) != 2 || raw["provider_id"] == nil || raw["model_id"] == nil {
+		return providerTestRequest{}, fmt.Errorf("invalid provider test request")
+	}
+	for key := range raw {
+		if key != "provider_id" && key != "model_id" {
+			return providerTestRequest{}, fmt.Errorf("invalid provider test request")
+		}
+	}
+	var request providerTestRequest
+	if err := json.Unmarshal(raw["provider_id"], &request.ProviderID); err != nil || strings.TrimSpace(request.ProviderID) == "" {
+		return providerTestRequest{}, fmt.Errorf("invalid provider test request")
+	}
+	if err := json.Unmarshal(raw["model_id"], &request.ModelID); err != nil || strings.TrimSpace(request.ModelID) == "" {
+		return providerTestRequest{}, fmt.Errorf("invalid provider test request")
+	}
+	return request, nil
+}
+
+func writeProviderTestResult(w http.ResponseWriter, status int, request providerTestRequest, resultStatus, errorType string) {
+	result := providerTestResult{ProviderID: request.ProviderID, ModelID: request.ModelID, Status: resultStatus}
+	if errorType != "" {
+		result.Error = &providerTestError{Type: errorType}
+	}
+	writeJSON(w, status, result)
 }
 
 func (s *Server) catalogModels() ([]map[string]any, map[string]any) {
@@ -328,7 +449,7 @@ func (s *Server) probeModel(provider config.ProviderProfile, model config.Model)
 		return true, ""
 	}
 	ok, reason := probeRoute()
-	if !ok && strings.HasPrefix(reason, "upstream non-success") {
+	if provider.APIFormat != config.APIFormatOpenAIResponses && !ok && strings.HasPrefix(reason, "upstream non-success") {
 		time.Sleep(700 * time.Millisecond)
 		return probeRoute()
 	}
@@ -545,8 +666,8 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 		case websocketOpcodePing:
 			_ = writeWebSocketFrame(rw.Writer, websocketOpcodePong, payload)
 		case websocketOpcodeText, websocketOpcodeBinary:
-			var envelope map[string]json.RawMessage
-			if err := json.Unmarshal(payload, &envelope); err != nil {
+			envelope, err := strictJSONObject(payload)
+			if err != nil {
 				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
 				_ = writeWebSocketClose(rw.Writer)
 				return
@@ -560,7 +681,8 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if envelope["response"] != nil {
-					if err := json.Unmarshal(envelope["response"], &requestBody); err != nil {
+					requestBody, err = strictJSONObject(envelope["response"])
+					if err != nil {
 						_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
 						_ = writeWebSocketClose(rw.Writer)
 						return
@@ -1180,38 +1302,8 @@ func decodeResponsesRequest(body io.Reader) (map[string]json.RawMessage, respons
 	if len(encoded) > maximumResponsesRequestBytes {
 		return nil, responsesRequest{}, errResponsesRequestTooLarge
 	}
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	first, err := decoder.Token()
+	raw, err := strictJSONObject(encoded)
 	if err != nil {
-		return nil, responsesRequest{}, fmt.Errorf("invalid request body")
-	}
-	delim, ok := first.(json.Delim)
-	if !ok || delim != '{' {
-		return nil, responsesRequest{}, fmt.Errorf("request body must be an object")
-	}
-	raw := make(map[string]json.RawMessage)
-	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
-			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
-		}
-		if (key == "model" || key == "stream") && raw[key] != nil {
-			return nil, responsesRequest{}, fmt.Errorf("duplicate request field")
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
-		}
-		raw[key] = value
-	}
-	if _, err := decoder.Token(); err != nil {
-		return nil, responsesRequest{}, fmt.Errorf("invalid request body")
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
 		return nil, responsesRequest{}, fmt.Errorf("invalid request body")
 	}
 	var req responsesRequest
@@ -1622,6 +1714,20 @@ func (s *Server) providerForModel(model string) (config.ProviderProfile, config.
 		for _, m := range p.Models {
 			if m.ID == model {
 				return p, m, true
+			}
+		}
+	}
+	return config.ProviderProfile{}, config.Model{}, false
+}
+
+func (s *Server) providerByIDAndModel(providerID, modelID string) (config.ProviderProfile, config.Model, bool) {
+	for _, provider := range s.config.Providers {
+		if provider.ID != providerID {
+			continue
+		}
+		for _, model := range provider.Models {
+			if model.ID == modelID {
+				return provider, model, true
 			}
 		}
 	}

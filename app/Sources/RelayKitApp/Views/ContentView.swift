@@ -137,6 +137,7 @@ struct ContentView: View {
                     smokeSectionRecorder: smokeSectionRecorder
                 )
                 .environmentObject(model)
+                .accessibilityIdentifier("provider-edit-\(editingProvider.id)")
                 .smokeSection("provider-edit-modal", recorder: smokeSectionRecorder)
                 .smokeSection("provider-modal", recorder: smokeSectionRecorder)
                 .padding(18)
@@ -1631,9 +1632,9 @@ private struct ProviderFormView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                        field("Provider name", $providerName, "My gateway")
+                        field("Provider name", $providerName, "My gateway", identifier: "provider-provider-name-field")
                             .smokeSection("provider-name-field", recorder: smokeSectionRecorder)
-                        field("API base URL", $baseURL, "https://gateway.example/api")
+                        field("API base URL", $baseURL, "https://gateway.example/api", identifier: "provider-api-base-url-field")
                             .smokeSection("provider-base-url-field", recorder: smokeSectionRecorder)
                     }
 
@@ -1742,6 +1743,7 @@ private struct ProviderFormView: View {
                                 Text(option.label)
                                     .tag(option.id)
                                     .disabled(!option.isEnabled)
+                                    .accessibilityIdentifier("provider-upstream-protocol-option-\(option.id)")
                             }
                         }
                         .pickerStyle(.menu)
@@ -1784,7 +1786,7 @@ private struct ProviderFormView: View {
         }
     }
 
-    private func field(_ label: String, _ value: Binding<String>, _ prompt: String) -> some View {
+    private func field(_ label: String, _ value: Binding<String>, _ prompt: String, identifier: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(label)
                 .font(.caption)
@@ -1792,7 +1794,7 @@ private struct ProviderFormView: View {
             TextField(prompt, text: value)
                 .textFieldStyle(ProductTextFieldStyle())
                 .accessibilityLabel("\(label) field")
-                .accessibilityIdentifier("provider-\(label.lowercased().replacingOccurrences(of: " ", with: "-"))-field")
+                .accessibilityIdentifier(identifier ?? "provider-\(label.lowercased().replacingOccurrences(of: " ", with: "-"))-field")
         }
     }
 
@@ -1804,6 +1806,7 @@ private struct ProviderFormView: View {
             Text(apiKeyStatusText)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(primaryText.opacity(0.86))
+                .accessibilityIdentifier(hasExistingKeychainReference ? "provider-saved-key-state" : "provider-new-key-state")
                 .smokeSection(hasExistingKeychainReference ? "api-key-saved-state" : "", recorder: smokeSectionRecorder)
             apiKeyEntryField
             Text(apiKeyHelpText)
@@ -1919,6 +1922,12 @@ private struct ProviderFormView: View {
                     .disabled(baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isDetectingModels || isTestingConnection)
                     .smokeSection("provider-model-detection-entry", recorder: smokeSectionRecorder)
                     Spacer(minLength: 0)
+                }
+                if apiFormatForSave == "openai_responses" {
+                    Text(ProviderFormLabels.providerTestUsageNotice)
+                        .font(.system(size: 10))
+                        .foregroundStyle(secondaryText)
+                        .accessibilityIdentifier("provider-test-usage-notice")
                 }
             }
             if !connectionTestKind.isEmpty {
@@ -2349,6 +2358,10 @@ private struct ProviderFormView: View {
     }
 
     private func testConnection() async {
+        if apiFormatForSave == "openai_responses" {
+            await testSavedResponsesConnection()
+            return
+        }
         guard !modelDetectionEndpoints.isEmpty else {
             connectionTestKind = "network_failed"
             connectionTestLatencyMS = nil
@@ -2364,35 +2377,18 @@ private struct ProviderFormView: View {
         isTestingConnection = true
         defer { isTestingConnection = false }
 
-        let key: String
-        do {
-            key = try connectionProbeAPIKey()
-        } catch {
-            connectionTestKind = "auth_failed"
-            connectionTestModelCount = 0
-            connectionReachableModelCount = 0
-            connectionUnavailableModelCount = 0
-            connectionDiscoveredRows = []
-            connectionDiscoveredEndpoint = ""
-            connectionUsedReachableRows = false
-            return
-        }
+        let key = (try? modelDiscoveryAPIKey()) ?? ""
         guard !key.isEmpty else {
             connectionTestKind = "auth_failed"
             connectionTestModelCount = 0
             connectionReachableModelCount = 0
             connectionUnavailableModelCount = 0
-            connectionTestLatencyMS = nil
-            connectionTestHTTPStatus = nil
             connectionDiscoveredRows = []
             connectionDiscoveredEndpoint = ""
             connectionUsedReachableRows = false
             return
         }
-        var discovery = await discoverModels(endpoints: modelDetectionEndpoints, key: key)
-        if discovery.kind == "connected", apiFormatForSave == "openai_responses" {
-            discovery = await probeResponses(discovery, key: key)
-        }
+        let discovery = await discoverModels(endpoints: modelDetectionEndpoints, key: key)
         if discovery.kind == "connected" {
             model.startGateway()
             await model.refreshModels()
@@ -2400,18 +2396,71 @@ private struct ProviderFormView: View {
         applyConnectionResult(discovery)
     }
 
-    private var providerBaseURL: URL? {
-        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(),
-              ["http", "https"].contains(scheme),
-              url.host?.isEmpty == false else {
-            return nil
+    private func testSavedResponsesConnection() async {
+        isTestingConnection = true
+        defer { isTestingConnection = false }
+        guard saveForConnectionTest(),
+              let savedProvider = model.configuredProviders.first(where: { $0.id == resolvedProviderId }),
+              let savedModel = savedProvider.models.first else {
+            resetConnectionTest(kind: "network_failed")
+            return
         }
-        return url
+        do {
+            let result = try await model.testSavedProviderConnection(
+                providerID: savedProvider.id,
+                modelID: savedModel.id
+            )
+            connectionTestKind = result.connectionKind.rawValue
+            connectionTestLatencyMS = nil
+            connectionTestModelCount = savedProvider.models.count
+            connectionReachableModelCount = result.connectionKind == .connected ? savedProvider.models.count : 0
+            connectionUnavailableModelCount = 0
+            connectionTestHTTPStatus = nil
+            connectionDiscoveredRows = []
+            connectionDiscoveredEndpoint = ""
+            connectionUsedReachableRows = false
+            if let error = result.error {
+                modelDetectionStatus = "Provider test failed: \(error.type.rawValue)"
+            } else {
+                modelDetectionStatus = "Provider test completed through RelayKit."
+            }
+        } catch {
+            resetConnectionTest(kind: "network_failed")
+            modelDetectionStatus = error.localizedDescription
+        }
     }
 
-    private func connectionProbeAPIKey() throws -> String {
+    private func saveForConnectionTest() -> Bool {
+        switch mode {
+        case .add, .import:
+            let action = ProviderTestSaveAction.resolve(
+                providerID: resolvedProviderId,
+                persistedProviderIDs: Set(model.configuredProviders.map(\.id))
+            )
+            switch action {
+            case .add:
+                return model.addProvider(draft, keychainCredential: keychainCredential)
+            case .update(let originalProviderID):
+                return model.updateProvider(originalProviderID, draft: draft, keychainCredential: keychainCredential)
+            }
+        case .edit(let provider):
+            return model.updateProvider(provider.id, draft: draft, keychainCredential: keychainCredential)
+        }
+    }
+
+    private func resetConnectionTest(kind: String) {
+        connectionTestKind = kind
+        connectionTestLatencyMS = nil
+        connectionTestModelCount = 0
+        connectionReachableModelCount = 0
+        connectionUnavailableModelCount = 0
+        connectionTestHTTPStatus = nil
+        connectionDiscoveredRows = []
+        connectionDiscoveredEndpoint = ""
+        connectionUsedReachableRows = false
+    }
+
+    private func modelDiscoveryAPIKey() throws -> String {
         let typed = keychainCredential.trimmingCharacters(in: .whitespacesAndNewlines)
         if !typed.isEmpty {
             return typed
@@ -2513,51 +2562,6 @@ private struct ProviderFormView: View {
         return ProviderModelDiscoveryResult(kind: "network_failed", rows: [], endpoint: "", status: nil, latencyMS: nil)
     }
 
-    private func probeResponses(_ discovery: ProviderModelDiscoveryResult, key: String) async -> ProviderModelDiscoveryResult {
-        guard let baseURL = providerBaseURL,
-              let model = connectionProbeModel(from: discovery.rows) else {
-            return ProviderModelDiscoveryResult(kind: "responses_unavailable", rows: [], endpoint: "", status: discovery.status, latencyMS: discovery.latencyMS)
-        }
-        let trimmedPath = baseURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let endpoint = trimmedPath.split(separator: "/").last == "v1"
-            ? baseURL.appendingPathComponent("responses")
-            : baseURL.appendingPathComponent("v1/responses")
-        let body: [String: Any] = [
-            "model": model,
-            "input": "RelayKit connection probe",
-            "max_output_tokens": 1,
-        ]
-        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
-            return ProviderModelDiscoveryResult(kind: "responses_unavailable", rows: [], endpoint: "", status: discovery.status, latencyMS: discovery.latencyMS)
-        }
-        do {
-            let probe = try await sendProbe(url: endpoint, key: key, timeout: 8, method: "POST", body: bodyData)
-            if probe.status == 401 || probe.status == 403 {
-                return ProviderModelDiscoveryResult(kind: "auth_failed", rows: [], endpoint: "", status: probe.status, latencyMS: probe.latencyMS)
-            }
-            guard (200..<300).contains(probe.status) else {
-                return ProviderModelDiscoveryResult(kind: "responses_unavailable", rows: [], endpoint: "", status: probe.status, latencyMS: probe.latencyMS)
-            }
-            return discovery
-        } catch {
-            return ProviderModelDiscoveryResult(kind: "responses_unavailable", rows: [], endpoint: "", status: nil, latencyMS: nil)
-        }
-    }
-
-    private func connectionProbeModel(from discoveredRows: [ProviderModelRowDraft]) -> String? {
-        for row in modelRows + discoveredRows {
-            let upstream = row.upstreamModel.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !upstream.isEmpty {
-                return upstream
-            }
-            let identifier = row.modelId.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !identifier.isEmpty {
-                return identifier
-            }
-        }
-        return nil
-    }
-
     private func parseModelRows(from data: Data) -> [ProviderModelRowDraft] {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return []
@@ -2644,7 +2648,7 @@ private struct ProviderFormView: View {
         }
         isDetectingModels = true
         defer { isDetectingModels = false }
-        let key = (try? connectionProbeAPIKey()) ?? ""
+        let key = (try? modelDiscoveryAPIKey()) ?? ""
         let result = await discoverModels(endpoints: endpoints, key: key)
         if result.kind == "connected" {
             modelsURL = result.endpoint

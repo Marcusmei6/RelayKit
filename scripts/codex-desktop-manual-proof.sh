@@ -71,7 +71,7 @@ PROVIDER_TOKEN_ENV="RELAYKIT_DESKTOP_PROOF_PROVIDER_TOKEN"
 PROVIDER_TOKEN_VALUE="relaykit-desktop-proof-token"
 PROOF_PROVIDER_MODEL_ID="${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID:-desktop-proof-demo/claude-haiku-4-5}"
 PROOF_SCOPE="fixture_plumbing_preflight"
-if [[ "${MODE}" == "run-auto" ]]; then
+if [[ "${MODE}" == "run-auto" || "${MODE}" == "rc1-native-responses-three-stage" ]]; then
   PROOF_INPUT_MODE="${RELAYKIT_DESKTOP_PROOF_INPUT_MODE:-automated_ax}"
 else
   PROOF_INPUT_MODE="${RELAYKIT_DESKTOP_PROOF_INPUT_MODE:-manual_user_only}"
@@ -97,7 +97,7 @@ AUTOMATED_PROFILE="not_automated"
 
 usage() {
   cat >&2 <<'EOF'
-usage: ./scripts/codex-desktop-manual-proof.sh [run|run-auto --scenario /absolute/path/scenario.json|--setup-only|status|cleanup|--purge]
+usage: ./scripts/codex-desktop-manual-proof.sh [run|run-auto --scenario /absolute/path/scenario.json|rc1-native-responses-three-stage --scenario /absolute/path/scenario.json|--setup-only|status|cleanup|--purge]
 
 run          Start an extracted RelayKit App with isolated state, verify its
              gateway/login gate, then start Codex Desktop for manual requests.
@@ -603,7 +603,7 @@ for index, stage in enumerate(stages):
     if not isinstance(stage, dict) or set(stage) != allowed:
         raise SystemExit(f"stage {index} fields do not match the v1 contract")
     stage_id = stage["id"]
-    if not isinstance(stage_id, str) or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", stage_id) is None:
+    if not isinstance(stage_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}", stage_id) is None:
         raise SystemExit(f"stage {index} id is invalid")
     if stage_id in ids:
         raise SystemExit("stage ids must be unique")
@@ -728,6 +728,14 @@ automated_profile_for_scenario() {
          and has_stage("provider-markdown"; "markdown"; $provider_model)
          and has_stage("provider-tool"; "tool"; $provider_model)
       then "standard_four_stage_dogfood"
+      elif ($stages | length) == 3
+         and ($provider_model | length) > 0
+         and ([ $stages[].id ] == ["A", "B", "C"])
+         and all($stages[]; .model_id == $provider_model)
+         and ($stages[0].evidence_role == "rc1-text" and $stages[0].expect == "plain")
+         and ($stages[1].evidence_role == "rc1-markdown" and $stages[1].expect == "markdown")
+         and ($stages[2].evidence_role == "rc1-tool" and $stages[2].expect == "tool")
+      then "rc1_native_responses_three_stage"
       elif ($stages | length) == 1
          and ($provider_model | length) > 0
          and $stages[0].expect == "tool"
@@ -1945,6 +1953,7 @@ for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
                 "model": current_model,
                 "tool_name": item.get("name") or "",
                 "marker_found": marker_found,
+                "exact_shell_command_found": command == f"printf '{marker}\\n'; pwd",
             }
             events.append({
                 "timestamp": record.get("timestamp"),
@@ -1962,6 +1971,7 @@ for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
                 "model": current_model,
                 "marker_found": marker_found,
                 "process_exited_zero": process_exited_zero,
+                "pwd_output_found": any(line.startswith("/") for line in output_text.splitlines()),
             }
             events.append({
                 "timestamp": record.get("timestamp"),
@@ -1980,6 +1990,17 @@ matched_ids = [
     and outputs.get(call_id, {}).get("process_exited_zero")
 ]
 xml_leak_found = bool(xml_leak_records)
+exact_shell_command_found = any(
+    call.get("model") == provider_model
+    and call.get("exact_shell_command_found")
+    for call in calls.values()
+)
+pwd_output_found = any(
+    output.get("model") == provider_model
+    and output.get("marker_found")
+    and output.get("pwd_output_found")
+    for output in outputs.values()
+)
 out_path.write_text(json.dumps({
     "proof_found": bool(matched_ids) and not xml_leak_found,
     "function_call_found": any(event["type"] == "function_call" for event in events),
@@ -1988,6 +2009,8 @@ out_path.write_text(json.dumps({
     "matched_provider_tool_count": len(matched_ids),
     "xml_leak_found": xml_leak_found,
     "raw_function_calls_found": xml_leak_found,
+    "exact_shell_command_found": exact_shell_command_found,
+    "pwd_output_found": pwd_output_found,
     "xml_leak_records": xml_leak_records,
     "since_epoch": since_epoch,
     "event_count": len(events),
@@ -3159,6 +3182,7 @@ write_automated_stage_state() {
       usage_baseline: $usage_baseline,
       rollout_binding: $rollout_binding,
       error_code: (if $error_code == "" then null else $error_code end),
+      submission_count: (if $submission_state == "submitted" then 1 else 0 end),
       updated_at: $updated_at
     }]' "${AUTOMATED_STAGE_EVIDENCE}" >"${tmp}"
   mv "${tmp}" "${AUTOMATED_STAGE_EVIDENCE}"
@@ -3276,6 +3300,275 @@ wait_for_automated_stage() {
   return 3
 }
 
+print_rc1_native_responses_contract() {
+  jq -n '{
+    profile:"rc1_native_responses_three_stage",
+    stage_ids:["A","B","C"],
+    submission_count_each:1,
+    stage_A:"text_marker",
+    stage_B:"native_markdown_structure",
+    stage_C:"exact_shell_printf_marker_plus_pwd",
+    desktop_websocket_to_gateway:true,
+    gateway_sse_to_fixture:true,
+    tool_roundtrip:true,
+    attaches_existing_app_gateway:true
+  }'
+}
+
+cleanup_rc1_native_responses_desktop() {
+  kill_pid_file "${DESKTOP_PID_FILE}"
+  rm -f "${RUN_DIR}"/automated-query-*.txt >/dev/null 2>&1 || true
+}
+
+configure_rc1_native_responses_paths() {
+  local name
+  for name in \
+    RELAYKIT_RC1_RUN_ID RELAYKIT_RC1_DESKTOP_ROOT RELAYKIT_RC1_OUTPUT \
+    RELAYKIT_RC1_APP_PID_FILE RELAYKIT_RC1_APP_WINDOW_IDENTITY \
+    RELAYKIT_RC1_APP_BUNDLE RELAYKIT_RC1_APP_ZIP RELAYKIT_RC1_PROVIDER_CONFIG \
+    RELAYKIT_RC1_USAGE_PATH RELAYKIT_RC1_PROVIDER_EVENTS; do
+    [[ -n "${!name:-}" ]] || {
+      echo "rc1 native Responses proof requires ${name}" >&2
+      return 2
+    }
+  done
+  [[ "${RELAYKIT_RC1_RUN_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{5,127}$ ]] || return 2
+  for name in \
+    RELAYKIT_RC1_DESKTOP_ROOT RELAYKIT_RC1_OUTPUT RELAYKIT_RC1_APP_PID_FILE \
+    RELAYKIT_RC1_APP_WINDOW_IDENTITY RELAYKIT_RC1_APP_BUNDLE RELAYKIT_RC1_APP_ZIP \
+    RELAYKIT_RC1_PROVIDER_CONFIG RELAYKIT_RC1_USAGE_PATH RELAYKIT_RC1_PROVIDER_EVENTS; do
+    [[ "${!name}" == /* ]] || {
+      echo "${name} must be absolute" >&2
+      return 2
+    }
+  done
+
+  PROOF_ROOT="${RELAYKIT_RC1_DESKTOP_ROOT}"
+  ISO_HOME="${PROOF_ROOT}/home"
+  APP_SUPPORT_DIR="${ISO_HOME}/Library/Application Support/RelayKit"
+  OFFICIAL_PROOF_ROOT="${PROOF_ROOT}/official-proof"
+  APP_OFFICIAL_CODEX_HOME="${PROOF_ROOT}/app-owned-codex-home-unused"
+  CODEX_HOME_DIR="${PROOF_ROOT}/rc1-desktop-codex-home"
+  DESKTOP_USER_DATA_DIR="${PROOF_ROOT}/desktop-user-data"
+  LOG_DIR="${PROOF_ROOT}/logs"
+  RUN_DIR="${PROOF_ROOT}/run"
+  OUT="${RELAYKIT_RC1_OUTPUT}"
+  LAST_ROUTE_OUT="${OUT}/unused-last-route"
+  LAST_COMPLETE_OUT="${OUT}/unused-last-complete"
+  ZIP_PATH="${RELAYKIT_RC1_APP_ZIP}"
+  APP_BUNDLE="${RELAYKIT_RC1_APP_BUNDLE}"
+  APP_REAL_BINARY="${APP_BUNDLE}/Contents/MacOS/RelayKitApp.bin"
+  BUNDLED_RELAY="${APP_BUNDLE}/Contents/MacOS/relay"
+  PROVIDER_CONFIG="${RELAYKIT_RC1_PROVIDER_CONFIG}"
+  USAGE_PATH="${RELAYKIT_RC1_USAGE_PATH}"
+  PROVIDER_EVENTS="${RELAYKIT_RC1_PROVIDER_EVENTS}"
+  CATALOG_PATH="${PROOF_ROOT}/model-catalog.json"
+  CODEX_CONFIG="${CODEX_HOME_DIR}/config.toml"
+  PROVIDER_PID_FILE="${RUN_DIR}/provider.pid"
+  GATEWAY_PID_FILE="${RUN_DIR}/gateway.pid"
+  APP_PID_FILE="${RELAYKIT_RC1_APP_PID_FILE}"
+  APP_WINDOW_IDENTITY="${RELAYKIT_RC1_APP_WINDOW_IDENTITY}"
+  DESKTOP_PID_FILE="${RUN_DIR}/codex-desktop.pid"
+  PORT_FILE="${RUN_DIR}/gateway-port"
+  PROVIDER_PORT_FILE="${RUN_DIR}/provider-port"
+  PROVIDER_LOG="${LOG_DIR}/provider.log"
+  GATEWAY_LOG="${LOG_DIR}/gateway.log"
+  APP_LOG="${LOG_DIR}/relaykit-app.log"
+  DESKTOP_LOG="${LOG_DIR}/codex-desktop.log"
+  AX_DRIVER_BINARY="${RUN_DIR}/codex-desktop-ax-driver"
+  AUTOMATED_CATALOG_LABELS_FILE="${RUN_DIR}/automated-model-labels.json"
+  AUTOMATED_STAGE_EVIDENCE="${OUT}/automated-stages.json"
+  AUTOMATED_SCENARIO_NORMALIZED="${RUN_DIR}/automated-scenario.json"
+  DESKTOP_SANDBOX_PROFILE="${RUN_DIR}/codex-desktop-proof.sb"
+  DESKTOP_SANDBOX_STATUS_FILE="${RUN_DIR}/desktop-sandbox-status"
+  DESKTOP_WINDOW_IDENTITY="${RUN_DIR}/desktop-window-identity.json"
+  APP_SCREENSHOT="${OUT}/app-owned-gateway.png"
+  DESKTOP_TOOL_EVIDENCE="${OUT}/desktop-tool-evidence.json"
+  DESKTOP_RENDER_EVIDENCE="${OUT}/desktop-render-evidence.json"
+  SCREENSHOT_DIR="${OUT}/screenshots"
+  SCREENSHOT_EVIDENCE="${OUT}/screenshots.json"
+  TOOL_MARKER_FILE="${RUN_DIR}/tool-marker"
+  TOOL_SINCE_FILE="${RUN_DIR}/tool-since-epoch"
+  PROOF_SCOPE="rc1_native_responses"
+}
+
+setup_rc1_native_responses_attached_preflight() {
+  local app_pid app_command bundled_models provider_config_hash
+  [[ ! -e "${OUT}" ]] || {
+    echo "rc1 native Responses output must be a fresh run-specific path" >&2
+    return 1
+  }
+  for path in "${APP_PID_FILE}" "${APP_WINDOW_IDENTITY}" "${ZIP_PATH}" "${PROVIDER_CONFIG}" "${USAGE_PATH}" "${PROVIDER_EVENTS}"; do
+    [[ -f "${path}" && ! -L "${path}" ]] || {
+      echo "rc1 native Responses input is not a current regular file" >&2
+      return 1
+    }
+  done
+  [[ -d "${APP_BUNDLE}" && -x "${APP_REAL_BINARY}" && -x "${BUNDLED_RELAY}" ]] || return 1
+  app_pid="$(cat "${APP_PID_FILE}")"
+  [[ "${app_pid}" =~ ^[0-9]+$ ]] && kill -0 "${app_pid}" 2>/dev/null || return 1
+  app_command="$(ps -p "${app_pid}" -o command= 2>/dev/null || true)"
+  [[ "${app_command}" == "${APP_REAL_BINARY}"* ]] || return 1
+  jq -e --argjson pid "${app_pid}" '
+    .pid == $pid and (.window_id | type == "number" and . > 0)
+  ' "${APP_WINDOW_IDENTITY}" >/dev/null || return 1
+  curl -fsS --max-time 2 http://127.0.0.1:19777/healthz >/dev/null || return 1
+  jq -e '
+    (.providers | type == "array" and length == 1) and
+    .providers[0].api_format == "openai_responses" and
+    .providers[0].credential_ref.kind == "keychain" and
+    (.providers[0].credential_ref.value | startswith("relaykit.provider.dogfood-")) and
+    (.providers[0].models | type == "array" and length == 1) and
+    ([.. | objects | select(has("key_file"))] | length == 0)
+  ' "${PROVIDER_CONFIG}" >/dev/null || return 1
+  PROOF_PROVIDER_MODEL_ID="$(jq -er '.providers[0].models[0].id' "${PROVIDER_CONFIG}")" || return 1
+  provider_config_hash="$(file_hash "${PROVIDER_CONFIG}")"
+  RELAYKIT_RC1_PROVIDER_CONFIG_SHA256="${provider_config_hash}"
+
+  mkdir -p "${PROOF_ROOT}" "${ISO_HOME}" "${APP_SUPPORT_DIR}" "${OFFICIAL_PROOF_ROOT}" \
+    "${CODEX_HOME_DIR}" "${DESKTOP_USER_DATA_DIR}" "${LOG_DIR}" "${RUN_DIR}" "${OUT}" "${SCREENSHOT_DIR}"
+  chmod 700 "${PROOF_ROOT}" "${ISO_HOME}" "${APP_SUPPORT_DIR}" "${OFFICIAL_PROOF_ROOT}" \
+    "${CODEX_HOME_DIR}" "${DESKTOP_USER_DATA_DIR}" "${LOG_DIR}" "${RUN_DIR}" "${OUT}"
+  printf 'not_launched\n' >"${DESKTOP_SANDBOX_STATUS_FILE}"
+  rm -f "${DESKTOP_WINDOW_IDENTITY}" "${TOOL_MARKER_FILE}" "${TOOL_SINCE_FILE}"
+  printf '[]\n' >"${SCREENSHOT_EVIDENCE}"
+  printf '{"proof_found":false,"function_call_found":false,"function_call_output_found":false,"process_exited_zero":false,"matched_provider_tool_count":0,"xml_leak_found":false,"raw_function_calls_found":false,"exact_shell_command_found":false,"pwd_output_found":false,"event_count":0,"events":[]}\n' >"${DESKTOP_TOOL_EVIDENCE}"
+  printf '{}\n' >"${DESKTOP_RENDER_EVIDENCE}"
+  printf '19777\n' >"${PORT_FILE}"
+  STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  APP_ZIP_SHA256="$(file_hash "${ZIP_PATH}")"
+  APP_ZIP_BUILD_TIME_UTC="$(date -u -r "${ZIP_PATH}" +"%Y-%m-%dT%H:%M:%SZ")"
+  APP_SERVER_SETUP_ID="rc1-native-${APP_ZIP_SHA256:0:16}"
+  APP_SERVER_SESSION_ID="rc1-native:${RELAYKIT_RC1_RUN_ID}"
+  capture_global_state
+  capture_source_state
+
+  CODEX_CLI_BINARY="$(resolve_codex_cli_binary || true)"
+  [[ -n "${CODEX_CLI_BINARY}" && -x "${CODEX_CLI_BINARY}" ]] || return 1
+  bundled_models="${RUN_DIR}/codex-bundled-models.json"
+  "${CODEX_CLI_BINARY}" debug models --bundled >"${bundled_models}"
+  merge_model_catalog "${bundled_models}" "${PROVIDER_CONFIG}" "${PROOF_SCOPE}" "${CATALOG_PATH}"
+  cp "${CATALOG_PATH}" "${OUT}/model-catalog.json"
+  write_codex_config 19777
+  CFFIXED_USER_HOME="${ISO_HOME}" HOME="${ISO_HOME}" CODEX_HOME="${CODEX_HOME_DIR}" \
+    "${CODEX_CLI_BINARY}" debug models >"${OUT}/codex-debug-models.json"
+  jq -e --arg model "${PROOF_PROVIDER_MODEL_ID}" '([.models[].slug] | index($model)) != null' \
+    "${OUT}/codex-debug-models.json" >/dev/null || return 1
+  write_app_server_evidence
+  jq -e --arg model "${PROOF_PROVIDER_MODEL_ID}" '([.provider[].model] | index($model)) != null' \
+    "${OUT}/app-server.json" >/dev/null || return 1
+  curl -fsS --max-time 5 http://127.0.0.1:19777/v1/models >"${OUT}/gateway-models.json"
+  jq -e --arg model "${PROOF_PROVIDER_MODEL_ID}" '([.data[].id] | index($model)) != null' \
+    "${OUT}/gateway-models.json" >/dev/null || return 1
+  [[ "$(file_hash "${PROVIDER_CONFIG}")" == "${provider_config_hash}" ]] || return 1
+}
+
+write_rc1_native_responses_evidence() {
+  local run_id="${RELAYKIT_RC1_RUN_ID}"
+  local screenshot_path screenshot_sha usage_sha events_sha harness_sha scenario_sha config_sha stages_sha
+  local failed_events
+  summarize_usage
+  jq -e --arg model "${PROOF_PROVIDER_MODEL_ID}" '
+    [.[] | select(.model == $model and .status == "completed" and .http_status == 200 and .transport == "responses_websocket")] | length >= 3
+  ' "${OUT}/usage-events.json" >/dev/null || return 1
+  jq -s -e --arg run_id "${run_id}" '
+    all(.[]; .run_id == $run_id) and
+    ([.[] | select(.method == "POST" and .path == "/v1/responses" and .auth_present == true and (.event_types | index("response.completed")) != null)] | length >= 4) and
+    any(.[]; (.event_types | index("response.output_item.added")) != null)
+  ' "${PROVIDER_EVENTS}" >/dev/null || return 1
+  jq -e '
+    .proof_found == true and
+    .function_call_found == true and
+    .function_call_output_found == true and
+    .process_exited_zero == true and
+    .exact_shell_command_found == true and
+    .pwd_output_found == true and
+    .xml_leak_found == false and
+    .raw_function_calls_found == false
+  ' "${DESKTOP_TOOL_EVIDENCE}" >/dev/null || return 1
+  jq -e '
+    length == 3 and ([.[].id] == ["A","B","C"]) and
+    all(.[];
+      .state == "evidence_verified" and
+      .submission_state == "submitted" and
+      .submission_count == 1 and
+      .error_code == null and
+      .rollout_binding.proof_found == true
+    )
+  ' "${AUTOMATED_STAGE_EVIDENCE}" >/dev/null || return 1
+  failed_events="$(jq '[.[] | .error_code | select(. != null)]' "${AUTOMATED_STAGE_EVIDENCE}")"
+  [[ "${failed_events}" == "[]" ]] || return 1
+  screenshot_path="$(jq -er '[.[] | select(.role == "rc1-tool" and .captured == true and .target_identity_verified == true)] | last | .path' "${SCREENSHOT_EVIDENCE}")" || return 1
+  [[ "${screenshot_path}" == /* ]] || screenshot_path="${ROOT}/${screenshot_path}"
+  [[ -f "${screenshot_path}" && ! -L "${screenshot_path}" ]] || return 1
+  screenshot_sha="$(file_hash "${screenshot_path}")"
+  jq -e --arg path "${screenshot_path#${ROOT}/}" --arg sha "${screenshot_sha}" '
+    any(.[]; .role == "rc1-tool" and .path == $path and .sha256 == $sha and .visual_checks.tool_marker_visible == true and .visual_checks.tool_execution_visible == true and .visual_checks.raw_protocol_visible == false) or
+    any(.[]; .role == "rc1-tool" and .path == ("/" + $path) and .sha256 == $sha and .visual_checks.tool_marker_visible == true and .visual_checks.tool_execution_visible == true and .visual_checks.raw_protocol_visible == false)
+  ' "${SCREENSHOT_EVIDENCE}" >/dev/null || return 1
+  jq -e '
+    any(.[]; .role == "rc1-markdown" and .captured == true and .target_identity_verified == true and
+      .visual_checks.heading_visible == true and .visual_checks.numbered_items_visible == true and
+      .visual_checks.table_headers_visible == true and .visual_checks.bash_code_visible == true and
+      .visual_checks.bold_conclusion_visible == true and .visual_checks.raw_protocol_visible == false)
+  ' "${SCREENSHOT_EVIDENCE}" >/dev/null || return 1
+  [[ "$(file_hash "${PROVIDER_CONFIG}")" == "${RELAYKIT_RC1_PROVIDER_CONFIG_SHA256}" ]] || return 1
+  assert_proof_state_unchanged
+
+  usage_sha="$(file_hash "${OUT}/usage-events.json")"
+  events_sha="$(file_hash "${PROVIDER_EVENTS}")"
+  harness_sha="$(file_hash "${ROOT}/scripts/codex-desktop-manual-proof.sh")"
+  scenario_sha="$(file_hash "${SCENARIO_PATH}")"
+  config_sha="$(file_hash "${PROVIDER_CONFIG}")"
+  stages_sha="$(file_hash "${AUTOMATED_STAGE_EVIDENCE}")"
+  jq -n \
+    --arg run_id "${run_id}" --arg screenshot_path "${screenshot_path}" \
+    --arg screenshot_sha "${screenshot_sha}" --arg usage_sha "${usage_sha}" \
+    --arg events_sha "${events_sha}" --arg harness_sha "${harness_sha}" \
+    --arg scenario_sha "${scenario_sha}" --arg config_sha "${config_sha}" \
+    --arg stages_sha "${stages_sha}" --arg app_pid "$(cat "${APP_PID_FILE}")" \
+    --arg usage_path "${OUT}/usage-events.json" --arg provider_events_path "${PROVIDER_EVENTS}" \
+    --slurpfile stages "${AUTOMATED_STAGE_EVIDENCE}" '{
+      status:"complete",
+      run_id:$run_id,
+      profile:"rc1_native_responses_three_stage",
+      app_owned_gateway_attached:true,
+      ui_saved_provider_config:true,
+      desktop_websocket_to_gateway:true,
+      gateway_sse_to_fixture:true,
+      tool_roundtrip_verified:true,
+      predicate_ledger:{
+        exact_app_pid_attached:true,
+        ui_saved_provider_config:true,
+        isolated_desktop:true,
+        stage_A_text_marker:true,
+        stage_B_native_markdown_structure:true,
+        stage_C_exact_shell_printf_marker_plus_pwd:true,
+        exactly_one_submission_each:true,
+        desktop_websocket_to_gateway:true,
+        gateway_sse_to_fixture:true,
+        function_call_output_roundtrip:true,
+        run_and_hash_bindings_current:true
+      },
+      failed_events:[],
+      stages:$stages[0],
+      app_pid:($app_pid | tonumber),
+      screenshot_path:$screenshot_path,
+      screenshot_sha256:$screenshot_sha,
+      usage_path:$usage_path,
+      usage_sha256:$usage_sha,
+      provider_events_path:$provider_events_path,
+      provider_events_sha256:$events_sha,
+      harness_sha256:$harness_sha,
+      scenario_sha256:$scenario_sha,
+      provider_config_sha256:$config_sha,
+      stage_evidence_sha256:$stages_sha
+    }' >"${OUT}/rc1-native-responses-evidence.json"
+  chmod 600 "${OUT}/rc1-native-responses-evidence.json"
+  jq -e '.failed_events == [] and (.predicate_ledger | all(.[]; . == true))' \
+    "${OUT}/rc1-native-responses-evidence.json" >/dev/null
+}
+
 run_automated_proof() {
   local scenario_path="$1"
   local driver_source="${ROOT}/scripts/codex-desktop-ax-driver.swift"
@@ -3326,18 +3619,29 @@ run_automated_proof() {
         return 1
       }
       ;;
+    rc1_native_responses_three_stage)
+      [[ "${RELAYKIT_RC1_ATTACH_APP_GATEWAY:-0}" == "1" && "${expected_stage_count}" == "3" ]] || {
+        AUTO_ERROR_CODE="rc1_attach_contract_invalid"
+        return 1
+      }
+      ;;
     custom_scenario) ;;
     *)
       AUTO_ERROR_CODE="scenario_profile_unknown"
       return 1
       ;;
   esac
-  AUTO_ERROR_CODE="global_state_capture_failed"
-  capture_global_state
   AUTO_ERROR_CODE="preflight_failed"
-  setup_preflight real
-  AUTO_ERROR_CODE="preflight_evidence_failed"
-  write_evidence "automated_preflight_passed" "not_started" "${CONFIG_BEFORE}" "${AUTH_BEFORE}" "${CONFIG_HASH_BEFORE}" "${AUTH_HASH_BEFORE}" "${NOTIFY_HASH_BEFORE}"
+  if [[ "${RELAYKIT_RC1_ATTACH_APP_GATEWAY:-0}" == "1" ]]; then
+    setup_rc1_native_responses_attached_preflight
+  else
+    AUTO_ERROR_CODE="global_state_capture_failed"
+    capture_global_state
+    AUTO_ERROR_CODE="preflight_failed"
+    setup_preflight real
+    AUTO_ERROR_CODE="preflight_evidence_failed"
+    write_evidence "automated_preflight_passed" "not_started" "${CONFIG_BEFORE}" "${AUTH_BEFORE}" "${CONFIG_HASH_BEFORE}" "${AUTH_HASH_BEFORE}" "${NOTIFY_HASH_BEFORE}"
+  fi
   AUTO_ERROR_CODE="ax_driver_build_failed"
   build_automated_ax_driver
   AUTO_ERROR_CODE="desktop_catalog_labels_invalid"
@@ -3475,12 +3779,28 @@ run_automated_proof() {
         return 1
       fi
       ;;
+    rc1_native_responses_three_stage)
+      AUTO_ERROR_CODE="rc1_native_responses_evidence_incomplete"
+      write_rc1_native_responses_evidence || return 1
+      ;;
     custom_scenario) ;;
     *)
       AUTO_ERROR_CODE="scenario_profile_unknown"
       return 1
       ;;
   esac
+  if [[ "${AUTOMATED_PROFILE}" == "rc1_native_responses_three_stage" ]]; then
+    cleanup_rc1_native_responses_desktop
+    AUTO_ERROR_CODE="proof_state_changed"
+    assert_proof_state_unchanged
+    AUTO_ERROR_CODE="result_encoding_failed"
+    jq -n \
+      --arg evidence "${OUT}/rc1-native-responses-evidence.json" \
+      --arg profile "${AUTOMATED_PROFILE}" \
+      --slurpfile stages "${AUTOMATED_STAGE_EVIDENCE}" \
+      '{status:"complete",profile:$profile,evidence:$evidence,human_intervention_count:0,stages:$stages[0]}'
+    return 0
+  fi
   cleanup_processes
   AUTO_ERROR_CODE="final_evidence_failed"
   write_evidence "route_complete" "complete" "${CONFIG_BEFORE}" "${AUTH_BEFORE}" "${CONFIG_HASH_BEFORE}" "${AUTH_HASH_BEFORE}" "${NOTIFY_HASH_BEFORE}"
@@ -3542,6 +3862,21 @@ EOF
 }
 
 case "${MODE}" in
+  rc1-native-responses-three-stage)
+    configure_rc1_native_responses_paths
+    mkdir -p "${PROOF_ROOT}" "${RUN_DIR}"
+    chmod 700 "${PROOF_ROOT}" "${RUN_DIR}"
+    PROOF_INPUT_MODE="automated_ax"
+    RELAYKIT_RC1_ATTACH_APP_GATEWAY=1
+    RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="${PROVIDER_CONFIG}"
+    RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="$(jq -er '.providers[0].models[0].id' "${PROVIDER_CONFIG}")"
+    PROOF_PROVIDER_MODEL_ID="${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID}"
+    trap cleanup_rc1_native_responses_desktop EXIT INT TERM HUP
+    validate_automated_input_mode
+    AUTO_SCENARIO_PATH="$(scenario_argument "$@")" || exit 2
+    run_automated_proof "${AUTO_SCENARIO_PATH}"
+    exit 0
+    ;;
   run-auto)
     trap cleanup_automated_run EXIT
     trap handle_automated_signal INT TERM HUP
@@ -3692,6 +4027,9 @@ EOF
       echo "Codex Desktop bundled codex CLI was not found" >&2
       exit 1
     fi
+    ;;
+  --print-rc1-native-responses-contract)
+    print_rc1_native_responses_contract
     ;;
   --test-stop-pid-file)
     [[ -n "${2:-}" ]] || exit 2

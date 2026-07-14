@@ -7,7 +7,9 @@ import Darwin
 import Foundation
 
 private let codexBundleIdentifier = "com.openai.codex"
+private let relayKitBundleIdentifier = "dev.relaykit.app"
 private let axWindowNumberAttribute = "AXWindowNumber" as CFString
+private let axIdentifierAttribute = "AXIdentifier" as CFString
 private let axLabelAttribute = "AXLabel" as CFString
 private let axPlaceholderValueAttribute = "AXPlaceholderValue" as CFString
 private let axLinkRole = "AXLink"
@@ -110,6 +112,9 @@ private enum DriverCommand: String {
     case ready
     case prepare
     case submit
+    case relayKitProviderConfigure = "relaykit-provider-configure"
+    case relayKitProviderVerify = "relaykit-provider-verify"
+    case relayKitGatewayStart = "relaykit-gateway-start"
     case selfTest = "self-test"
 }
 
@@ -120,7 +125,10 @@ private struct ParsedArguments {
 
 private func redactedCommandName(_ arguments: [String]) -> String {
     guard let raw = arguments.first else { return "unknown" }
-    let known = Set(["inspect", "reveal", "ready", "prepare", "submit", "self-test"])
+    let known = Set([
+        "inspect", "reveal", "ready", "prepare", "submit", "self-test",
+        "relaykit-provider-configure", "relaykit-provider-verify", "relaykit-gateway-start",
+    ])
     return known.contains(raw) ? raw : "unknown"
 }
 
@@ -136,6 +144,15 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
         return ["--pid", "--window-identity", "--workspace"]
     case .submit:
         return ["--pid", "--window-identity", "--model-label", "--catalog-labels-file", "--query-file"]
+    case .relayKitProviderConfigure:
+        return [
+            "--pid", "--window-identity", "--provider-name", "--base-url",
+            "--synthetic-key", "--model-id",
+        ]
+    case .relayKitProviderVerify:
+        return ["--pid", "--window-identity", "--provider-name", "--base-url", "--model-id"]
+    case .relayKitGatewayStart:
+        return ["--pid", "--window-identity"]
     case .selfTest:
         guard let scenario else {
             throw DriverFailure("invalid_arguments", exitStatus: 2)
@@ -381,9 +398,13 @@ private struct DriverContext {
     let pid: pid_t
     let identityPath: String
     let identity: WindowIdentity
+    let expectedBundleIdentifier: String
 }
 
-private func makeContext(options: [String: String]) throws -> DriverContext {
+private func makeContext(
+    options: [String: String],
+    expectedBundleIdentifier: String = codexBundleIdentifier
+) throws -> DriverContext {
     guard let rawPID = options["--pid"],
           let numericPID = Int32(rawPID),
           numericPID > 0,
@@ -394,7 +415,12 @@ private func makeContext(options: [String: String]) throws -> DriverContext {
     guard identity.pid == numericPID else {
         throw DriverFailure("window_identity_pid_mismatch", exitStatus: 4)
     }
-    return DriverContext(pid: numericPID, identityPath: identityPath, identity: identity)
+    return DriverContext(
+        pid: numericPID,
+        identityPath: identityPath,
+        identity: identity,
+        expectedBundleIdentifier: expectedBundleIdentifier
+    )
 }
 
 private func number(_ value: Any?) -> NSNumber? {
@@ -466,7 +492,7 @@ private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
     guard let running = NSRunningApplication(processIdentifier: context.pid), !running.isTerminated else {
         throw DriverFailure("process_unavailable", exitStatus: 4)
     }
-    guard running.bundleIdentifier == codexBundleIdentifier else {
+    guard running.bundleIdentifier == context.expectedBundleIdentifier else {
         throw DriverFailure("process_identity_mismatch", exitStatus: 4)
     }
     let windowServerWindowCount = try verifyWindowServerIdentity(context)
@@ -513,6 +539,7 @@ private func semanticRecord(for element: AXUIElement) -> SemanticRecord {
         kAXDescriptionAttribute as CFString,
         kAXHelpAttribute as CFString,
         kAXValueAttribute as CFString,
+        axIdentifierAttribute,
         axLabelAttribute,
         axPlaceholderValueAttribute,
     ]
@@ -840,7 +867,8 @@ private func performVerifiedPress(
 private func performVerifiedWrite(
     context: DriverContext,
     selector: SemanticSelector,
-    value: String
+    value: String,
+    failureCode: String = "composer_write_failed"
 ) throws {
     let before = try verifyBoundWindow(context)
     let target = try requireUniqueNode(in: collectAXNodes(from: before.window), selector: selector)
@@ -849,7 +877,7 @@ private func performVerifiedWrite(
         kAXValueAttribute as CFString,
         value as CFString
     ) == .success else {
-        throw DriverFailure("composer_write_failed", exitStatus: 6)
+        throw DriverFailure(failureCode, exitStatus: 6)
     }
     _ = try verifyBoundWindow(context)
 }
@@ -1155,6 +1183,282 @@ private func executeSubmit(options: [String: String]) throws -> DriverReport {
     )
 }
 
+private func relayKitIdentifierSelector(
+    _ identifier: String,
+    roles: Set<String> = [],
+    writable: Bool = false,
+    pressable: Bool = false
+) -> SemanticSelector {
+    { record in
+        (roles.isEmpty || roles.contains(record.role)) &&
+            record.enabled &&
+            (!writable || record.writable) &&
+            (!pressable || record.pressable) &&
+            exactSemanticMatch(record, accepted: Set([identifier]))
+    }
+}
+
+private func relayKitProviderID(_ name: String) -> String {
+    let allowed = name.lowercased().unicodeScalars.map { scalar -> Character in
+        CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : "-"
+    }
+    return String(allowed).split(separator: "-").joined(separator: "-")
+}
+
+private func validatedRelayKitProviderOptions(
+    _ options: [String: String],
+    requireSyntheticKey: Bool
+) throws -> (name: String, baseURL: String, modelID: String, syntheticKey: String?) {
+    guard let name = options["--provider-name"],
+          let baseURL = options["--base-url"],
+          let modelID = options["--model-id"],
+          !name.isEmpty, name.utf8.count <= 128,
+          !modelID.isEmpty, modelID.utf8.count <= 256,
+          !name.contains("\n"), !name.contains("\r"),
+          !modelID.contains("\n"), !modelID.contains("\r"),
+          relayKitProviderID(name).hasPrefix("dogfood-") else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    guard let components = URLComponents(string: baseURL),
+          components.scheme == "http",
+          components.host == "127.0.0.1",
+          components.port != nil,
+          components.user == nil,
+          components.password == nil,
+          components.query == nil,
+          components.fragment == nil else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let syntheticKey = options["--synthetic-key"]
+    if requireSyntheticKey {
+        guard let syntheticKey,
+              syntheticKey.hasPrefix("RELAYKIT_FAKE_"),
+              syntheticKey.utf8.count <= 256,
+              !syntheticKey.contains("\n"),
+              !syntheticKey.contains("\r") else {
+            throw DriverFailure("invalid_arguments", exitStatus: 2)
+        }
+    }
+    return (name, baseURL, modelID, syntheticKey)
+}
+
+private func waitForRelayKitValue(
+    context: DriverContext,
+    identifier: String,
+    expected: String
+) throws {
+    let selector = relayKitIdentifierSelector(
+        identifier,
+        roles: Set([kAXTextFieldRole as String, kAXTextAreaRole as String]),
+        writable: true
+    )
+    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    while true {
+        let nodes = try currentNodes(context)
+        let matches = matchingIndices(in: nodes.map(\.semantic), selector: selector)
+        if matches.count == 1,
+           copyAXString(nodes[matches[0]].element, kAXValueAttribute as CFString) == expected {
+            return
+        }
+        if matches.count > 1 || Date() >= deadline {
+            throw DriverFailure("relaykit_value_not_verified", exitStatus: 6, candidateCount: matches.count)
+        }
+        Thread.sleep(forTimeInterval: selectorPollSeconds)
+    }
+}
+
+private func writeRelayKitField(
+    context: DriverContext,
+    identifier: String,
+    value: String,
+    verifyReadback: Bool = true
+) throws {
+    let selector = relayKitIdentifierSelector(
+        identifier,
+        roles: Set([kAXTextFieldRole as String, kAXTextAreaRole as String]),
+        writable: true
+    )
+    try waitForUniqueSelector(context: context, selector: selector)
+    try performVerifiedWrite(
+        context: context,
+        selector: selector,
+        value: value,
+        failureCode: "relaykit_field_write_failed"
+    )
+    if verifyReadback {
+        try waitForRelayKitValue(context: context, identifier: identifier, expected: value)
+    }
+}
+
+private func waitForRelayKitSemantic(
+    context: DriverContext,
+    identifier: String,
+    expected: String
+) throws {
+    let selector = relayKitIdentifierSelector(identifier)
+    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    while true {
+        let nodes = try currentNodes(context)
+        let matches = matchingIndices(in: nodes.map(\.semantic), selector: selector)
+        if matches.count == 1,
+           exactSemanticMatch(nodes[matches[0]].semantic, accepted: Set([expected])) {
+            return
+        }
+        if matches.count > 1 || Date() >= deadline {
+            throw DriverFailure("relaykit_state_not_verified", exitStatus: 6, candidateCount: matches.count)
+        }
+        Thread.sleep(forTimeInterval: selectorPollSeconds)
+    }
+}
+
+private func executeRelayKitProviderConfigure(options: [String: String]) throws -> DriverReport {
+    let provider = try validatedRelayKitProviderOptions(options, requireSyntheticKey: true)
+    guard let syntheticKey = provider.syntheticKey else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let context = try makeContext(options: options, expectedBundleIdentifier: relayKitBundleIdentifier)
+    let buttonRoles = Set([kAXButtonRole as String])
+    let popupRoles = Set([kAXPopUpButtonRole as String, kAXButtonRole as String])
+
+    try performVerifiedPress(
+        context: context,
+        selector: relayKitIdentifierSelector("tab-connect", roles: buttonRoles, pressable: true)
+    )
+    try waitForUniqueSelector(
+        context: context,
+        selector: relayKitIdentifierSelector("provider-add-entry", roles: buttonRoles, pressable: true)
+    )
+    try performVerifiedPress(
+        context: context,
+        selector: relayKitIdentifierSelector("provider-add-entry", roles: buttonRoles, pressable: true)
+    )
+
+    try writeRelayKitField(context: context, identifier: "provider-provider-name-field", value: provider.name)
+    try writeRelayKitField(context: context, identifier: "provider-api-base-url-field", value: provider.baseURL)
+    try writeRelayKitField(
+        context: context,
+        identifier: "api-key-new-input-field",
+        value: syntheticKey,
+        verifyReadback: false
+    )
+    try writeRelayKitField(context: context, identifier: "provider-model-id-field", value: provider.modelID)
+
+    let advancedSelector = relayKitIdentifierSelector(
+        "provider-advanced-toggle-row",
+        roles: buttonRoles,
+        pressable: true
+    )
+    try performVerifiedPress(context: context, selector: advancedSelector)
+    let protocolSelector = relayKitIdentifierSelector(
+        "provider-upstream-protocol-selector",
+        roles: popupRoles,
+        pressable: true
+    )
+    try waitForUniqueSelector(context: context, selector: protocolSelector)
+    try performVerifiedPress(context: context, selector: protocolSelector)
+
+    let responsesOption = relayKitIdentifierSelector(
+        "provider-upstream-protocol-option-openai_responses",
+        roles: Set([kAXMenuItemRole as String]),
+        pressable: true
+    )
+    try waitForUniqueApplicationOverlaySelector(context: context, selector: responsesOption)
+    try performVerifiedPress(
+        context: context,
+        selector: responsesOption,
+        targetProvider: { try applicationOverlayNode(context: $0, selector: responsesOption) }
+    )
+    try waitForRelayKitSemantic(
+        context: context,
+        identifier: "provider-upstream-protocol-selector",
+        expected: "OpenAI Responses"
+    )
+
+    let saveSelector = relayKitIdentifierSelector("provider-form-save", roles: buttonRoles, pressable: true)
+    try waitForUniqueSelector(context: context, selector: saveSelector)
+    try performVerifiedPress(context: context, selector: saveSelector)
+    try waitForUniqueSelector(
+        context: context,
+        selector: relayKitIdentifierSelector(
+            "provider-\(relayKitProviderID(provider.name))",
+            roles: buttonRoles,
+            pressable: true
+        )
+    )
+    return .success(
+        command: "relaykit-provider-configure",
+        windowVerified: true,
+        candidateCount: 1,
+        actionCount: 10
+    )
+}
+
+private func executeRelayKitProviderVerify(options: [String: String]) throws -> DriverReport {
+    let provider = try validatedRelayKitProviderOptions(options, requireSyntheticKey: false)
+    let context = try makeContext(options: options, expectedBundleIdentifier: relayKitBundleIdentifier)
+    let buttonRoles = Set([kAXButtonRole as String])
+    try performVerifiedPress(
+        context: context,
+        selector: relayKitIdentifierSelector("tab-connect", roles: buttonRoles, pressable: true)
+    )
+    let providerRow = relayKitIdentifierSelector(
+        "provider-\(relayKitProviderID(provider.name))",
+        roles: buttonRoles,
+        pressable: true
+    )
+    try waitForUniqueSelector(context: context, selector: providerRow)
+    try performVerifiedPress(context: context, selector: providerRow)
+
+    try waitForRelayKitValue(
+        context: context,
+        identifier: "provider-provider-name-field",
+        expected: provider.name
+    )
+    try waitForRelayKitValue(
+        context: context,
+        identifier: "provider-api-base-url-field",
+        expected: provider.baseURL
+    )
+    try waitForRelayKitValue(
+        context: context,
+        identifier: "provider-model-id-field",
+        expected: provider.modelID
+    )
+    try waitForRelayKitSemantic(
+        context: context,
+        identifier: "provider-upstream-protocol-selector",
+        expected: "OpenAI Responses"
+    )
+    try waitForUniqueSelector(
+        context: context,
+        selector: relayKitIdentifierSelector("provider-saved-key-state")
+    )
+    return .success(
+        command: "relaykit-provider-verify",
+        windowVerified: true,
+        candidateCount: 1,
+        actionCount: 2
+    )
+}
+
+private func executeRelayKitGatewayStart(options: [String: String]) throws -> DriverReport {
+    let context = try makeContext(options: options, expectedBundleIdentifier: relayKitBundleIdentifier)
+    let buttonRoles = Set([kAXButtonRole as String])
+    try performVerifiedPress(
+        context: context,
+        selector: relayKitIdentifierSelector("tab-settings", roles: buttonRoles, pressable: true)
+    )
+    let gatewayStart = relayKitIdentifierSelector("gateway-start", roles: buttonRoles, pressable: true)
+    try waitForUniqueSelector(context: context, selector: gatewayStart)
+    try performVerifiedPress(context: context, selector: gatewayStart)
+    return .success(
+        command: "relaykit-gateway-start",
+        windowVerified: true,
+        candidateCount: 1,
+        actionCount: 2
+    )
+}
+
 private func syntheticRecord(_ value: String) -> SemanticRecord {
     SemanticRecord(
         role: kAXPopUpButtonRole as String,
@@ -1318,6 +1622,12 @@ private func execute(_ parsed: ParsedArguments) throws -> DriverReport {
         return try executePrepare(options: parsed.options)
     case .submit:
         return try executeSubmit(options: parsed.options)
+    case .relayKitProviderConfigure:
+        return try executeRelayKitProviderConfigure(options: parsed.options)
+    case .relayKitProviderVerify:
+        return try executeRelayKitProviderVerify(options: parsed.options)
+    case .relayKitGatewayStart:
+        return try executeRelayKitGatewayStart(options: parsed.options)
     case .selfTest:
         return try executeSelfTest(options: parsed.options)
     }

@@ -54,6 +54,14 @@ Also run the scans listed in `docs/public-boundary-checklist.md`.
 
 ## RC1 Public Proof Handoff
 
+### Native Responses Chain Wave 2 checkpoint
+
+Wave 1 focused contracts passed. Wave 2 now has checked-in non-live contracts for the redacted Responses fixture, exact RelayKit AX provider setup/reopen/Gateway actions, the App-owned-Gateway `rc1_native_responses_three_stage` Desktop profile, and the immutable phase-B manifest with negative branches. This is an implementation/focused-validation checkpoint only: this lane did not build a package, launch RelayKit App or Codex Desktop, write `dist/`, send live requests, or produce a fresh phase-B PASS.
+
+The deferred `relaykit_test` run must bind one current App zip and extracted App to an initially empty isolated provider destination, save the provider through exact AX with `api_format=openai_responses` and a Keychain reference only, relaunch and verify restored UI state, start the bundled Gateway through the UI, then complete A/B/C once each through isolated Desktop. Acceptance additionally requires Desktop WebSocket usage, Gateway SSE fixture events, the exact `printf '<marker>\n'; pwd` call and `function_call_output`, process-bound screenshot evidence, empty `failed_events`, and matching run ids and hashes in the manifest. Independent `relaykit_cr` follows that Test result.
+
+Do not rewrite historical proof artifacts. Any prior `observation_failed_*` record remains failed and is explicitly ineligible for manifest PASS.
+
 The RC1 public-proof final matrix passed in a fresh `relaykit_test` lane, and an independent `relaykit_cr` review passed. The visual review type was `independent_visual_review`; `automated_classifier=false` was preserved and was not relabeled. This accepts the public-proof evidence for the local ad-hoc RC1 candidate only. Planner completion still requires a final release inspection of the current artifact.
 
 The accepted unique matrix used no paid or real-provider request and was selected with:

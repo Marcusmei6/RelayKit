@@ -82,6 +82,9 @@ run_failure invalid_arguments \
   "${binary}" submit --pid 1 --window-identity "${tmp_dir}/window.json" \
   --model-label "Official GPT-5.5" --catalog-labels-file "${tmp_dir}/catalog.json"
 run_failure invalid_command "${binary}" self-test --scenario exact
+run_failure invalid_arguments "${binary}" relaykit-provider-configure --pid 1 --window-identity "${tmp_dir}/window.json"
+run_failure invalid_arguments "${binary}" relaykit-provider-verify --pid 1 --window-identity "${tmp_dir}/window.json"
+run_failure invalid_arguments "${binary}" relaykit-gateway-start --pid 1
 
 self_test=(env RELAYKIT_AX_DRIVER_SELF_TEST=1 "${binary}" self-test)
 
@@ -217,11 +220,24 @@ grep -Fq '"\n随心输入"' "${SOURCE}" ||
 grep -Fq 'actual == expected.replacingOccurrences(of: "\n", with: " ")' "${SOURCE}" ||
   fail "multiline composer readback must allow only Chromium's one-for-one LF flattening"
 
-submit_body="$(sed -n '/private func executeSubmit/,/private func syntheticRecord/p' "${SOURCE}")"
+submit_body="$(sed -n '/private func executeSubmit/,/private func relayKitIdentifierSelector/p' "${SOURCE}")"
 test "$(rg -c 'waitForUniqueApplicationOverlaySelector' <<<"${submit_body}")" -eq 2 ||
   fail "only the two native model-menu selectors may use the application overlay"
 test "$(rg -c 'applicationOverlayNode' <<<"${submit_body}")" -eq 2 ||
   fail "native model-menu presses must resolve exact same-PID overlay nodes"
+
+for relaykit_command in relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start; do
+  rg -Fq "${relaykit_command}" "${SOURCE}" ||
+    fail "driver is missing concrete RelayKit action ${relaykit_command}"
+done
+rg -Fq 'dev.relaykit.app' "${SOURCE}" || fail "RelayKit AX actions must bind the exact App bundle identity"
+rg -Fq 'provider-provider-name-field' "${SOURCE}" || fail "provider setup must use the exact name field identifier"
+rg -Fq 'provider-api-base-url-field' "${SOURCE}" || fail "provider setup must use the exact URL field identifier"
+rg -Fq 'api-key-new-input-field' "${SOURCE}" || fail "provider setup must use the exact key field identifier"
+rg -Fq 'provider-model-id-field' "${SOURCE}" || fail "provider setup must use the exact model field identifier"
+rg -Fq 'provider-upstream-protocol-option-openai_responses' "${SOURCE}" || fail "provider setup must select the exact Responses option"
+rg -Fq 'provider-saved-key-state' "${SOURCE}" || fail "relaunch verification must require the saved-key UI state"
+rg -Fq 'gateway-start' "${SOURCE}" || fail "gateway start must use the exact App control"
 
 for required_source_text in \
   'performVerifiedPress' \

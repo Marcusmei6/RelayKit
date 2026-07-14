@@ -263,8 +263,133 @@ func expectProviderDraftWriterWithResponsesProtocol() throws {
           added["api_format"] as? String == "openai_responses",
           let credentialRef = added["credential_ref"] as? [String: Any],
           credentialRef["kind"] as? String == "keychain",
-          credentialRef["value"] as? String == "relaykit.validation.responses" else {
+          credentialRef["value"] as? String == "relaykit.validation.responses",
+          Set(credentialRef.keys) == ["kind", "value", "header"] else {
         fatalError("Responses draft did not preserve public configuration fields: \(json)")
+    }
+
+    let reopened = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: json))
+    guard let reopenedRoot = reopened as? [String: Any],
+          let reopenedProvider = (reopenedRoot["providers"] as? [[String: Any]])?.last,
+          reopenedProvider["api_format"] as? String == "openai_responses",
+          let reopenedReference = reopenedProvider["credential_ref"] as? [String: Any],
+          reopenedReference["kind"] as? String == "keychain",
+          reopenedReference["value"] as? String == "relaykit.validation.responses" else {
+        fatalError("Responses draft did not preserve its protocol and Keychain reference after reopen")
+    }
+}
+
+func expectProviderTestRequestContract() throws {
+    let request = ProviderTestRequest(providerID: "responses-provider", modelID: "responses/model")
+    let data = try JSONEncoder().encode(request)
+    let text = String(data: data, encoding: .utf8) ?? ""
+    guard let body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          Set(body.keys) == ["provider_id", "model_id"],
+          body["provider_id"] as? String == "responses-provider",
+          body["model_id"] as? String == "responses/model" else {
+        fatalError("provider-test request schema must contain only provider_id and model_id: \(text)")
+    }
+    for forbidden in ["token", "key", "url", "body", "authorization", "input", "max_output_tokens"] {
+        if text.localizedCaseInsensitiveContains(forbidden) {
+            fatalError("provider-test request leaked forbidden field \(forbidden): \(text)")
+        }
+    }
+
+    let response = try JSONDecoder().decode(
+        ProviderTestResponse.self,
+        from: Data(#"{"provider_id":"responses-provider","model_id":"responses/model","status":"ok"}"#.utf8)
+    )
+    if response.providerID != "responses-provider" ||
+        response.modelID != "responses/model" ||
+        response.status != .ok ||
+        response.connectionKind != .connected ||
+        response.error != nil {
+        fatalError("provider-test sanitized response did not decode as expected: \(response)")
+    }
+}
+
+func expectProviderTestEnumMapping() throws {
+    let cases: [(String, ProviderTestConnectionKind)] = [
+        ("auth_failed", .authFailed),
+        ("network_failed", .networkFailed),
+        ("responses_unavailable", .responsesUnavailable),
+        ("unknown_model", .responsesUnavailable),
+        ("unsupported_provider_format", .responsesUnavailable),
+    ]
+    for (errorType, expectedKind) in cases {
+        let data = Data(#"{"provider_id":"responses-provider","model_id":"responses/model","status":"failed","error":{"type":"\#(errorType)"}}"#.utf8)
+        let response = try JSONDecoder().decode(ProviderTestResponse.self, from: data)
+        if response.status != .failed || response.error?.type.rawValue != errorType || response.connectionKind != expectedKind {
+            fatalError("provider-test enum mapping failed for \(errorType): \(response)")
+        }
+    }
+}
+
+func expectProviderTestSaveActionIsIdempotent() {
+    let providerID = "responses-provider"
+    var persistedProviderIDs = Set<String>()
+    let first = ProviderTestSaveAction.resolve(providerID: providerID, persistedProviderIDs: persistedProviderIDs)
+    if first != .add {
+        fatalError("first add/import provider test save must add: \(first)")
+    }
+    persistedProviderIDs.insert(providerID)
+    let second = ProviderTestSaveAction.resolve(providerID: providerID, persistedProviderIDs: persistedProviderIDs)
+    if second != .update(originalProviderID: providerID) {
+        fatalError("subsequent add/import provider test save must update the persisted provider: \(second)")
+    }
+}
+
+func expectProviderTestSinglePostLifecycle() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+
+    guard let responseStart = content.range(of: "private func testSavedResponsesConnection() async"),
+          let responseEnd = content.range(of: "private func saveForConnectionTest() -> Bool", range: responseStart.upperBound..<content.endIndex) else {
+        fatalError("Responses connection-test function boundaries are missing")
+    }
+    let responseBody = content[responseStart.lowerBound..<responseEnd.lowerBound]
+    if responseBody.contains("refreshModels()") {
+        fatalError("typed provider-test success must not refresh models and trigger a second Responses POST")
+    }
+
+    guard let modelStart = appModel.range(of: "func testSavedProviderConnection(providerID: String, modelID: String) async throws"),
+          let modelEnd = appModel.range(of: "func providerHealth", range: modelStart.upperBound..<appModel.endIndex) else {
+        fatalError("AppModel provider-test function boundaries are missing")
+    }
+    let modelBody = appModel[modelStart.lowerBound..<modelEnd.lowerBound]
+    if modelBody.contains("restartGateway()") || !modelBody.contains("if !gateway.isRunning") {
+        fatalError("provider test must reuse a running gateway and start only when stopped")
+    }
+    if !content.contains("ProviderTestSaveAction.resolve") {
+        fatalError("add/import provider tests must use the idempotent save decision")
+    }
+}
+
+func expectResponsesConnectionUsesGatewayOnly() throws {
+    let sourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift")
+    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    for forbidden in ["probeResponses(", "connectionProbeAPIKey(", "connectionProbeModel(", "RelayKit connection probe", "max_output_tokens"] {
+        if source.contains(forbidden) {
+            fatalError("Responses connection test must not retain direct upstream probe helper: \(forbidden)")
+        }
+    }
+    for required in [
+        "model.testSavedProviderConnection",
+        "provider-upstream-protocol-selector",
+        "provider-upstream-protocol-option-\\(option.id)",
+        "provider-form-save",
+        "provider-\\(provider.id)",
+        "provider-edit-\\(editingProvider.id)",
+        "provider-saved-key-state",
+        "provider-provider-name-field",
+        "provider-api-base-url-field",
+        "provider-model-id-field",
+    ] {
+        if !source.contains(required) {
+            fatalError("provider harness accessibility identifier or local gateway connection path is missing: \(required)")
+        }
     }
 }
 
@@ -782,6 +907,11 @@ try expectProviderDraftWriterWithPrototypeMetadata()
 try expectProviderDraftWriterNormalizesPrefixedModels()
 try expectProviderDraftWriterWithKeychainReference()
 try expectProviderDraftWriterWithResponsesProtocol()
+try expectProviderTestRequestContract()
+try expectProviderTestEnumMapping()
+expectProviderTestSaveActionIsIdempotent()
+try expectProviderTestSinglePostLifecycle()
+try expectResponsesConnectionUsesGatewayOnly()
 expectProviderDraftRejectsCredentialValue()
 try expectLocalCatalogSummary()
 try expectCredentialRefContract()

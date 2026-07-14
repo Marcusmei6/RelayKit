@@ -1,4 +1,19 @@
 import Foundation
+import RelayKitCore
+
+enum GatewayClientError: LocalizedError {
+    case badResponse
+    case gatewayUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .badResponse:
+            "RelayKit gateway returned an invalid response"
+        case .gatewayUnavailable:
+            "RelayKit gateway did not start"
+        }
+    }
+}
 
 struct GatewayClient {
     var baseURL = URL(string: "http://127.0.0.1:19777")!
@@ -21,5 +36,26 @@ struct GatewayClient {
             throw URLError(.badServerResponse)
         }
         return try JSONDecoder().decode(ModelListResponse.self, from: data)
+    }
+
+    func testProvider(providerID: String, modelID: String) async throws -> ProviderTestResponse {
+        var request = URLRequest(url: baseURL.appending(path: "_relaykit/provider-test"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(
+            ProviderTestRequest(providerID: providerID, modelID: modelID)
+        )
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw GatewayClientError.badResponse
+        }
+        if let result = try? JSONDecoder().decode(ProviderTestResponse.self, from: data) {
+            return result
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        throw GatewayClientError.badResponse
     }
 }

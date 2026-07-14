@@ -175,6 +175,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func testSavedProviderConnection(providerID: String, modelID: String) async throws -> ProviderTestResponse {
+        if !gateway.isRunning {
+            startGateway()
+        }
+        guard gateway.isRunning else {
+            throw GatewayClientError.gatewayUnavailable
+        }
+        return try await client.testProvider(providerID: providerID, modelID: modelID)
+    }
+
     func providerHealth(for provider: ConfiguredProviderEntry) -> ProviderHealthSnapshot {
         let savedIDs = Set(provider.models.map(\.id))
         let available = models.filter { savedIDs.contains($0.id) }.count

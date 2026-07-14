@@ -100,7 +100,19 @@ RELAYKIT_RC1_APP_BUNDLE=dist/verify-release/RelayKitApp.app \
   ./scripts/rc1-helper-lifecycle-proof.sh
 ```
 
-The native proof launches the App first, starts its bundled helper through the App UI, and routes one request to a loopback-only fake `openai_responses` upstream. The lifecycle proof starts the same App-owned helper, kills the App without graceful cleanup, and requires the helper to exit and release `19777`. Neither proof reads real credentials, mutates global Codex files, controls LaunchAgents, or changes the shared `18787` listener.
+The Wave 2 native proof starts an ordinary extracted App against an empty isolated provider destination, creates an `openai_responses` provider through exact PID/window-bound AX, verifies a Keychain-reference-only saved config, relaunches the same App, verifies restored protocol/URL/model/saved-key state, and starts the bundled Gateway through the UI. It then attaches an isolated Codex Desktop to that App-owned Gateway for exactly three one-submit stages: plain text, native Markdown, and an exact `printf '<marker>\n'; pwd` tool roundtrip. The loopback fixture supports models, non-streaming Responses, SSE, Markdown, `function_call`, and `function_call_output`; its log contains only run id, method, path, model-rewrite/auth booleans, and event types.
+
+Wave 1 focused contracts passed. Wave 2 harness, fixture, manifest, and negative-branch contracts are implemented, but this implementation lane does not claim a fresh App/Desktop/package E2E. The live proof and immutable phase-B manifest must be produced later by `relaykit_test`; historical `observation_failed_*` evidence remains failed and cannot satisfy the manifest. The lifecycle proof remains separate: it starts the same App-owned helper, kills the App without graceful cleanup, and requires the helper to exit and release `19777`. Neither proof reads real credentials, mutates global Codex files, controls LaunchAgents, or changes the shared `18787` listener.
+
+Focused non-live contracts are:
+
+```bash
+./scripts/codex-desktop-ax-driver-test.sh
+./scripts/codex-desktop-manual-proof-test.sh
+./scripts/rc1-native-responses-proof-fixture-test.sh
+./scripts/rc1-native-responses-manifest-test.sh
+./scripts/rc1-native-responses-proof-test.sh
+```
 
 ## Local Beta Dogfood
 

@@ -108,6 +108,10 @@ type nativeResponsesFailure struct {
 }
 
 func (s *Server) nativeResponsesUpstream(ctx context.Context, raw map[string]json.RawMessage, provider config.ProviderProfile, model config.Model, forceStream bool) (*http.Response, int, *nativeResponsesFailure) {
+	return s.nativeResponsesUpstreamWithAuth(ctx, raw, provider, model, forceStream, s.applyProviderAuth)
+}
+
+func (s *Server) nativeResponsesUpstreamWithAuth(ctx context.Context, raw map[string]json.RawMessage, provider config.ProviderProfile, model config.Model, forceStream bool, applyAuth func(*http.Request, config.ProviderProfile) error) (*http.Response, int, *nativeResponsesFailure) {
 	payload, err := nativeResponsesRequestBody(raw, upstreamModelName(model), forceStream)
 	if err != nil {
 		return nil, http.StatusBadGateway, &nativeResponsesFailure{kind: "protocol_error", message: "invalid Responses request"}
@@ -126,7 +130,7 @@ func (s *Server) nativeResponsesUpstream(ctx context.Context, raw map[string]jso
 	} else {
 		req.Header.Set("Accept", "application/json")
 	}
-	if err := s.applyProviderAuth(req, provider); err != nil {
+	if err := applyAuth(req, provider); err != nil {
 		return nil, http.StatusBadGateway, &nativeResponsesFailure{kind: "upstream_auth_error", message: "provider credential unavailable"}
 	}
 	resp, err := s.client.Do(req)
@@ -172,6 +176,22 @@ func nativeResponsesHTTPFailure(status int) (int, string, string) {
 	}
 }
 
+func (s *Server) applyProviderSnapshotAuth(req *http.Request, provider config.ProviderProfile) error {
+	reference := provider.AuthEnv
+	if provider.CredentialRef != nil {
+		reference = provider.CredentialRef.Value
+	}
+	if reference == "" {
+		return nil
+	}
+	token := strings.TrimSpace(s.keychainCredentials[reference])
+	if token == "" {
+		return fmt.Errorf("provider credential unavailable from RelayKit App")
+	}
+	setAuthHeader(req, provider, token)
+	return nil
+}
+
 type nativeResponsesResponse struct {
 	body   []byte
 	id     string
@@ -187,12 +207,8 @@ func rewriteNativeResponsesResponse(reader io.Reader, publicModel string) (nativ
 	if len(body) > maximumNativeResponsesResponseBytes {
 		return nativeResponsesResponse{}, fmt.Errorf("native response exceeds size limit")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	var response map[string]json.RawMessage
-	if err := decoder.Decode(&response); err != nil {
-		return nativeResponsesResponse{}, err
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
+	response, err := strictJSONObject(body)
+	if err != nil {
 		return nativeResponsesResponse{}, err
 	}
 	id, status, err := validateNativeResponseIdentity(response, "")
