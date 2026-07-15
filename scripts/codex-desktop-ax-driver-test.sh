@@ -243,6 +243,24 @@ relaykit_empty_windows_single_popover_metadata='{
   "semantic_target_ids": [2,3],
   "expected_semantic_target_count": 1
 }'
+
+relaykit_no_value_single_popover_metadata="$(
+  jq -c '.ax_windows_status="noValue" | .ax_windows_value_present=false' \
+    <<<"${relaykit_empty_windows_single_popover_metadata}"
+)"
+for relaykit_command in relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start; do
+  case "${relaykit_command}" in
+    relaykit-provider-configure) relaykit_no_value_options=("${relaykit_configure_options[@]}") ;;
+    relaykit-provider-verify) relaykit_no_value_options=("${relaykit_verify_options[@]}") ;;
+    relaykit-gateway-start) relaykit_no_value_options=() ;;
+  esac
+  run_bound_window_success \
+    "${relaykit_command}-no-value-single-popover" "${relaykit_command}" 4203 53 \
+    ${relaykit_no_value_options[@]+"${relaykit_no_value_options[@]}"} <<<"${relaykit_no_value_single_popover_metadata}"
+  jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+    fail "${relaykit_command} did not normalize noValue into one RelayKit popover"
+done
+
 for relaykit_command in relaykit-provider-configure relaykit-provider-protocol-probe relaykit-provider-verify relaykit-gateway-start; do
   case "${relaykit_command}" in
     relaykit-provider-configure|relaykit-provider-protocol-probe)
@@ -263,6 +281,72 @@ for relaykit_command in relaykit-provider-configure relaykit-provider-protocol-p
   esac
   jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
     fail "${relaykit_command} did not bind exactly one RelayKit popover"
+done
+
+for popover_count in zero multiple; do
+  if [[ "${popover_count}" == "zero" ]]; then
+    no_value_nodes='[{"id":0,"role":"AXApplication","children":[1]},{"id":1,"role":"AXGroup","children":[]}]'
+    expected_popover_count=0
+  else
+    no_value_nodes='[{"id":0,"role":"AXApplication","children":[1,2]},{"id":1,"role":"AXPopover","children":[]},{"id":2,"role":"AXPopover","children":[]}]'
+    expected_popover_count=2
+  fi
+  run_bound_window_failure window_selector_not_unique \
+    "relaykit-no-value-${popover_count}-popovers" relaykit-gateway-start 4203 53 <<JSON
+{"current_identity":{"pid":4203,"window_id":53},"process_running":true,
+"bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+"windows":[{"owner_pid":4203,"window_id":53,"layer":25}],"ax_windows_status":"noValue",
+"ax_windows_value_present":false,"ax_window_numbers":[],"ax_window_node_ids":[],"root_id":0,"nodes":${no_value_nodes}}
+JSON
+  jq -e --argjson count "${expected_popover_count}" '.candidate_count == $count' "${last_stdout}" >/dev/null ||
+    fail "RelayKit noValue ${popover_count} popovers did not report the observed count"
+done
+
+run_bound_window_failure window_selector_not_unique desktop-no-value-no-popover-fallback inspect 4302 62 <<'JSON'
+{"current_identity":{"pid":4302,"window_id":62},"process_running":true,
+"bundle_identifier":"com.openai.codex","frontmost_pid":4302,"accessibility_trusted":true,
+"windows":[{"owner_pid":4302,"window_id":62,"layer":0}],"ax_windows_status":"noValue",
+"ax_windows_value_present":false,"ax_window_numbers":[],"ax_window_node_ids":[],"root_id":0,
+"nodes":[{"id":0,"role":"AXApplication","children":[1]},{"id":1,"role":"AXPopover","children":[]}]}
+JSON
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+  fail "Desktop noValue incorrectly used the RelayKit popover fallback"
+
+for application_mode in relaykit desktop; do
+  if [[ "${application_mode}" == "relaykit" ]]; then
+    status_command=relaykit-gateway-start
+    status_pid=4208
+    status_window_id=58
+    status_bundle=dev.relaykit.app
+    status_frontmost=null
+    status_layer=25
+  else
+    status_command=inspect
+    status_pid=4308
+    status_window_id=68
+    status_bundle=com.openai.codex
+    status_frontmost=4308
+    status_layer=0
+  fi
+  for status_case in success-malformed cannotComplete attributeUnsupported invalidUIElement failure noValue-array noValue-malformed; do
+    status_name="${status_case%%-*}"
+    case "${status_case}" in
+      success-malformed|noValue-malformed) status_value_present=true; status_malformed=true ;;
+      noValue-array) status_value_present=true; status_malformed=false ;;
+      *) status_value_present=false; status_malformed=false ;;
+    esac
+    run_bound_window_failure window_selector_not_unique \
+      "${application_mode}-ax-windows-${status_case}" "${status_command}" "${status_pid}" "${status_window_id}" <<JSON
+{"current_identity":{"pid":${status_pid},"window_id":${status_window_id}},"process_running":true,
+"bundle_identifier":"${status_bundle}","frontmost_pid":${status_frontmost},"accessibility_trusted":true,
+"windows":[{"owner_pid":${status_pid},"window_id":${status_window_id},"layer":${status_layer}}],
+"ax_windows_status":"${status_name}","ax_windows_value_present":${status_value_present},
+"ax_windows_malformed":${status_malformed},"ax_window_numbers":[],
+"ax_window_node_ids":[],"root_id":0,"nodes":[{"id":0,"role":"AXApplication","children":[]}]}
+JSON
+    jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+      fail "${application_mode} ${status_case} AXWindows did not fail closed"
+  done
 done
 
 for children_failure_location in root below-popover sibling-after-popover; do
@@ -980,12 +1064,16 @@ test "$(rg -c 'resolveBoundActionRoot' <<<"${bound_window_test_body}")" -eq 1 ||
 if rg -Fq 'verifyWindowServerIdentity' <<<"${bound_window_test_body}"; then
   fail "dynamic tests must not assemble a partial WindowServer-only resolver"
 fi
+test "$(rg -c 'normalizedAXWindows' <<<"${bound_window_test_body}")" -eq 1 ||
+  fail "dynamic tests must use the production AXWindows normalizer exactly once"
 
 bound_window_production_body="$(sed -n '/private func verifyBoundWindow/,/private struct SemanticRecord/p' "${SOURCE}")"
 grep -Fq 'NSWorkspace.shared.frontmostApplication?.processIdentifier' <<<"${bound_window_production_body}" ||
   fail "normal production resolution must use the real NSWorkspace frontmost application"
 grep -Fq 'resolveBoundActionRoot' <<<"${bound_window_production_body}" ||
   fail "normal production resolution must enter the shared full resolver"
+grep -Fq 'normalizedAXWindows' <<<"${bound_window_production_body}" ||
+  fail "normal production resolution must use the shared AXWindows normalizer"
 
 relaykit_binding_body="$(sed -n '/private func uniqueRelayKitPopoverRoot/,/private func verifyBoundWindow/p' "${SOURCE}")"
 grep -Fq 'maximumRelayKitBindingDepth = 12' "${SOURCE}" ||

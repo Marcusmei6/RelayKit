@@ -722,6 +722,18 @@ private func uniqueRelayKitPopoverRoot(applicationRoot: AXUIElement) throws -> A
     )
 }
 
+private func normalizedAXWindows<Node>(status: AXError, valuePresent: Bool, roots: [Node]?, applicationMode: DriverApplicationMode) -> (available: Bool, roots: [Node]) {
+    switch status {
+    case .success:
+        guard valuePresent, let roots else { return (false, []) }
+        return (true, roots)
+    case .noValue where !valuePresent && roots == nil && applicationMode == .relayKit:
+        return (true, [])
+    default:
+        return (false, [])
+    }
+}
+
 private func resolveBoundActionRoot<Node>(
     context: DriverContext,
     currentIdentity: WindowIdentity,
@@ -789,8 +801,12 @@ private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
                 kAXWindowsAttribute as CFString,
                 &value
             )
-            let windows = value as? [AXUIElement]
-            return (status == .success && windows != nil, windows ?? [])
+            return normalizedAXWindows(
+                status: status,
+                valuePresent: value != nil,
+                roots: value as? [AXUIElement],
+                applicationMode: context.applicationMode
+            )
         },
         axWindowNumber: axWindowNumber,
         relayKitPopoverRoot: {
@@ -2652,6 +2668,8 @@ private struct BoundWindowTestInput: Decodable {
     let frontmostPID: pid_t?
     let accessibilityTrusted: Bool
     let axWindowNumbers: [UInt32?]
+    let axWindowsStatus: String?
+    let axWindowsValuePresent: Bool?
     let axWindowsAvailable: Bool?
     let axWindowsMalformed: Bool?
     let axWindowNodeIDs: [Int]?
@@ -2669,6 +2687,8 @@ private struct BoundWindowTestInput: Decodable {
         case frontmostPID = "frontmost_pid"
         case accessibilityTrusted = "accessibility_trusted"
         case axWindowNumbers = "ax_window_numbers"
+        case axWindowsStatus = "ax_windows_status"
+        case axWindowsValuePresent = "ax_windows_value_present"
         case axWindowsAvailable = "ax_windows_available"
         case axWindowsMalformed = "ax_windows_malformed"
         case axWindowNodeIDs = "ax_window_node_ids"
@@ -2760,6 +2780,14 @@ private func executeBoundWindowTest(
     guard axWindowRoots.count == windowNodeIDs.count else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
+    let legacyAXWindowsAvailable = input.axWindowsAvailable ?? true
+    guard let axWindowsStatus = boundActionRootTestAXError(
+        input.axWindowsStatus ?? (legacyAXWindowsAvailable ? "success" : "failure")
+    ) else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let axWindowsValuePresent = input.axWindowsValuePresent ?? true
+    let decodedAXWindowRoots = (input.axWindowsMalformed ?? false) || !axWindowsValuePresent ? nil : axWindowRoots
     let applicationRoot: BoundActionRootTestNode
     if let rootID = input.rootID {
         guard let root = nodesByID[rootID] else {
@@ -2784,9 +2812,11 @@ private func executeBoundWindowTest(
         frontmostPID: { input.frontmostPID },
         accessibilityTrusted: { input.accessibilityTrusted },
         axWindows: {
-            (
-                (input.axWindowsAvailable ?? true) && !(input.axWindowsMalformed ?? false),
-                axWindowRoots
+            normalizedAXWindows(
+                status: axWindowsStatus,
+                valuePresent: axWindowsValuePresent,
+                roots: decodedAXWindowRoots,
+                applicationMode: context.applicationMode
             )
         },
         axWindowNumber: { node in
