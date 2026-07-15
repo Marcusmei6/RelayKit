@@ -213,7 +213,8 @@ APPLESCRIPT
   printf '%s\t%s\n' "${menu_bar_count}" "${item_count}"
 }
 
-open_exact_app_popover() {
+open_exact_nonactivating_menu_bar_panel() {
+  # The exact status item opens RelayKit's canonical nonactivating NSPanel menu-bar panel.
   local attempt state read_status=0 menu_bar_count item_count ready=false
   for ((attempt = 1; attempt <= STATUS_ITEM_READINESS_ATTEMPTS; attempt++)); do
     read_status=0
@@ -466,7 +467,7 @@ launch_ordinary_app() {
     sleep 0.1
   done
   [[ -n "${APP_PID}" ]] || return 1
-  open_exact_app_popover
+  open_exact_nonactivating_menu_bar_panel
   for _ in {1..100}; do
     if write_exact_app_window_identity "${identity_path}" "${diagnostic_path}" 2>/dev/null; then
       activate_exact_app
@@ -535,7 +536,7 @@ run_window_identity_repro() {
   done
   [[ -n "${APP_PID}" ]] || fail "window repro App did not expose an exact PID"
   launched_pid="${APP_PID}"
-  open_exact_app_popover || fail "window repro did not expose one status item"
+  open_exact_nonactivating_menu_bar_panel || fail "window repro did not open the exact nonactivating menu-bar panel"
   for _ in {1..100}; do
     if write_exact_app_window_identity "${identity_path}" "${diagnostic_path}" 2>/dev/null; then
       break
@@ -595,8 +596,15 @@ ax_tree_is_allowlisted() {
     (keys | sort) == [
       "ax_windows_available","ax_windows_count","depth_counts",
       "matching_window_count","nodes","numbered_window_count",
-      "role_counts","status","truncated"
-    ] and .status == "ok" and
+      "role_counts","semantic_identifier_count","status","truncated"
+    ] and .status == "ok" and .ax_windows_available == true and
+    .ax_windows_count >= 1 and .numbered_window_count == 1 and
+    .matching_window_count == 1 and .semantic_identifier_count >= 1 and
+    .truncated == false and (.nodes | length >= 1) and
+    .nodes[0].parent == null and .nodes[0].depth == 0 and
+    .nodes[0].role == "AXWindow" and .nodes[0].window_number_present == true and
+    .nodes[0].matches_expected_window == true and
+    ([.role_counts[] | select(.role == "AXWindow") | .count] == [1]) and
     (.nodes | length <= 512) and ([.nodes[].depth] | max // 0) <= 12 and
     (.nodes | all(.[];
       (keys | sort) == [
@@ -606,6 +614,25 @@ ax_tree_is_allowlisted() {
     (.role_counts | all(.[]; (keys | sort) == ["count","role"])) and
     (.depth_counts | all(.[]; (keys | sort) == ["count","depth"]))
   ' "$1" >/dev/null 2>&1
+}
+
+ax_driver_report_is_success() {
+  jq -e '
+    .command == "relaykit-ax-inspect" and .status == "ok" and .code == "ok" and
+    .window_verified == true
+  ' "$1" >/dev/null 2>&1
+}
+
+ax_window_identity_is_exact() {
+  local identity="$1" diagnostic="$2" expected_pid="$3"
+  jq -e --argjson expected_pid "${expected_pid}" --slurpfile identity "${identity}" '
+    .status == "selected" and .pid == $expected_pid and
+    .largest_candidate_count == 1 and
+    ($identity | length == 1) and $identity[0].pid == $expected_pid and
+    (.selected_window_id as $selected |
+      $identity[0].window_id == $selected and
+      ([.candidates[] | select(.window_id == $selected)] | length) == 1)
+  ' "${diagnostic}" >/dev/null 2>&1
 }
 
 ax_inspect_artifact_hash() {
@@ -835,9 +862,14 @@ ax_inspect_finalize() {
   driver_code="$(jq -r '.code' "${stable_driver_report}")"
   driver_command="$(jq -r '.command' "${stable_driver_report}")"
   driver_candidate_count="$(jq -c 'if has("candidate_count") then .candidate_count else null end' "${stable_driver_report}")"
-  if [[ "${final_exit}" -eq 0 ]]; then
+  if [[ "${final_exit}" -eq 0 &&
+        "${driver_status}" == "ok" && "${driver_code}" == "ok" &&
+        "${tree_status}" == "created" && "${AX_INSPECT_EXACT_PID_COUNT}" -eq 1 ]]; then
     result_status=passed
     AX_INSPECT_FAILURE=none
+  elif [[ "${final_exit}" -eq 0 ]]; then
+    final_exit=4
+    AX_INSPECT_FAILURE=ax_binding_not_exact
   fi
   jq -n \
     --arg status "${result_status}" \
@@ -878,6 +910,8 @@ ax_inspect_finalize() {
   fi
   jq -n \
     --arg inspect_out "${AX_INSPECT_OUT}" \
+    --arg status "${result_status}" \
+    --arg failure "${AX_INSPECT_FAILURE}" \
     --arg run_metadata_hash "$(ax_inspect_artifact_hash "${AX_INSPECT_OUT}/run-metadata.json")" \
     --arg identity_hash "$(ax_inspect_artifact_hash "${stable_identity}")" \
     --arg window_diagnostic_hash "$(ax_inspect_artifact_hash "${stable_window_diagnostic}")" \
@@ -888,6 +922,8 @@ ax_inspect_finalize() {
     --arg result_hash "$(ax_inspect_artifact_hash "${AX_INSPECT_OUT}/result.json")" '{
       schema_version:1,
       inspect_out:$inspect_out,
+      status:$status,
+      failure:$failure,
       artifacts:[
         {name:"run_metadata",path:"run-metadata.json",status:"created",sha256:$run_metadata_hash},
         {name:"window_identity",path:"window-identity.json",status:"created",sha256:$identity_hash},
@@ -1005,7 +1041,12 @@ run_window_ax_inspect_repro() {
     }' | atomic_write_private "${AX_INSPECT_OUT}/run-metadata.json"
 
   if [[ "${test_mode}" == "true" ]]; then
-    APP_PID=4242
+    if [[ "${RELAYKIT_RC1_AX_INSPECT_TEST_FORCE_DEAD_PID:-false}" == "true" ]]; then
+      APP_PID=2147483647
+    else
+      APP_PID="$$"
+    fi
+    AX_INSPECT_EXACT_PID_COUNT=1
     jq -n --argjson pid "${APP_PID}" '{pid:$pid,window_id:101,width:640,height:480,captured_at:"test"}' |
       atomic_write_private "${identity_path}"
     jq -n --argjson pid "${APP_PID}" '{
@@ -1020,7 +1061,7 @@ run_window_ax_inspect_repro() {
       ax_inspect_finalize "${launch_exit}"
       exit "${AX_INSPECT_FINAL_STATUS}"
     fi
-    open_exact_app_popover || fail "AX inspect repro did not expose one status item"
+    open_exact_nonactivating_menu_bar_panel || fail "AX inspect repro did not open the exact nonactivating menu-bar panel"
     for _ in {1..100}; do
       if write_exact_app_window_identity "${identity_path}" "${window_diagnostic_path}" 2>/dev/null; then
         break
@@ -1046,8 +1087,24 @@ run_window_ax_inspect_repro() {
     ax_inspect_finalize "${driver_exit}"
     exit "${AX_INSPECT_FINAL_STATUS}"
   fi
-  ax_driver_report_is_redacted "${report_temporary}" || fail "AX inspect repro driver stdout was not redacted"
-  ax_tree_is_allowlisted "${diagnostic_output}" || fail "AX inspect repro diagnostic schema was not allowlisted"
+  if ! ax_driver_report_is_redacted "${report_temporary}"; then
+    AX_INSPECT_FAILURE=driver_report_invalid
+    ax_inspect_finalize 4
+    exit "${AX_INSPECT_FINAL_STATUS}"
+  fi
+  if ! ax_driver_report_is_success "${report_temporary}"; then
+    AX_INSPECT_FAILURE=driver_report_failed
+    ax_inspect_finalize 4
+    exit "${AX_INSPECT_FINAL_STATUS}"
+  fi
+  if ! kill -0 "${APP_PID}" 2>/dev/null ||
+     [[ "${AX_INSPECT_EXACT_PID_COUNT}" -ne 1 ]] ||
+     ! ax_window_identity_is_exact "${identity_path}" "${window_diagnostic_path}" "${APP_PID}" ||
+     ! ax_tree_is_allowlisted "${diagnostic_output}"; then
+    AX_INSPECT_FAILURE=ax_binding_not_exact
+    ax_inspect_finalize 4
+    exit "${AX_INSPECT_FINAL_STATUS}"
+  fi
   ax_inspect_finalize 0
   [[ "${AX_INSPECT_FINAL_STATUS}" -eq 0 ]] || exit "${AX_INSPECT_FINAL_STATUS}"
   printf '%s\n' 'RelayKit RC1 AX inspect repro passed'

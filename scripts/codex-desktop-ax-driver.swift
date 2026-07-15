@@ -21,8 +21,12 @@ private let maximumAXDepth = 32
 private let maximumAXNodes = 10_000
 private let maximumAXDiagnosticDepth = 12
 private let maximumAXDiagnosticNodes = 512
-private let maximumRelayKitBindingDepth = 12
-private let maximumRelayKitBindingNodes = 512
+private let maximumRelayKitSemanticDepth = 12
+private let maximumRelayKitSemanticNodes = 512
+private let relayKitWindowSemanticIdentifiers = Set([
+    "provider-add-entry",
+    "official-provider-row",
+])
 private let selectorWaitSeconds: TimeInterval = 3
 private let selectorPollSeconds: TimeInterval = 0.05
 private let requiredPrivatePermissions: mode_t = 0o600
@@ -493,6 +497,8 @@ private func axWindowNumber(_ element: AXUIElement) -> UInt32? {
 
 private struct BoundWindow {
     let window: AXUIElement
+    let axWindowsCount: Int
+    let semanticIdentifierCount: Int
 }
 
 private struct WindowServerMetadata: Decodable {
@@ -630,62 +636,61 @@ private func resolveBoundWindowIndex(
 private struct BoundActionRoot<Node> {
     let root: Node
     let candidateCount: Int
+    let axWindowsCount: Int
+    let semanticIdentifierCount: Int
 }
 
-private func uniqueRelayKitPopoverRoot<Node>(
-    applicationRoot: Node,
-    role: (Node) -> String?,
+private struct RelayKitSemanticBinding {
+    let identifierCount: Int
+    let complete: Bool
+}
+
+private func relayKitSemanticBinding<Node>(
+    root: Node,
+    identifier: (Node) -> String?,
     children: (Node) -> [Node]?,
     identical: (Node, Node) -> Bool
-) throws -> Node {
+) -> RelayKitSemanticBinding {
     var visited: [Node] = []
-    var candidates: [Node] = []
-    var truncated = false
-    var childrenUnavailable = false
+    var identifierCount = 0
+    var complete = true
 
     func append(_ node: Node, depth: Int) {
-        guard depth <= maximumRelayKitBindingDepth,
-              visited.count < maximumRelayKitBindingNodes else {
-            truncated = true
+        guard depth <= maximumRelayKitSemanticDepth,
+              visited.count < maximumRelayKitSemanticNodes else {
+            complete = false
             return
         }
         guard !visited.contains(where: { identical($0, node) }) else {
-            truncated = true
+            complete = false
             return
         }
         visited.append(node)
 
-        if depth > 0, role(node) == "AXPopover" {
-            candidates.append(node)
+        if identifier(node).map({ relayKitWindowSemanticIdentifiers.contains($0) }) == true {
+            identifierCount += 1
         }
         guard let nodeChildren = children(node) else {
-            childrenUnavailable = true
+            complete = false
             return
         }
-        if depth == maximumRelayKitBindingDepth {
+        if depth == maximumRelayKitSemanticDepth {
             if !nodeChildren.isEmpty {
-                truncated = true
+                complete = false
             }
             return
         }
         for child in nodeChildren {
-            guard visited.count < maximumRelayKitBindingNodes else {
-                truncated = true
+            guard visited.count < maximumRelayKitSemanticNodes else {
+                complete = false
                 break
             }
             append(child, depth: depth + 1)
         }
     }
 
-    append(applicationRoot, depth: 0)
-    guard !childrenUnavailable, !truncated, candidates.count == 1 else {
-        throw DriverFailure(
-            "window_selector_not_unique",
-            exitStatus: 4,
-            candidateCount: candidates.count
-        )
-    }
-    return candidates[0]
+    append(root, depth: 0)
+    return RelayKitSemanticBinding(identifierCount: identifierCount, complete: complete)
 }
 
 private func normalizedAXChildren<Node>(
@@ -702,24 +707,34 @@ private func normalizedAXChildren<Node>(
     }
 }
 
-private func uniqueRelayKitPopoverRoot(applicationRoot: AXUIElement) throws -> AXUIElement {
-    try uniqueRelayKitPopoverRoot(
-        applicationRoot: applicationRoot,
-        role: { copyAXString($0, kAXRoleAttribute as CFString) },
-        children: {
-            var value: CFTypeRef?
-            let status = AXUIElementCopyAttributeValue(
-                $0,
-                kAXChildrenAttribute as CFString,
-                &value
-            )
-            return normalizedAXChildren(
-                status: status,
-                children: value as? [AXUIElement]
-            )
-        },
+private func relayKitAXChildren(_ element: AXUIElement) -> [AXUIElement]? {
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(
+        element,
+        kAXChildrenAttribute as CFString,
+        &value
+    )
+    return normalizedAXChildren(
+        status: status,
+        children: value as? [AXUIElement]
+    )
+}
+
+private func relayKitSemanticBinding(root: AXUIElement) -> RelayKitSemanticBinding {
+    relayKitSemanticBinding(
+        root: root,
+        identifier: { copyAXString($0, axIdentifierAttribute) },
+        children: relayKitAXChildren,
         identical: { CFEqual($0, $1) }
     )
+}
+
+private func isExactRelayKitAXWindow(
+    role: String?,
+    windowNumber: UInt32?,
+    expectedWindowID: UInt32
+) -> Bool {
+    role == kAXWindowRole as String && windowNumber == expectedWindowID
 }
 
 private func normalizedAXWindows<Node>(status: AXError, valuePresent: Bool, roots: [Node]?, applicationMode: DriverApplicationMode) -> (available: Bool, roots: [Node]) {
@@ -744,7 +759,8 @@ private func resolveBoundActionRoot<Node>(
     accessibilityTrusted: () -> Bool,
     axWindows: () -> (available: Bool, roots: [Node]),
     axWindowNumber: (Node) -> UInt32?,
-    relayKitPopoverRoot: () throws -> Node
+    axRole: (Node) -> String?,
+    relayKitSemanticBinding: (Node) -> RelayKitSemanticBinding
 ) throws -> BoundActionRoot<Node> {
     let windowServerWindowCount = try verifyApplicationIdentity(
         context: context,
@@ -761,25 +777,53 @@ private func resolveBoundActionRoot<Node>(
         throw DriverFailure("window_selector_not_unique", exitStatus: 4, candidateCount: 0)
     }
     let axWindowRoots = availableAXWindows.roots
-    if !axWindowRoots.isEmpty || context.applicationMode == .desktop {
+    switch context.applicationMode {
+    case .desktop:
         let windowNumbers = axWindowRoots.map(axWindowNumber)
-        if context.applicationMode == .relayKit,
-           !windowNumbers.allSatisfy({ $0 == nil }),
-           windowNumbers.filter({ $0 == context.identity.windowID }).count != 1 {
-            throw DriverFailure(
-                "window_selector_not_unique",
-                exitStatus: 4,
-                candidateCount: axWindowRoots.count
-            )
-        }
         let selectedIndex = try boundWindowIndex(
             windowNumbers: windowNumbers,
             expectedWindowID: context.identity.windowID,
             windowServerWindowCount: windowServerWindowCount
         )
-        return BoundActionRoot(root: axWindowRoots[selectedIndex], candidateCount: axWindowRoots.count)
+        return BoundActionRoot(
+            root: axWindowRoots[selectedIndex],
+            candidateCount: axWindowRoots.count,
+            axWindowsCount: axWindowRoots.count,
+            semanticIdentifierCount: 0
+        )
+    case .relayKit:
+        let exactMatches = axWindowRoots.filter {
+            isExactRelayKitAXWindow(
+                role: axRole($0),
+                windowNumber: axWindowNumber($0),
+                expectedWindowID: context.identity.windowID
+            )
+        }
+        guard exactMatches.count == 1, let selected = exactMatches.first else {
+            throw DriverFailure(
+                "window_selector_not_unique",
+                exitStatus: 4,
+                candidateCount: exactMatches.count
+            )
+        }
+        let semanticBinding = relayKitSemanticBinding(selected)
+        guard semanticBinding.complete else {
+            throw DriverFailure(
+                "relaykit_semantic_traversal_incomplete",
+                exitStatus: 4,
+                candidateCount: semanticBinding.identifierCount
+            )
+        }
+        guard semanticBinding.identifierCount > 0 else {
+            throw DriverFailure("relaykit_semantic_node_missing", exitStatus: 4, candidateCount: 0)
+        }
+        return BoundActionRoot(
+            root: selected,
+            candidateCount: exactMatches.count,
+            axWindowsCount: axWindowRoots.count,
+            semanticIdentifierCount: semanticBinding.identifierCount
+        )
     }
-    return BoundActionRoot(root: try relayKitPopoverRoot(), candidateCount: 1)
 }
 
 private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
@@ -809,13 +853,14 @@ private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
             )
         },
         axWindowNumber: axWindowNumber,
-        relayKitPopoverRoot: {
-            try uniqueRelayKitPopoverRoot(
-                applicationRoot: AXUIElementCreateApplication(context.pid)
-            )
-        }
+        axRole: { copyAXString($0, kAXRoleAttribute as CFString) },
+        relayKitSemanticBinding: relayKitSemanticBinding
     )
-    return BoundWindow(window: selection.root)
+    return BoundWindow(
+        window: selection.root,
+        axWindowsCount: selection.axWindowsCount,
+        semanticIdentifierCount: selection.semanticIdentifierCount
+    )
 }
 
 private struct SemanticRecord {
@@ -1640,6 +1685,7 @@ private struct AXDiagnosticReport: Encodable {
     let axWindowsCount: Int
     let numberedWindowCount: Int
     let matchingWindowCount: Int
+    let semanticIdentifierCount: Int
     let truncated: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -1651,6 +1697,7 @@ private struct AXDiagnosticReport: Encodable {
         case axWindowsCount = "ax_windows_count"
         case numberedWindowCount = "numbered_window_count"
         case matchingWindowCount = "matching_window_count"
+        case semanticIdentifierCount = "semantic_identifier_count"
         case truncated
     }
 }
@@ -1672,80 +1719,180 @@ private func sanitizedAXRole(_ value: String?) -> String {
     return value
 }
 
-private func makeAXDiagnosticReport<Node>(
-    root: Node,
-    expectedWindowID: UInt32,
-    axWindowsAvailable: Bool,
-    axWindowsCount: Int,
+private struct RelayKitAXInspectSnapshot {
+    let records: [AXDiagnosticNodeRecord]
+    let axWindowsCount: Int
+    let semanticIdentifierCount: Int
+    let truncated: Bool
+}
+
+private struct RelayKitAXInspectWindow<Node> {
+    let root: Node
+    let role: String?
+    let windowNumber: UInt32?
+}
+
+private func captureVerifiedRelayKitAXInspectSnapshot<Node>(
+    context: DriverContext,
+    currentIdentity: WindowIdentity,
+    processIsRunning: Bool,
+    bundleIdentifier: String?,
+    windowServerMetadata: () -> [WindowServerMetadata],
+    accessibilityTrusted: () -> Bool,
+    axWindows: () -> (available: Bool, roots: [Node]),
     role: (Node) -> String?,
     subrole: (Node) -> String?,
-    children: (Node) -> [Node],
+    identifier: (Node) -> String?,
+    children: (Node) -> [Node]?,
     windowNumber: (Node) -> UInt32?,
     identical: (Node, Node) -> Bool
-) -> AXDiagnosticReport {
+) throws -> RelayKitAXInspectSnapshot {
+    _ = try verifyApplicationIdentity(
+        context: context,
+        currentIdentity: currentIdentity,
+        processIsRunning: processIsRunning,
+        bundleIdentifier: bundleIdentifier,
+        windowServerMetadata: windowServerMetadata,
+        frontmostPID: { nil },
+        accessibilityTrusted: accessibilityTrusted,
+        requireFrontmost: false
+    )
+    let availableAXWindows = axWindows()
+    guard availableAXWindows.available else {
+        throw DriverFailure("window_selector_not_unique", exitStatus: 4, candidateCount: 0)
+    }
+    let windowSnapshots = availableAXWindows.roots.map { root in
+        RelayKitAXInspectWindow(
+            root: root,
+            role: role(root),
+            windowNumber: windowNumber(root)
+        )
+    }
+    let exactMatches = windowSnapshots.filter {
+        isExactRelayKitAXWindow(
+            role: $0.role,
+            windowNumber: $0.windowNumber,
+            expectedWindowID: context.identity.windowID
+        )
+    }
+    guard exactMatches.count == 1, let selected = exactMatches.first else {
+        throw DriverFailure(
+            "window_selector_not_unique",
+            exitStatus: 4,
+            candidateCount: exactMatches.count
+        )
+    }
+
     var records: [AXDiagnosticNodeRecord] = []
     var visited: [Node] = []
     var truncated = false
+    var complete = true
+    var semanticIdentifierCount = 0
 
-    func append(_ node: Node, parent: Int?, depth: Int) {
+    func append(
+        _ node: Node,
+        parent: Int?,
+        depth: Int,
+        knownRole: String? = nil,
+        knownWindowNumber: UInt32? = nil
+    ) {
+        guard complete else { return }
         guard depth <= maximumAXDiagnosticDepth,
               records.count < maximumAXDiagnosticNodes else {
             truncated = true
+            complete = false
             return
         }
         guard !visited.contains(where: { identical($0, node) }) else {
             truncated = true
+            complete = false
             return
         }
         visited.append(node)
 
-        let nodeChildren = children(node)
-        let nodeWindowNumber = windowNumber(node)
+        if identifier(node).map({ relayKitWindowSemanticIdentifiers.contains($0) }) == true {
+            semanticIdentifierCount += 1
+        }
+        guard let nodeChildren = children(node) else {
+            complete = false
+            return
+        }
+        let nodeWindowNumber = depth == 0 ? knownWindowNumber : windowNumber(node)
         let ordinal = records.count
         let rawSubrole = subrole(node)
         records.append(AXDiagnosticNodeRecord(
             ordinal: ordinal,
             parent: parent,
             depth: depth,
-            role: sanitizedAXRole(role(node)),
+            role: sanitizedAXRole(depth == 0 ? knownRole : role(node)),
             subrole: rawSubrole.map { sanitizedAXRole($0) },
             childCount: nodeChildren.count,
             windowNumberPresent: nodeWindowNumber != nil,
-            matchesExpectedWindow: nodeWindowNumber == expectedWindowID
+            matchesExpectedWindow: nodeWindowNumber == context.identity.windowID
         ))
 
         if depth == maximumAXDiagnosticDepth {
             if !nodeChildren.isEmpty {
                 truncated = true
+                complete = false
             }
             return
         }
         for child in nodeChildren {
             guard records.count < maximumAXDiagnosticNodes else {
                 truncated = true
+                complete = false
                 break
             }
             append(child, parent: ordinal, depth: depth + 1)
         }
     }
 
-    append(root, parent: nil, depth: 0)
-    let roleCounts = Dictionary(grouping: records, by: { $0.role })
+    append(
+        selected.root,
+        parent: nil,
+        depth: 0,
+        knownRole: selected.role,
+        knownWindowNumber: selected.windowNumber
+    )
+    guard complete, !truncated else {
+        throw DriverFailure(
+            "relaykit_semantic_traversal_incomplete",
+            exitStatus: 4,
+            candidateCount: semanticIdentifierCount
+        )
+    }
+    guard semanticIdentifierCount > 0 else {
+        throw DriverFailure("relaykit_semantic_node_missing", exitStatus: 4, candidateCount: 0)
+    }
+    return RelayKitAXInspectSnapshot(
+        records: records,
+        axWindowsCount: windowSnapshots.count,
+        semanticIdentifierCount: semanticIdentifierCount,
+        truncated: truncated
+    )
+}
+
+private func makeAXDiagnosticReport(
+    snapshot: RelayKitAXInspectSnapshot
+) -> AXDiagnosticReport {
+    let roleCounts = Dictionary(grouping: snapshot.records, by: { $0.role })
         .map { AXDiagnosticRoleCount(role: $0.key, count: $0.value.count) }
         .sorted { $0.role < $1.role }
-    let depthCounts = Dictionary(grouping: records, by: { $0.depth })
+    let depthCounts = Dictionary(grouping: snapshot.records, by: { $0.depth })
         .map { AXDiagnosticDepthCount(depth: $0.key, count: $0.value.count) }
         .sorted { $0.depth < $1.depth }
     return AXDiagnosticReport(
         status: "ok",
-        nodes: records,
+        nodes: snapshot.records,
         roleCounts: roleCounts,
         depthCounts: depthCounts,
-        axWindowsAvailable: axWindowsAvailable,
-        axWindowsCount: axWindowsCount,
-        numberedWindowCount: records.filter(\.windowNumberPresent).count,
-        matchingWindowCount: records.filter(\.matchesExpectedWindow).count,
-        truncated: truncated
+        axWindowsAvailable: true,
+        axWindowsCount: snapshot.axWindowsCount,
+        numberedWindowCount: snapshot.records.filter(\.windowNumberPresent).count,
+        matchingWindowCount: snapshot.records.filter(\.matchesExpectedWindow).count,
+        semanticIdentifierCount: snapshot.semanticIdentifierCount,
+        truncated: snapshot.truncated
     )
 }
 
@@ -1811,49 +1958,42 @@ private func writeAtomicPrivateJSON<T: Encodable>(_ value: T, to path: String) t
     renamed = true
 }
 
-private func verifyAXDiagnosticIdentity(_ context: DriverContext) throws {
-    let currentIdentity = try readWindowIdentity(context.identityPath)
-    let running = NSRunningApplication(processIdentifier: context.pid)
-    _ = try verifyApplicationIdentity(
-        context: context,
-        currentIdentity: currentIdentity,
-        processIsRunning: running.map { !$0.isTerminated } ?? false,
-        bundleIdentifier: running?.bundleIdentifier,
-        windowServerMetadata: currentWindowServerMetadata,
-        frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
-        accessibilityTrusted: { AXIsProcessTrusted() },
-        requireFrontmost: false
-    )
-}
-
 private func executeRelayKitAXInspect(options: [String: String]) throws -> DriverReport {
     guard let outputPath = options["--diagnostic-output"] else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
     let context = try makeContext(options: options, command: .relayKitAXInspect)
-    try verifyAXDiagnosticIdentity(context)
-
-    let application = AXUIElementCreateApplication(context.pid)
-    var axWindowsValue: CFTypeRef?
-    let axWindowsStatus = AXUIElementCopyAttributeValue(
-        application,
-        kAXWindowsAttribute as CFString,
-        &axWindowsValue
-    )
-    let axWindows = axWindowsValue as? [AXUIElement]
-    let report = makeAXDiagnosticReport(
-        root: application,
-        expectedWindowID: context.identity.windowID,
-        axWindowsAvailable: axWindowsStatus == .success && axWindows != nil,
-        axWindowsCount: axWindows?.count ?? 0,
+    let running = NSRunningApplication(processIdentifier: context.pid)
+    let snapshot = try captureVerifiedRelayKitAXInspectSnapshot(
+        context: context,
+        currentIdentity: try readWindowIdentity(context.identityPath),
+        processIsRunning: running.map { !$0.isTerminated } ?? false,
+        bundleIdentifier: running?.bundleIdentifier,
+        windowServerMetadata: currentWindowServerMetadata,
+        accessibilityTrusted: { AXIsProcessTrusted() },
+        axWindows: {
+            let application = AXUIElementCreateApplication(context.pid)
+            var value: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(
+                application,
+                kAXWindowsAttribute as CFString,
+                &value
+            )
+            return normalizedAXWindows(
+                status: status,
+                valuePresent: value != nil,
+                roots: value as? [AXUIElement],
+                applicationMode: context.applicationMode
+            )
+        },
         role: { copyAXString($0, kAXRoleAttribute as CFString) },
         subrole: { copyAXString($0, kAXSubroleAttribute as CFString) },
-        children: {
-            copyAXAttribute($0, kAXChildrenAttribute as CFString) as? [AXUIElement] ?? []
-        },
+        identifier: { copyAXString($0, axIdentifierAttribute) },
+        children: relayKitAXChildren,
         windowNumber: axWindowNumber,
         identical: { CFEqual($0, $1) }
     )
+    let report = makeAXDiagnosticReport(snapshot: snapshot)
     try writeAtomicPrivateJSON(report, to: outputPath)
     return .success(
         command: "relaykit-ax-inspect",
@@ -2628,6 +2768,7 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
 private struct BoundActionRootTestNode: Decodable {
     let id: Int
     let role: String?
+    let identifier: String?
     let childrenStatus: String?
     let childrenValue: String?
     let children: [Int]
@@ -2635,6 +2776,7 @@ private struct BoundActionRootTestNode: Decodable {
     enum CodingKeys: String, CodingKey {
         case id
         case role
+        case identifier
         case childrenStatus = "children_status"
         case childrenValue = "children_value"
         case children
@@ -2704,15 +2846,27 @@ private struct AXDiagnosticTestNode: Decodable {
     let id: Int
     let role: String?
     let subrole: String?
+    let identifier: String?
     let windowNumber: UInt32?
+    let childrenStatus: String?
+    let childrenValue: String?
     let children: [Int]
+    let secondChildrenStatus: String?
+    let secondChildrenValue: String?
+    let secondChildren: [Int]?
 
     enum CodingKeys: String, CodingKey {
         case id
         case role
         case subrole
+        case identifier
         case windowNumber = "window_number"
+        case childrenStatus = "children_status"
+        case childrenValue = "children_value"
         case children
+        case secondChildrenStatus = "second_children_status"
+        case secondChildrenValue = "second_children_value"
+        case secondChildren = "second_children"
     }
 }
 
@@ -2724,9 +2878,11 @@ private struct AXDiagnosticTestInput: Decodable {
     let frontmostPID: pid_t?
     let accessibilityTrusted: Bool
     let axWindowsAvailable: Bool
-    let axWindowsCount: Int
+    let axWindowNodeIDs: [Int]?
+    let axWindowNumbers: [UInt32?]?
     let rootID: Int
     let nodes: [AXDiagnosticTestNode]
+    let expectedMaxChildrenReads: Int?
 
     enum CodingKeys: String, CodingKey {
         case currentIdentity = "current_identity"
@@ -2736,9 +2892,11 @@ private struct AXDiagnosticTestInput: Decodable {
         case frontmostPID = "frontmost_pid"
         case accessibilityTrusted = "accessibility_trusted"
         case axWindowsAvailable = "ax_windows_available"
-        case axWindowsCount = "ax_windows_count"
+        case axWindowNodeIDs = "ax_window_node_ids"
+        case axWindowNumbers = "ax_window_numbers"
         case rootID = "root_id"
         case nodes
+        case expectedMaxChildrenReads = "expected_max_children_reads"
     }
 }
 
@@ -2764,6 +2922,7 @@ private func executeBoundWindowTest(
         BoundActionRootTestNode(
             id: 10_000 + index,
             role: "AXWindow",
+            identifier: nil,
             childrenStatus: nil,
             childrenValue: nil,
             children: []
@@ -2788,20 +2947,24 @@ private func executeBoundWindowTest(
     }
     let axWindowsValuePresent = input.axWindowsValuePresent ?? true
     let decodedAXWindowRoots = (input.axWindowsMalformed ?? false) || !axWindowsValuePresent ? nil : axWindowRoots
-    let applicationRoot: BoundActionRootTestNode
-    if let rootID = input.rootID {
-        guard let root = nodesByID[rootID] else {
-            throw DriverFailure("invalid_arguments", exitStatus: 2)
+    if let rootID = input.rootID, nodesByID[rootID] == nil {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let testChildren: (BoundActionRootTestNode) -> [BoundActionRootTestNode]? = { node in
+        guard let status = boundActionRootTestAXError(node.childrenStatus) else {
+            return nil
         }
-        applicationRoot = root
-    } else {
-        applicationRoot = BoundActionRootTestNode(
-            id: -1,
-            role: "AXApplication",
-            childrenStatus: nil,
-            childrenValue: nil,
-            children: []
-        )
+        let children: [BoundActionRootTestNode]?
+        switch node.childrenValue ?? "array" {
+        case "array":
+            let resolved = node.children.compactMap { nodesByID[$0] }
+            children = resolved.count == node.children.count ? resolved : nil
+        case "missing", "malformed":
+            children = nil
+        default:
+            children = nil
+        }
+        return normalizedAXChildren(status: status, children: children)
     }
     let selection = try resolveBoundActionRoot(
         context: context,
@@ -2823,26 +2986,12 @@ private func executeBoundWindowTest(
             guard let index = windowNodeIDs.firstIndex(of: node.id) else { return nil }
             return input.axWindowNumbers[index]
         },
-        relayKitPopoverRoot: {
-            try uniqueRelayKitPopoverRoot(
-                applicationRoot: applicationRoot,
-                role: { $0.role },
-                children: { node in
-                    guard let status = boundActionRootTestAXError(node.childrenStatus) else {
-                        return nil
-                    }
-                    let children: [BoundActionRootTestNode]?
-                    switch node.childrenValue ?? "array" {
-                    case "array":
-                        let resolved = node.children.compactMap { nodesByID[$0] }
-                        children = resolved.count == node.children.count ? resolved : nil
-                    case "missing", "malformed":
-                        children = nil
-                    default:
-                        children = nil
-                    }
-                    return normalizedAXChildren(status: status, children: children)
-                },
+        axRole: { $0.role },
+        relayKitSemanticBinding: { root in
+            relayKitSemanticBinding(
+                root: root,
+                identifier: { $0.identifier },
+                children: testChildren,
                 identical: { $0.id == $1.id }
             )
         }
@@ -2894,33 +3043,70 @@ private func executeAXDiagnosticTest(
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
     let context = try makeContext(options: parsed.options, command: parsed.command)
-    _ = try verifyApplicationIdentity(
+    let nodesByID = Dictionary(uniqueKeysWithValues: input.nodes.map { ($0.id, $0) })
+    guard nodesByID.count == input.nodes.count,
+          nodesByID[input.rootID] != nil else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let windowNodeIDs = input.axWindowNodeIDs ?? input.nodes
+        .filter { $0.role == kAXWindowRole as String }
+        .map(\.id)
+    let windowNumbers = input.axWindowNumbers ?? windowNodeIDs.map { nodesByID[$0]?.windowNumber }
+    guard windowNodeIDs.count == windowNumbers.count else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let axWindowRoots = windowNodeIDs.compactMap { nodesByID[$0] }
+    guard axWindowRoots.count == windowNodeIDs.count else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    var childrenReadCounts: [Int: Int] = [:]
+    let testChildren: (AXDiagnosticTestNode) -> [AXDiagnosticTestNode]? = { node in
+        let readCount = childrenReadCounts[node.id, default: 0] + 1
+        childrenReadCounts[node.id] = readCount
+        let useSecondRead = readCount > 1 && node.secondChildrenStatus != nil
+        let childrenStatus = useSecondRead ? node.secondChildrenStatus : node.childrenStatus
+        let childrenValue = useSecondRead ? node.secondChildrenValue : node.childrenValue
+        let childIDs = useSecondRead ? (node.secondChildren ?? node.children) : node.children
+        guard let status = boundActionRootTestAXError(childrenStatus) else {
+            return nil
+        }
+        let children: [AXDiagnosticTestNode]?
+        switch childrenValue ?? "array" {
+        case "array":
+            let resolved = childIDs.compactMap { nodesByID[$0] }
+            children = resolved.count == childIDs.count ? resolved : nil
+        case "missing", "malformed":
+            children = nil
+        default:
+            children = nil
+        }
+        return normalizedAXChildren(status: status, children: children)
+    }
+    let snapshot = try captureVerifiedRelayKitAXInspectSnapshot(
         context: context,
         currentIdentity: input.currentIdentity,
         processIsRunning: input.processRunning,
         bundleIdentifier: input.bundleIdentifier,
         windowServerMetadata: { input.windows },
-        frontmostPID: { input.frontmostPID },
         accessibilityTrusted: { input.accessibilityTrusted },
-        requireFrontmost: false
-    )
-
-    let nodesByID = Dictionary(uniqueKeysWithValues: input.nodes.map { ($0.id, $0) })
-    guard nodesByID.count == input.nodes.count,
-          let root = nodesByID[input.rootID] else {
-        throw DriverFailure("invalid_arguments", exitStatus: 2)
-    }
-    let report = makeAXDiagnosticReport(
-        root: root,
-        expectedWindowID: context.identity.windowID,
-        axWindowsAvailable: input.axWindowsAvailable,
-        axWindowsCount: input.axWindowsCount,
+        axWindows: { (input.axWindowsAvailable, axWindowRoots) },
         role: { $0.role },
         subrole: { $0.subrole },
-        children: { node in node.children.compactMap { nodesByID[$0] } },
-        windowNumber: { $0.windowNumber },
+        identifier: { $0.identifier },
+        children: testChildren,
+        windowNumber: { node in
+            guard let index = windowNodeIDs.firstIndex(of: node.id) else {
+                return node.windowNumber
+            }
+            return windowNumbers[index]
+        },
         identical: { $0.id == $1.id }
     )
+    let report = makeAXDiagnosticReport(snapshot: snapshot)
+    if let maximumReads = input.expectedMaxChildrenReads,
+       childrenReadCounts.values.contains(where: { $0 > maximumReads }) {
+        throw DriverFailure("internal_error", exitStatus: 70)
+    }
     try writeAtomicPrivateJSON(report, to: outputPath)
     return .success(
         command: parsed.command.rawValue,

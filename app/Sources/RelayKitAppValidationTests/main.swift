@@ -1011,44 +1011,87 @@ func expectGatewayCredentialHandoff() throws {
     }
 }
 
-func expectStatusPopoverAccessibilityContract() throws {
+func expectStatusPanelContract() throws {
     let sourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift")
     let source = try String(contentsOf: sourceURL, encoding: .utf8)
-    guard source.contains("final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate"),
-          source.contains("private let popover = NSPopover()"),
-          source.contains("popover.delegate = self"),
-          source.components(separatedBy: "relaykit-popover-root").count == 2,
-          source.contains("func popoverDidShow") && source.contains("attachPopoverAccessibilityRoot()"),
-          source.contains("func popoverDidClose") && source.contains("detachPopoverAccessibilityRoot()") else {
-        fatalError("status popover AX delegate contract is missing")
+    for forbidden in ["NSPopover", "NSPopoverDelegate", "relaykit-popover-root", "setAccessibilityChildren", "attachPopoverAccessibilityRoot", "detachPopoverAccessibilityRoot"] {
+        if source.contains(forbidden) { fatalError("status panel must remove legacy popover/proxy token: \(forbidden)") }
     }
-    guard let attachStart = source.range(of: "private func attachPopoverAccessibilityRoot()"),
-          let detachStart = source.range(of: "private func detachPopoverAccessibilityRoot()", range: attachStart.upperBound..<source.endIndex),
-          let terminateStart = source.range(of: "func applicationWillTerminate", range: detachStart.upperBound..<source.endIndex),
-          let terminateEnd = source.range(of: "@objc private func togglePopover", range: terminateStart.upperBound..<source.endIndex) else {
-        fatalError("status popover AX helper boundaries are missing")
+    guard source.contains("final class RelayKitApp: NSObject, NSApplicationDelegate"),
+          source.contains("private var panel: RelayKitPanel?"),
+          source.components(separatedBy: "RelayKitPanel(").count == 2,
+          source.components(separatedBy: "relaykit-panel-root").count == 2,
+          source.contains("app.setActivationPolicy(.accessory)") else {
+        fatalError("single reusable accessory status panel contract is missing")
     }
-    let attach = source[attachStart.lowerBound..<detachStart.lowerBound]
-    let detach = source[detachStart.lowerBound..<terminateStart.lowerBound]
-    let termination = source[terminateStart.lowerBound..<terminateEnd.lowerBound]
-    for required in ["statusItem.button", "popover.setAccessibilityElement(true)", "popover.setAccessibilityRole(.popover)", "popover.setAccessibilityIdentifier", "popover.setAccessibilityParent(button)", "button.setAccessibilityChildren([popover])"] {
-        if !attach.contains(required) { fatalError("popover attach is missing \(required)") }
+    guard let launchStart = source.range(of: "func applicationDidFinishLaunching"),
+          let resignStart = source.range(of: "func applicationDidResignActive", range: launchStart.upperBound..<source.endIndex),
+          let terminateStart = source.range(of: "func applicationWillTerminate", range: resignStart.upperBound..<source.endIndex),
+          let toggleStart = source.range(of: "@objc private func togglePanel", range: terminateStart.upperBound..<source.endIndex),
+          let showStart = source.range(of: "private func showPanel(relativeTo button: NSStatusBarButton)", range: toggleStart.upperBound..<source.endIndex),
+          let hideStart = source.range(of: "private func hidePanel()", range: showStart.upperBound..<source.endIndex),
+          let menuStart = source.range(of: "private func showStatusMenu", range: hideStart.upperBound..<source.endIndex),
+          let quitStart = source.range(of: "@objc private func quitRelayKit", range: menuStart.upperBound..<source.endIndex),
+          let valueStart = source.range(of: "private static func value", range: quitStart.upperBound..<source.endIndex),
+          let evidenceStart = source.range(of: "private func writeSmokeEvidence(gatewayExercise:", range: valueStart.upperBound..<source.endIndex) else {
+        fatalError("status panel lifecycle helper boundaries are missing")
     }
-    for required in ["setAccessibilityChildren([])", "popover.setAccessibilityParent(nil)"] {
-        if !detach.contains(required) { fatalError("popover detach is missing \(required)") }
+    let launch = source[launchStart.lowerBound..<resignStart.lowerBound]
+    let resign = source[resignStart.lowerBound..<terminateStart.lowerBound]
+    let termination = source[terminateStart.lowerBound..<toggleStart.lowerBound]
+    let toggle = source[toggleStart.lowerBound..<showStart.lowerBound]
+    let show = source[showStart.lowerBound..<hideStart.lowerBound]
+    let hide = source[hideStart.lowerBound..<menuStart.lowerBound]
+    let quit = source[quitStart.lowerBound..<valueStart.lowerBound]
+    let evidence = source[evidenceStart.lowerBound..<source.endIndex]
+    for required in ["styleMask: [.borderless, .nonactivatingPanel]", "panel.isReleasedWhenClosed = false", "panel.becomesKeyOnlyIfNeeded = true", "panel.hidesOnDeactivate = !smokeKeepsPopoverOpen", "panel.setAccessibilityIdentifier(\"relaykit-panel-root\")", "panel.contentViewController = NSHostingController(", ".frame(width: 520, height: 680)", "self.panel = panel", "NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown])", "self?.hidePanel()", "self.showPanel(relativeTo: button)"] {
+        if !launch.contains(required) { fatalError("status panel launch setup is missing \(required)") }
     }
-    guard let detachCall = termination.range(of: "detachPopoverAccessibilityRoot()"),
+    for required in ["button.window", "window.screen", "convertToScreen", "screen.visibleFrame", "buttonFrame.minY - panel.frame.height", "panel.setFrameOrigin", "panel.orderFront(nil)"] {
+        if !show.contains(required) { fatalError("status panel placement is missing \(required)") }
+    }
+    if show.contains("NSApplication.shared.activate") { fatalError("normal panel show must remain nonactivating") }
+    guard let rightClick = toggle.range(of: "NSApplication.shared.currentEvent?.type == .rightMouseUp"),
+          let rightHide = toggle.range(of: "hidePanel()", range: rightClick.upperBound..<toggle.endIndex),
+          let rightMenu = toggle.range(of: "showStatusMenu(sender)", range: rightClick.upperBound..<toggle.endIndex),
+          let rightReturn = toggle.range(of: "return", range: rightMenu.upperBound..<toggle.endIndex),
+          let leftStart = toggle.range(of: "guard let panel", range: rightReturn.upperBound..<toggle.endIndex),
+          rightClick.lowerBound < rightHide.lowerBound && rightHide.lowerBound < rightMenu.lowerBound &&
+          rightMenu.lowerBound < rightReturn.lowerBound && rightReturn.lowerBound < leftStart.lowerBound else {
+        fatalError("right-click must hide the panel before showing the status menu")
+    }
+    for required in ["panel.isVisible", "hidePanel()", "showPanel(relativeTo: sender)"] {
+        if !toggle[leftStart.lowerBound...].contains(required) { fatalError("left-click panel toggle is missing \(required)") }
+    }
+    guard let smokeGuard = resign.range(of: "guard !CommandLine.arguments.contains(\"--ui-smoke\") else { return }"),
+          let resignHide = resign.range(of: "hidePanel()"), smokeGuard.lowerBound < resignHide.lowerBound,
+          hide.contains("panel?.orderOut(nil)") else {
+        fatalError("status panel hide lifecycle is missing")
+    }
+    guard let removeMonitor = termination.range(of: "NSEvent.removeMonitor"),
+          let orderOut = termination.range(of: "panel?.orderOut(nil)"),
+          let close = termination.range(of: "panel?.close()"),
           let gatewayStop = termination.range(of: "model.stopGateway()"),
           let authStop = termination.range(of: "model.stopOfficialAuthProcessForShutdown()"),
-          detachCall.lowerBound < gatewayStop.lowerBound && gatewayStop.lowerBound < authStop.lowerBound else {
-        fatalError("termination must detach popover AX linkage before shutdown")
+          removeMonitor.lowerBound < orderOut.lowerBound && orderOut.lowerBound < close.lowerBound &&
+          close.lowerBound < gatewayStop.lowerBound && gatewayStop.lowerBound < authStop.lowerBound else {
+        fatalError("termination must remove monitor and close panel before shutdown")
     }
-    for forbidden in ["ContentView", "ProviderForm", "Keychain", "Gateway", "NSPanel", "NSWindow", "accessibilityTitle", "accessibilityValue", "coordinate", "hitTest"] {
-        if attach.contains(forbidden) || detach.contains(forbidden) { fatalError("popover AX helper must not use \(forbidden)") }
+    if !quit.contains("NSApplication.shared.terminate(sender)") {
+        fatalError("Quit must use NSApplication termination")
     }
-    for required in ["togglePopover", "popover.show(relativeTo:", "popover.performClose", "showStatusMenu", "quitRelayKit", "addGlobalMonitorForEvents"] {
-        if !source.contains(required) { fatalError("existing popover behavior regressed: \(required)") }
+    for required in ["\"panel\": [", "\"primitive\": \"nonactivating-nspanel\"", "\"kind\": \"menu-bar-panel\""] {
+        if !evidence.contains(required) { fatalError("canonical panel smoke evidence is missing \(required)") }
+    }
+    for forbidden in ["\"popover\": [", "menu-bar-popover"] {
+        if evidence.contains(forbidden) { fatalError("canonical panel smoke evidence retained \(forbidden)") }
+    }
+    let panelSourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("Sources/RelayKitApp/App/RelayKitPanel.swift")
+    let panelSource = try String(contentsOf: panelSourceURL, encoding: .utf8)
+    for required in ["final class RelayKitPanel: NSPanel", "override var canBecomeKey: Bool { true }", "override var canBecomeMain: Bool { false }"] {
+        if !panelSource.contains(required) { fatalError("tiny RelayKitPanel subclass is missing \(required)") }
     }
 }
 
@@ -1083,7 +1126,7 @@ expectProviderConnectionClassification()
 expectUsageAnalytics()
 try expectKeychainCredentialStore()
 try expectGatewayCredentialHandoff()
-try expectStatusPopoverAccessibilityContract()
+try expectStatusPanelContract()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }

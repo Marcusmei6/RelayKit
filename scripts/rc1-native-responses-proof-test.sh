@@ -44,7 +44,7 @@ ax_repro_body="$(sed -n '/run_window_ax_inspect_repro()/,/^}/p' "${SCRIPT}")"
 for required_repro_text in \
   'RELAYKIT_RC1_APP_BUNDLE' \
   'RELAYKIT_RC1_AX_INSPECT_OUT' \
-  'open_exact_app_popover' \
+  'open_exact_nonactivating_menu_bar_panel' \
   'write_exact_app_window_identity' \
   'RELAYKIT_AX_DRIVER_DIAGNOSTIC=1' \
   'relaykit-ax-inspect' \
@@ -145,9 +145,11 @@ run_launch_case launch-open-failed "${fake_bundle}" 23 'private fake open detail
 run_launch_case launch-pid-absent "${fake_bundle}" 0 '' 0 1 1 none 0 0 1 exact_pid_absent
 run_launch_case launch-exact-pid "${fake_bundle}" 0 'private fake open warning' 1 1 1 open_succeeded_with_stderr 1 1 0 repro_failed
 
-status_item_body="$(sed -n '/^read_exact_status_item_state()/,/^}/p;/^open_exact_app_popover()/,/^}/p' "${SCRIPT}")"
+status_item_body="$(sed -n '/^read_exact_status_item_state()/,/^}/p;/^open_exact_nonactivating_menu_bar_panel()/,/^}/p' "${SCRIPT}")"
 grep -Fq 'read_exact_status_item_state' <<<"${status_item_body}" ||
   fail "proof is missing exact-PID status item readiness"
+grep -Fq 'canonical nonactivating NSPanel menu-bar panel' <<<"${status_item_body}" ||
+  fail "proof does not use the canonical panel terminology"
 status_item_contract="${TMP}/status-item-contract"
 cat >"${status_item_contract}" <<SH
 #!/usr/bin/env bash
@@ -157,7 +159,7 @@ STATUS_ITEM_READINESS_INTERVAL=0.1
 APP_PID=4242
 fail() { printf '%s\n' "\$*" >&2; exit 1; }
 ${status_item_body}
-open_exact_app_popover
+open_exact_nonactivating_menu_bar_panel
 SH
 chmod 700 "${status_item_contract}"
 status_item_bin="${TMP}/status-item-bin"
@@ -275,15 +277,45 @@ done
 [[ -n "${diagnostic_output}" ]]
 jq -n '{
   status:"ok",ax_windows_available:true,ax_windows_count:1,
-  numbered_window_count:1,matching_window_count:0,truncated:false,
-  nodes:[{ordinal:0,parent:null,depth:0,role:"AXApplication",subrole:null,
+  numbered_window_count:1,matching_window_count:1,semantic_identifier_count:1,truncated:false,
+  nodes:[{ordinal:0,parent:null,depth:0,role:"AXWindow",subrole:"AXStandardWindow",
+    child_count:1,window_number_present:true,matches_expected_window:true},
+    {ordinal:1,parent:0,depth:1,role:"AXButton",subrole:null,
     child_count:0,window_number_present:false,matches_expected_window:false}],
-  role_counts:[{role:"AXApplication",count:1}],depth_counts:[{depth:0,count:1}]
+  role_counts:[{role:"AXButton",count:1},{role:"AXWindow",count:1}],
+  depth_counts:[{depth:0,count:1},{depth:1,count:1}]
 }' >"${diagnostic_output}"
 chmod 600 "${diagnostic_output}"
 printf '%s\n' '{"action_count":0,"code":"ok","command":"relaykit-ax-inspect","status":"ok","window_verified":true}'
 SH
 chmod 700 "${fake_success_driver}"
+
+fake_no_semantic_driver="${TMP}/fake-ax-driver-no-semantic"
+cp "${fake_success_driver}" "${fake_no_semantic_driver}"
+sed -i '' 's/semantic_identifier_count:1/semantic_identifier_count:0/' "${fake_no_semantic_driver}"
+chmod 700 "${fake_no_semantic_driver}"
+
+fake_nonunique_ax_driver="${TMP}/fake-ax-driver-nonunique-window"
+cp "${fake_success_driver}" "${fake_nonunique_ax_driver}"
+sed -i '' 's/matching_window_count:1/matching_window_count:2/' "${fake_nonunique_ax_driver}"
+chmod 700 "${fake_nonunique_ax_driver}"
+
+fake_duplicate_windowserver_driver="${TMP}/fake-ax-driver-duplicate-windowserver"
+cat >"${fake_duplicate_windowserver_driver}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+diagnostic_output=""
+for ((index=1; index <= $#; index++)); do
+  if [[ "${!index}" == "--diagnostic-output" ]]; then
+    next=$((index + 1)); diagnostic_output="${!next}"; break
+  fi
+done
+"${FAKE_SUCCESS_DRIVER}" "$@"
+window_diagnostic="$(dirname "${diagnostic_output}")/window-diagnostic.json"
+jq '.candidates += [.candidates[0]]' "${window_diagnostic}" >"${window_diagnostic}.tmp"
+chmod 600 "${window_diagnostic}.tmp"; mv "${window_diagnostic}.tmp" "${window_diagnostic}"
+SH
+chmod 700 "${fake_duplicate_windowserver_driver}"
 
 fake_drift_driver="${TMP}/fake-ax-driver-drift"
 cat >"${fake_drift_driver}" <<'SH'
@@ -549,6 +581,7 @@ run_ax_finalizer_case() {
   local expected_auth_unchanged="${11:-true}"
   local owned="${12:-false}" case_bundle="${fake_bundle}" owned_root=""
   local drift="${13:-}" expected_owned_removed="${14:-${owned}}"
+  local force_dead_pid="${15:-false}"
   local exact_parent="${TMP}/${name}-parent"
   local exact_root="${exact_parent}/inspect-output"
   local stdout="${TMP}/${name}.stdout"
@@ -565,6 +598,7 @@ run_ax_finalizer_case() {
   RELAYKIT_RC1_AX_INSPECT_OUT="${exact_root}" \
   RELAYKIT_RC1_AX_INSPECT_TEST=1 \
   RELAYKIT_RC1_AX_INSPECT_FAKE_DRIVER="${fake_driver}" \
+  RELAYKIT_RC1_AX_INSPECT_TEST_FORCE_DEAD_PID="${force_dead_pid}" \
   OWNED_DRIFT_KIND="${drift}" OWNED_ROOT="${owned_root}" FAKE_APP="${fake_app}" FAKE_SUCCESS_DRIVER="${fake_success_driver}" \
   RELAYKIT_RC1_AX_INSPECT_TEST_FORCE_APP_STOPPED_FALSE="$([[ "${expected_app_stopped}" == "false" ]] && printf true || printf false)" \
   RELAYKIT_RC1_AX_INSPECT_TEST_FORCE_SHARED_18787_FALSE="$([[ "${expected_shared_18787_unchanged}" == "false" ]] && printf true || printf false)" \
@@ -592,12 +626,12 @@ run_ax_finalizer_case() {
   done
   jq -e '
     (keys | sort) == ["captured_at","height","pid","width","window_id"] and
-    .pid == 4242 and .window_id == 101
+    (.pid | type == "number") and .pid > 0 and .window_id == 101
   ' "${exact_root}/window-identity.json" >/dev/null || fail "${name} stable identity schema is invalid"
   jq -e '
     (keys | sort) == ["candidates","captured_at","eligible_count","largest_candidate_count",
       "owner_window_count","pid","selected_window_id","status"] and
-    .status == "selected" and .pid == 4242 and .selected_window_id == 101 and
+    .status == "selected" and (.pid | type == "number") and .pid > 0 and .selected_window_id == 101 and
     (.candidates | all(.[]; (keys | sort) == ["area","eligible","height","layer","width","window_id"]))
   ' "${exact_root}/window-diagnostic.json" >/dev/null || fail "${name} stable window diagnostic schema is invalid"
   if [[ "${expected_tree}" == "created" ]]; then
@@ -648,12 +682,13 @@ run_ax_finalizer_case() {
       "open_stderr_category","open_success_count","package_invocation_count","schema_version","status"] and
     .schema_version == 1 and .status == $status and .exit_code == $exit_code and .ax_tree == $tree and
     .driver_command == "relaykit-ax-inspect" and .open_invocation_count == 0 and .open_success_count == 0 and
-    .open_exit_status == 0 and .open_stderr_category == "not_invoked" and .exact_pid_count == 0 and
+    .open_exit_status == 0 and .open_stderr_category == "not_invoked" and .exact_pid_count == 1 and
     .app_launch_count == 0 and .package_invocation_count == 0 and .full_e2e_invocation_count == 0
   ' "${exact_root}/result.json" >/dev/null || fail "${name} result schema is invalid"
-  jq -e --arg root "${exact_root}" '
-    (keys | sort) == ["artifacts","inspect_out","schema_version"] and
-    .schema_version == 1 and .inspect_out == $root and
+  jq -e --arg root "${exact_root}" --arg status "${expected_status}" '
+    (keys | sort) == ["artifacts","failure","inspect_out","schema_version","status"] and
+    .schema_version == 1 and .inspect_out == $root and .status == $status and
+    (if $status == "passed" then .failure == "none" else .failure != "none" end) and
     ([.artifacts[].name] == ["run_metadata","window_identity","window_diagnostic","driver_report","ax_tree","cleanup","result"]) and
     (.artifacts | all(.[];
       (keys | sort) == ["name","path","sha256","status"] and
@@ -689,6 +724,32 @@ jq -e '
   .failure == "none" and .driver_status == "ok" and .driver_code == "ok" and
   .driver_candidate_count == null
 ' "${last_finalizer_root}/result.json" >/dev/null || fail "success result is invalid"
+
+run_ax_finalizer_case no-semantic-finalizer "${fake_no_semantic_driver}" 4 failed not_created
+jq -e '
+  .failure == "ax_binding_not_exact" and .driver_status == "ok" and
+  .driver_code == "ok" and .exit_code == 4
+' "${last_finalizer_root}/result.json" >/dev/null ||
+  fail "missing RelayKit semantic identifier was allowed to pass"
+jq -e '.status == "failed" and .failure == "ax_binding_not_exact"' \
+  "${last_finalizer_root}/evidence-manifest.json" >/dev/null ||
+  fail "failed semantic binding manifest implied PASS"
+
+run_ax_finalizer_case dead-pid-finalizer "${fake_success_driver}" 4 failed created \
+  true true true true true true false '' false true
+jq -e '.failure == "ax_binding_not_exact" and .exact_pid_count == 1 and .exit_code == 4' \
+  "${last_finalizer_root}/result.json" >/dev/null ||
+  fail "dead exact PID was allowed to pass"
+
+run_ax_finalizer_case nonunique-ax-finalizer "${fake_nonunique_ax_driver}" 4 failed not_created
+jq -e '.failure == "ax_binding_not_exact" and .driver_code == "ok" and .exit_code == 4' \
+  "${last_finalizer_root}/result.json" >/dev/null ||
+  fail "nonunique matching AXWindow evidence was allowed to pass"
+
+run_ax_finalizer_case duplicate-windowserver-finalizer "${fake_duplicate_windowserver_driver}" 4 failed created
+jq -e '.failure == "ax_binding_not_exact" and .driver_code == "ok" and .exit_code == 4' \
+  "${last_finalizer_root}/result.json" >/dev/null ||
+  fail "duplicate exact WindowServer identity evidence was allowed to pass"
 
 run_ax_finalizer_case owned-success "${fake_success_driver}" 0 passed created true true true true true true true
 run_ax_finalizer_case owned-driver-failure "${fake_failure_driver}" 4 failed not_created true true true true true true true

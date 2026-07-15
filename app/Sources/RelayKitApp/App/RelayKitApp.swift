@@ -5,11 +5,10 @@ import SwiftUI
 
 @main
 @MainActor
-final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
-    private static let popoverAccessibilityIdentifier = "relaykit-popover-root"
+final class RelayKitApp: NSObject, NSApplicationDelegate {
     private let model = AppModel()
-    private let popover = NSPopover()
     private var statusItem: NSStatusItem?
+    private var panel: RelayKitPanel?
     private var smokeSections = Set<String>()
     private let smokeTab = Tab(rawValue: value(after: "--ui-smoke-tab") ?? "") ?? .connect
     private let smokeShowsProvider = CommandLine.arguments.contains("--ui-smoke-provider")
@@ -67,30 +66,39 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem.button?.imagePosition = .imageOnly
         statusItem.button?.toolTip = "RelayKit"
         statusItem.button?.target = self
-        statusItem.button?.action = #selector(togglePopover(_:))
+        statusItem.button?.action = #selector(togglePanel(_:))
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         self.statusItem = statusItem
 
-        popover.behavior = smokeKeepsPopoverOpen ? .applicationDefined : .transient
-        popover.contentSize = NSSize(width: 520, height: 680)
-        popover.contentViewController = NSHostingController(
+        let panel = RelayKitPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isReleasedWhenClosed = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.hidesOnDeactivate = !smokeKeepsPopoverOpen
+        panel.level = .popUpMenu
+        panel.setAccessibilityIdentifier("relaykit-panel-root")
+        panel.contentViewController = NSHostingController(
             rootView: ContentView(initialTab: smokeTab, showProviderForm: smokeShowsProvider, showCatalogDetail: smokeShowsDetail, showImportCandidate: smokeShowsImport, usageRefreshIntervalSeconds: smokeUsageRefreshIntervalSeconds) { [weak self] section in
                 self?.smokeSections.insert(section)
             }
                 .environmentObject(model)
                 .frame(width: 520, height: 680)
         )
-        popover.delegate = self
+        self.panel = panel
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             DispatchQueue.main.async {
-                self?.popover.performClose(nil)
+                self?.hidePanel()
             }
         }
 
         if CommandLine.arguments.contains("--ui-smoke") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let self, let button = self.statusItem?.button else { return }
-                self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+                self.showPanel(relativeTo: button)
                 NSApplication.shared.activate()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                     guard let self else { return }
@@ -109,48 +117,48 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidResignActive(_ notification: Notification) {
         guard !CommandLine.arguments.contains("--ui-smoke") else { return }
-        popover.performClose(nil)
-    }
-
-    func popoverDidShow(_ notification: Notification) {
-        attachPopoverAccessibilityRoot()
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        detachPopoverAccessibilityRoot()
-    }
-
-    private func attachPopoverAccessibilityRoot() {
-        guard let statusItem, let button = statusItem.button else { return }
-        popover.setAccessibilityElement(true)
-        popover.setAccessibilityRole(.popover)
-        popover.setAccessibilityIdentifier(Self.popoverAccessibilityIdentifier)
-        popover.setAccessibilityParent(button)
-        button.setAccessibilityChildren([popover])
-    }
-
-    private func detachPopoverAccessibilityRoot() {
-        statusItem?.button?.setAccessibilityChildren([])
-        popover.setAccessibilityParent(nil)
+        hidePanel()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        detachPopoverAccessibilityRoot()
+        if let outsideClickMonitor {
+            NSEvent.removeMonitor(outsideClickMonitor)
+            self.outsideClickMonitor = nil
+        }
+        panel?.orderOut(nil)
+        panel?.close()
         model.stopGateway()
         model.stopOfficialAuthProcessForShutdown()
     }
 
-    @objc private func togglePopover(_ sender: NSStatusBarButton) {
+    @objc private func togglePanel(_ sender: NSStatusBarButton) {
         if NSApplication.shared.currentEvent?.type == .rightMouseUp {
+            hidePanel()
             showStatusMenu(sender)
             return
         }
-        if popover.isShown {
-            popover.performClose(sender)
+        guard let panel else { return }
+        if panel.isVisible {
+            hidePanel()
         } else {
-            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-            NSApplication.shared.activate()
+            showPanel(relativeTo: sender)
         }
+    }
+
+    private func showPanel(relativeTo button: NSStatusBarButton) {
+        guard let panel, let window = button.window, let screen = window.screen else { return }
+        let buttonFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
+        let visibleFrame = screen.visibleFrame
+        let maximumX = max(visibleFrame.minX, visibleFrame.maxX - panel.frame.width)
+        let maximumY = max(visibleFrame.minY, visibleFrame.maxY - panel.frame.height)
+        let x = min(max(buttonFrame.midX - panel.frame.width / 2, visibleFrame.minX), maximumX)
+        let y = min(max(buttonFrame.minY - panel.frame.height, visibleFrame.minY), maximumY)
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        panel.orderFront(nil)
+    }
+
+    private func hidePanel() {
+        panel?.orderOut(nil)
     }
 
     private func showStatusMenu(_ button: NSStatusBarButton) {
@@ -164,9 +172,6 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc private func quitRelayKit(_ sender: Any?) {
-        if let outsideClickMonitor {
-            NSEvent.removeMonitor(outsideClickMonitor)
-        }
         NSApplication.shared.terminate(sender)
     }
 
@@ -269,7 +274,10 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let smokeEvidencePath else { return }
         let buttonFrame = statusItem?.button?.window?.frame ?? .zero
         let activeTab = smokeShowsProvider ? "provider" : smokeTab.rawValue
-        let contentWindow = popover.contentViewController?.view.window
+        let contentWindow = panel?.contentViewController?.view.window
+        let panelIsVisible = panel?.isVisible ?? false
+        let panelWidth = panel?.frame.width ?? 520
+        let panelHeight = panel?.frame.height ?? 680
         let referenceLabels = model.localCatalog?.sourceGroups.map(\.publicLabel) ?? []
         let importGroup = model.localCatalog?.sourceGroups.first
         let configuredLabels = model.configuredProviders.map(\.name)
@@ -521,15 +529,16 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 "height": buttonFrame.height,
                 "kind": "compact-icon",
             ],
-            "popover": [
-                "shown": popover.isShown,
+            "panel": [
+                "shown": panelIsVisible,
+                "primitive": "nonactivating-nspanel",
                 "ordinary_window": contentWindow?.styleMask.contains(.titled) ?? false,
-                "anchored": popover.isShown && buttonFrame.width > 0 && buttonFrame.height > 0,
-                "width": popover.contentSize.width,
-                "height": popover.contentSize.height,
+                "anchored": panelIsVisible && buttonFrame.width > 0 && buttonFrame.height > 0,
+                "width": panelWidth,
+                "height": panelHeight,
             ],
             "surface": [
-                "kind": "menu-bar-popover",
+                "kind": "menu-bar-panel",
                 "tab": activeTab,
                 "sections": Array(smokeSections).sorted(),
             ],
