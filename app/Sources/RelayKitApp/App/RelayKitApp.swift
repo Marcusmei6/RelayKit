@@ -5,7 +5,8 @@ import SwiftUI
 
 @main
 @MainActor
-final class RelayKitApp: NSObject, NSApplicationDelegate {
+final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+    private static let popoverAccessibilityIdentifier = "relaykit-popover-root"
     private let model = AppModel()
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
@@ -79,6 +80,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
                 .environmentObject(model)
                 .frame(width: 520, height: 680)
         )
+        popover.delegate = self
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.popover.performClose(nil)
@@ -110,7 +112,30 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         popover.performClose(nil)
     }
 
+    func popoverDidShow(_ notification: Notification) {
+        attachPopoverAccessibilityRoot()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        detachPopoverAccessibilityRoot()
+    }
+
+    private func attachPopoverAccessibilityRoot() {
+        guard let statusItem, let button = statusItem.button else { return }
+        popover.setAccessibilityElement(true)
+        popover.setAccessibilityRole(.popover)
+        popover.setAccessibilityIdentifier(Self.popoverAccessibilityIdentifier)
+        popover.setAccessibilityParent(button)
+        button.setAccessibilityChildren([popover])
+    }
+
+    private func detachPopoverAccessibilityRoot() {
+        statusItem?.button?.setAccessibilityChildren([])
+        popover.setAccessibilityParent(nil)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        detachPopoverAccessibilityRoot()
         model.stopGateway()
         model.stopOfficialAuthProcessForShutdown()
     }

@@ -83,6 +83,7 @@ run_failure invalid_arguments \
   --model-label "Official GPT-5.5" --catalog-labels-file "${tmp_dir}/catalog.json"
 run_failure invalid_command "${binary}" self-test --scenario exact
 run_failure invalid_arguments "${binary}" relaykit-provider-configure --pid 1 --window-identity "${tmp_dir}/window.json"
+run_failure invalid_arguments "${binary}" relaykit-provider-protocol-probe --pid 1 --window-identity "${tmp_dir}/window.json"
 run_failure invalid_arguments "${binary}" relaykit-provider-verify --pid 1 --window-identity "${tmp_dir}/window.json"
 run_failure invalid_arguments "${binary}" relaykit-gateway-start --pid 1
 run_failure invalid_command \
@@ -178,14 +179,14 @@ relaykit_layer25_nil_frontmost_metadata='{
   ],
   "ax_window_numbers": [42,null]
 }'
-for relaykit_command in relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start; do
+for relaykit_command in relaykit-provider-configure relaykit-provider-protocol-probe relaykit-provider-verify relaykit-gateway-start; do
   for frontmost_case in other nil; do
     case "${frontmost_case}" in
       other) relaykit_metadata="${relaykit_layer25_other_frontmost_metadata}" ;;
       nil) relaykit_metadata="${relaykit_layer25_nil_frontmost_metadata}" ;;
     esac
     case "${relaykit_command}" in
-      relaykit-provider-configure)
+      relaykit-provider-configure|relaykit-provider-protocol-probe)
         run_bound_window_success \
           "${relaykit_command}-layer25-${frontmost_case}-frontmost" "${relaykit_command}" 4201 42 \
           "${relaykit_configure_options[@]}" <<<"${relaykit_metadata}"
@@ -242,9 +243,9 @@ relaykit_empty_windows_single_popover_metadata='{
   "semantic_target_ids": [2,3],
   "expected_semantic_target_count": 1
 }'
-for relaykit_command in relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start; do
+for relaykit_command in relaykit-provider-configure relaykit-provider-protocol-probe relaykit-provider-verify relaykit-gateway-start; do
   case "${relaykit_command}" in
-    relaykit-provider-configure)
+    relaykit-provider-configure|relaykit-provider-protocol-probe)
       run_bound_window_success \
         "${relaykit_command}-empty-windows-single-popover" "${relaykit_command}" 4203 53 \
         "${relaykit_configure_options[@]}" <<<"${relaykit_empty_windows_single_popover_metadata}"
@@ -554,6 +555,20 @@ run_bound_window_failure window_selector_not_unique relaykit-application-root-po
 JSON
 jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
   fail "RelayKit application root was accepted as the action root"
+
+run_bound_window_failure window_identity_changed relaykit-probe-identity-mismatch relaykit-provider-protocol-probe 4700 200 "${relaykit_configure_options[@]}" <<<'{"current_identity":{"pid":4700,"window_id":201},"process_running":true,"bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,"windows":[{"owner_pid":4700,"window_id":200,"layer":25}],"ax_window_numbers":[200]}'
+run_bound_window_failure window_identity_changed relaykit-probe-pid-reread-mismatch relaykit-provider-protocol-probe 4705 205 "${relaykit_configure_options[@]}" <<<'{"current_identity":{"pid":4799,"window_id":205},"process_running":true,"bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,"windows":[{"owner_pid":4705,"window_id":205,"layer":25}],"ax_window_numbers":[205]}'
+run_bound_window_failure process_identity_mismatch relaykit-probe-no-desktop-fallback relaykit-provider-protocol-probe 4701 201 \
+  "${relaykit_configure_options[@]}" <<<'{"current_identity":{"pid":4701,"window_id":201},"process_running":true,"bundle_identifier":"com.openai.codex","frontmost_pid":null,"accessibility_trusted":true,"windows":[{"owner_pid":4701,"window_id":201,"layer":25}],"ax_window_numbers":[201]}'
+run_bound_window_failure window_selector_not_unique relaykit-probe-zero-popovers relaykit-provider-protocol-probe 4702 202 \
+  "${relaykit_configure_options[@]}" <<<'{"current_identity":{"pid":4702,"window_id":202},"process_running":true,"bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,"windows":[{"owner_pid":4702,"window_id":202,"layer":25}],"ax_window_numbers":[],"root_id":0,"nodes":[{"id":0,"role":"AXApplication","children":[1]},{"id":1,"role":"AXGroup","children":[]}]}'
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null || fail "probe zero popovers did not fail closed"
+run_bound_window_failure window_selector_not_unique relaykit-probe-two-popovers relaykit-provider-protocol-probe 4703 203 \
+  "${relaykit_configure_options[@]}" <<<'{"current_identity":{"pid":4703,"window_id":203},"process_running":true,"bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,"windows":[{"owner_pid":4703,"window_id":203,"layer":25}],"ax_window_numbers":[],"root_id":0,"nodes":[{"id":0,"role":"AXApplication","children":[1,2]},{"id":1,"role":"AXPopover","children":[]},{"id":2,"role":"AXPopover","children":[]}]}'
+jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null || fail "probe multiple popovers did not fail closed"
+run_bound_window_failure window_selector_not_unique relaykit-probe-app-root relaykit-provider-protocol-probe 4704 204 \
+  "${relaykit_configure_options[@]}" <<<'{"current_identity":{"pid":4704,"window_id":204},"process_running":true,"bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,"windows":[{"owner_pid":4704,"window_id":204,"layer":25}],"ax_window_numbers":[],"root_id":0,"nodes":[{"id":0,"role":"AXPopover","children":[]}]}'
+jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null || fail "probe accepted the App root as a popover"
 
 run_bound_window_success desktop-layer0 inspect 4301 61 <<'JSON'
 {
@@ -878,18 +893,10 @@ run_ax_inspect_failure window_identity_changed relaykit-ax-wrong-window 4603 62 
 }
 JSON
 
-run_ax_inspect_failure frontmost_identity_mismatch relaykit-ax-not-frontmost 4604 72 <<'JSON'
-{
-  "current_identity":{"pid":4604,"window_id":72},
-  "process_running":true,
-  "bundle_identifier":"dev.relaykit.app",
-  "frontmost_pid":9999,
-  "accessibility_trusted":true,
-  "windows":[{"owner_pid":4604,"window_id":72,"layer":25}],
-  "ax_windows_available":true,"ax_windows_count":1,"root_id":0,
-  "nodes":[{"id":0,"role":"AXApplication","children":[]}]
-}
-JSON
+run_ax_inspect_success relaykit-ax-other-frontmost 4604 72 <<<'{"current_identity":{"pid":4604,"window_id":72},"process_running":true,"bundle_identifier":"dev.relaykit.app","frontmost_pid":9999,"accessibility_trusted":true,"windows":[{"owner_pid":4604,"window_id":72,"layer":25}],"ax_windows_available":true,"ax_windows_count":1,"root_id":0,"nodes":[{"id":0,"role":"AXApplication","children":[]}]}'
+run_ax_inspect_success relaykit-ax-nil-frontmost 4606 92 <<<'{"current_identity":{"pid":4606,"window_id":92},"process_running":true,"bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,"windows":[{"owner_pid":4606,"window_id":92,"layer":25}],"ax_windows_available":true,"ax_windows_count":1,"root_id":0,"nodes":[{"id":0,"role":"AXApplication","children":[]}]}'
+run_ax_inspect_failure window_identity_changed relaykit-ax-reread-pid-mismatch 4607 102 <<<'{"current_identity":{"pid":4699,"window_id":102},"process_running":true,"bundle_identifier":"dev.relaykit.app","frontmost_pid":4607,"accessibility_trusted":true,"windows":[{"owner_pid":4607,"window_id":102,"layer":25}],"ax_windows_available":true,"ax_windows_count":1,"root_id":0,"nodes":[{"id":0,"role":"AXApplication","children":[]}]}'
+run_ax_inspect_failure process_unavailable relaykit-ax-process-down 4608 112 <<<'{"current_identity":{"pid":4608,"window_id":112},"process_running":false,"bundle_identifier":"dev.relaykit.app","frontmost_pid":4608,"accessibility_trusted":true,"windows":[{"owner_pid":4608,"window_id":112,"layer":25}],"ax_windows_available":true,"ax_windows_count":1,"root_id":0,"nodes":[{"id":0,"role":"AXApplication","children":[]}]}'
 
 run_ax_inspect_failure accessibility_permission_unavailable relaykit-ax-untrusted-diagnostic 4605 82 <<'JSON'
 {
@@ -1057,6 +1064,62 @@ run_success "${self_test[@]}" --scenario empty-composer
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
   fail "Codex placeholder-backed empty composer was not recognized exactly"
 
+for missing_scenario in protocol-identifier-distractors protocol-identifier-zero; do
+  run_failure relaykit_protocol_identifier_missing "${self_test[@]}" --scenario "${missing_scenario}"
+  jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
+    fail "${missing_scenario} did not report exact identifier count 0"
+done
+
+run_failure relaykit_protocol_identifier_multiple \
+  "${self_test[@]}" --scenario protocol-identifier-multiple
+jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null ||
+  fail "duplicate protocol identifiers did not report exact count 2"
+
+for disabled_scenario in \
+  protocol-identifier-disabled-false \
+  protocol-identifier-disabled-missing \
+  protocol-identifier-disabled-malformed \
+  protocol-identifier-disabled-unreadable; do
+  run_failure relaykit_protocol_identifier_disabled "${self_test[@]}" --scenario "${disabled_scenario}"
+  jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+    fail "${disabled_scenario} did not preserve exact identifier count 1"
+done
+
+run_success "${self_test[@]}" --scenario protocol-same-node-success
+jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+  fail "same-node protocol value did not verify exactly one identifier"
+
+run_success "${self_test[@]}" --scenario protocol-values-both-expected
+run_success "${self_test[@]}" --scenario protocol-selected-value-success
+
+for conflict_scenario in \
+  protocol-value-conflict-value-expected \
+  protocol-value-conflict-selected-expected; do
+  run_failure relaykit_protocol_value_conflict "${self_test[@]}" --scenario "${conflict_scenario}"
+  jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+    fail "${conflict_scenario} did not preserve exact identifier count 1"
+done
+
+for malformed_scenario in \
+  protocol-value-expected-selected-malformed \
+  protocol-value-expected-selected-unreadable; do
+  run_failure relaykit_protocol_value_not_verified "${self_test[@]}" --scenario "${malformed_scenario}"
+done
+
+run_failure relaykit_protocol_value_split "${self_test[@]}" --scenario protocol-value-split
+jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+  fail "split protocol value did not preserve exact identifier count 1"
+
+for unverified_scenario in \
+  protocol-value-not-verified \
+  protocol-value-unreadable \
+  protocol-value-split-unreadable \
+  protocol-traversal-truncated; do
+  run_failure relaykit_protocol_value_not_verified "${self_test[@]}" --scenario "${unverified_scenario}"
+  jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+    fail "${unverified_scenario} did not preserve exact identifier count 1"
+done
+
 query_file="${tmp_dir}/query.txt"
 printf '%s\n' 'RELAYKIT_PRIVATE_QUERY_SENTINEL' >"${query_file}"
 chmod 644 "${query_file}"
@@ -1151,7 +1214,7 @@ test "$(rg -c 'waitForUniqueApplicationOverlaySelector' <<<"${submit_body}")" -e
 test "$(rg -c 'applicationOverlayNode' <<<"${submit_body}")" -eq 2 ||
   fail "native model-menu presses must resolve exact same-PID overlay nodes"
 
-for relaykit_command in relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start; do
+for relaykit_command in relaykit-provider-configure relaykit-provider-protocol-probe relaykit-provider-verify relaykit-gateway-start; do
   rg -Fq "${relaykit_command}" "${SOURCE}" ||
     fail "driver is missing concrete RelayKit action ${relaykit_command}"
 done
@@ -1161,6 +1224,31 @@ rg -Fq 'provider-api-base-url-field' "${SOURCE}" || fail "provider setup must us
 rg -Fq 'api-key-new-input-field' "${SOURCE}" || fail "provider setup must use the exact key field identifier"
 rg -Fq 'provider-model-id-field' "${SOURCE}" || fail "provider setup must use the exact model field identifier"
 rg -Fq 'provider-upstream-protocol-option-openai_responses' "${SOURCE}" || fail "provider setup must select the exact Responses option"
+rg -Fq 'verifyRelayKitProtocolSelection' "${SOURCE}" || fail "provider setup must classify the post-selection protocol state"
+rg -Fq 'axIdentifierAttribute' "${SOURCE}" || fail "protocol verification must read the exact AXIdentifier attribute"
+draft_helper_body="$(sed -n '/private func performRelayKitProviderDraftSelection/,/^}/p' "${SOURCE}")"
+configure_body="$(sed -n '/private func executeRelayKitProviderConfigure/,/^}/p' "${SOURCE}")"
+probe_body="$(sed -n '/private func executeRelayKitProviderProtocolProbe/,/^}/p' "${SOURCE}")"
+rg -Fq 'relaykit-provider-protocol-probe' "${SOURCE}" || fail "driver is missing the protocol probe command"
+[[ "$(rg -c 'case relayKitProviderProtocolProbe = ' "${SOURCE}")" -eq 1 ]] || fail "driver must define exactly one new command"
+[[ "$(wc -l <<<"${draft_helper_body}" | tr -d ' ')" -le 90 ]] || fail "shared draft selection helper exceeds 90 lines"
+[[ "$(rg -c 'provider-form-save' "${SOURCE}")" -eq 1 ]] || fail "production must contain exactly one literal provider-form-save"
+for forbidden_downstream_text in provider-form-save relaykit-provider-configure relaykit-provider-verify relaykit-gateway-start executeRelayKitProviderConfigure executeRelayKitProviderVerify executeRelayKitGatewayStart provider-saved-key-state gateway-start; do
+  for pre_save_body in "${draft_helper_body}" "${probe_body}"; do
+    ! rg -Fq "${forbidden_downstream_text}" <<<"${pre_save_body}" || fail "helper or probe crossed into ${forbidden_downstream_text}"
+  done
+done
+[[ "$(rg -c 'performRelayKitProviderDraftSelection' <<<"${configure_body}")" -eq 1 ]] ||
+  fail "provider configure must call the shared draft selection helper once"
+[[ "$(rg -c 'performRelayKitProviderDraftSelection' <<<"${probe_body}")" -eq 1 ]] ||
+  fail "protocol probe must call the shared draft selection helper once"
+[[ "$(rg -c 'provider-form-save' <<<"${configure_body}")" -eq 1 ]] ||
+  fail "provider configure must retain exactly one Save action"
+rg -Uq 'performRelayKitProviderDraftSelection(.|\n)*provider-form-save' <<<"${configure_body}" ||
+  fail "provider configure must call the shared helper before Save"
+if rg -Fq 'waitForRelayKitSemantic(' <<<"${configure_body}"; then
+  fail "provider configure must not verify protocol selection through merged semantic strings"
+fi
 rg -Fq 'provider-saved-key-state' "${SOURCE}" || fail "relaunch verification must require the saved-key UI state"
 rg -Fq 'gateway-start' "${SOURCE}" || fail "gateway start must use the exact App control"
 

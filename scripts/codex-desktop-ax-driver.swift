@@ -10,6 +10,7 @@ private let codexBundleIdentifier = "com.openai.codex"
 private let relayKitBundleIdentifier = "dev.relaykit.app"
 private let axWindowNumberAttribute = "AXWindowNumber" as CFString
 private let axIdentifierAttribute = "AXIdentifier" as CFString
+private let axSelectedValueAttribute = "AXSelectedValue" as CFString
 private let axLabelAttribute = "AXLabel" as CFString
 private let axPlaceholderValueAttribute = "AXPlaceholderValue" as CFString
 private let axLinkRole = "AXLink"
@@ -117,6 +118,7 @@ private enum DriverCommand: String {
     case prepare
     case submit
     case relayKitProviderConfigure = "relaykit-provider-configure"
+    case relayKitProviderProtocolProbe = "relaykit-provider-protocol-probe"
     case relayKitProviderVerify = "relaykit-provider-verify"
     case relayKitGatewayStart = "relaykit-gateway-start"
     case relayKitAXInspect = "relaykit-ax-inspect"
@@ -139,7 +141,8 @@ private func applicationMode(for command: DriverCommand) -> DriverApplicationMod
     switch command {
     case .inspect, .reveal, .ready, .prepare, .submit:
         return .desktop
-    case .relayKitProviderConfigure, .relayKitProviderVerify, .relayKitGatewayStart, .relayKitAXInspect:
+    case .relayKitProviderConfigure, .relayKitProviderProtocolProbe,
+         .relayKitProviderVerify, .relayKitGatewayStart, .relayKitAXInspect:
         return .relayKit
     case .selfTest:
         return nil
@@ -155,7 +158,8 @@ private func redactedCommandName(_ arguments: [String]) -> String {
     guard let raw = arguments.first else { return "unknown" }
     let known = Set([
         "inspect", "reveal", "ready", "prepare", "submit", "self-test",
-        "relaykit-provider-configure", "relaykit-provider-verify", "relaykit-gateway-start",
+        "relaykit-provider-configure", "relaykit-provider-protocol-probe",
+        "relaykit-provider-verify", "relaykit-gateway-start",
         "relaykit-ax-inspect",
     ])
     return known.contains(raw) ? raw : "unknown"
@@ -173,7 +177,7 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
         return ["--pid", "--window-identity", "--workspace"]
     case .submit:
         return ["--pid", "--window-identity", "--model-label", "--catalog-labels-file", "--query-file"]
-    case .relayKitProviderConfigure:
+    case .relayKitProviderConfigure, .relayKitProviderProtocolProbe:
         return [
             "--pid", "--window-identity", "--provider-name", "--base-url",
             "--synthetic-key", "--model-id",
@@ -189,7 +193,17 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
             throw DriverFailure("invalid_arguments", exitStatus: 2)
         }
         switch scenario {
-        case "exact", "zero", "multiple", "reveal-exact", "reveal-multiple", "window-fallback", "window-ambiguous", "model-ui-labels", "send-structure", "composer-value", "empty-composer":
+        case "exact", "zero", "multiple", "reveal-exact", "reveal-multiple", "window-fallback", "window-ambiguous", "model-ui-labels", "send-structure", "composer-value", "empty-composer",
+             "protocol-identifier-distractors", "protocol-identifier-zero",
+             "protocol-identifier-multiple", "protocol-identifier-disabled-false",
+             "protocol-identifier-disabled-missing", "protocol-identifier-disabled-malformed",
+             "protocol-identifier-disabled-unreadable", "protocol-same-node-success",
+             "protocol-values-both-expected", "protocol-selected-value-success",
+             "protocol-value-conflict-value-expected", "protocol-value-conflict-selected-expected",
+             "protocol-value-expected-selected-malformed", "protocol-value-expected-selected-unreadable",
+             "protocol-value-split", "protocol-value-not-verified",
+             "protocol-value-unreadable", "protocol-value-split-unreadable",
+             "protocol-traversal-truncated":
             return ["--scenario"]
         case "query-permissions":
             return ["--scenario", "--query-file"]
@@ -801,10 +815,275 @@ private struct AXNode {
     let semantic: SemanticRecord
 }
 
+private enum RelayKitProtocolStringRead {
+    case value(String)
+    case missing
+    case malformed
+    case unreadable
+}
+
+private enum RelayKitProtocolEnabledRead {
+    case value(Bool)
+    case missing
+    case malformed
+    case unreadable
+}
+
+private struct RelayKitProtocolNodeState {
+    let identifier: RelayKitProtocolStringRead
+    let enabled: RelayKitProtocolEnabledRead
+    let selectedValues: [RelayKitProtocolStringRead]
+}
+
+private struct RelayKitProtocolTraversal {
+    let nodes: [RelayKitProtocolNodeState]
+    let complete: Bool
+}
+
+private struct RelayKitProtocolClassification {
+    let code: String
+    let candidateCount: Int
+    let verified: Bool
+}
+
+private let relayKitProtocolSelectorIdentifier = "provider-upstream-protocol-selector"
+private let relayKitProtocolExpectedValue = "OpenAI Responses"
+
+private func classifyRelayKitProtocolSelection(
+    nodes: [RelayKitProtocolNodeState],
+    traversalComplete: Bool
+) -> RelayKitProtocolClassification {
+    let exactMatches = nodes.indices.filter { index in
+        if case .value(let value) = nodes[index].identifier {
+            return value == relayKitProtocolSelectorIdentifier
+        }
+        return false
+    }
+    let candidateCount = exactMatches.count
+    if candidateCount == 0 {
+        return RelayKitProtocolClassification(
+            code: "relaykit_protocol_identifier_missing",
+            candidateCount: 0,
+            verified: false
+        )
+    }
+    if candidateCount > 1 {
+        return RelayKitProtocolClassification(
+            code: "relaykit_protocol_identifier_multiple",
+            candidateCount: candidateCount,
+            verified: false
+        )
+    }
+    guard traversalComplete,
+          !nodes.contains(where: {
+              if case .unreadable = $0.identifier { return true }
+              if case .malformed = $0.identifier { return true }
+              return false
+          }) else {
+        return RelayKitProtocolClassification(
+            code: "relaykit_protocol_value_not_verified",
+            candidateCount: candidateCount,
+            verified: false
+        )
+    }
+
+    let targetIndex = exactMatches[0]
+    guard case .value(true) = nodes[targetIndex].enabled else {
+        return RelayKitProtocolClassification(
+            code: "relaykit_protocol_identifier_disabled",
+            candidateCount: candidateCount,
+            verified: false
+        )
+    }
+    let targetValues = nodes[targetIndex].selectedValues
+    guard !targetValues.contains(where: {
+        if case .malformed = $0 { return true }
+        if case .unreadable = $0 { return true }
+        return false
+    }) else {
+        return RelayKitProtocolClassification(
+            code: "relaykit_protocol_value_not_verified",
+            candidateCount: candidateCount,
+            verified: false
+        )
+    }
+    let explicitTargetValues = targetValues.compactMap { selectedValue -> String? in
+        if case .value(let value) = selectedValue { return value }
+        return nil
+    }
+    if Set(explicitTargetValues).count > 1 {
+        return RelayKitProtocolClassification(
+            code: "relaykit_protocol_value_conflict",
+            candidateCount: candidateCount,
+            verified: false
+        )
+    }
+    if explicitTargetValues.contains(relayKitProtocolExpectedValue) {
+        return RelayKitProtocolClassification(code: "ok", candidateCount: candidateCount, verified: true)
+    }
+
+    var otherValueUnreadable = false
+    var splitValue = false
+    for index in nodes.indices where index != targetIndex {
+        for selectedValue in nodes[index].selectedValues {
+            switch selectedValue {
+            case .value(let value):
+                if value == relayKitProtocolExpectedValue {
+                    splitValue = true
+                }
+            case .malformed, .unreadable:
+                otherValueUnreadable = true
+            case .missing:
+                break
+            }
+        }
+    }
+    if otherValueUnreadable {
+        return RelayKitProtocolClassification(
+            code: "relaykit_protocol_value_not_verified",
+            candidateCount: candidateCount,
+            verified: false
+        )
+    }
+    if splitValue {
+        return RelayKitProtocolClassification(
+            code: "relaykit_protocol_value_split",
+            candidateCount: candidateCount,
+            verified: false
+        )
+    }
+    return RelayKitProtocolClassification(
+        code: "relaykit_protocol_value_not_verified",
+        candidateCount: candidateCount,
+        verified: false
+    )
+}
+
+private func verifyRelayKitProtocolSelection(
+    nodes: [RelayKitProtocolNodeState],
+    traversalComplete: Bool
+) throws -> Int {
+    let classification = classifyRelayKitProtocolSelection(
+        nodes: nodes,
+        traversalComplete: traversalComplete
+    )
+    guard classification.verified else {
+        throw DriverFailure(
+            classification.code,
+            exitStatus: 6,
+            candidateCount: classification.candidateCount
+        )
+    }
+    return classification.candidateCount
+}
+
 private typealias SemanticSelector = (SemanticRecord) -> Bool
 
 private func copyAXString(_ element: AXUIElement, _ attribute: CFString) -> String? {
     copyAXAttribute(element, attribute) as? String
+}
+
+private func relayKitProtocolStringRead(
+    _ element: AXUIElement,
+    attribute: CFString
+) -> RelayKitProtocolStringRead {
+    var rawValue: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(element, attribute, &rawValue)
+    switch status {
+    case .success:
+        guard let rawValue, CFGetTypeID(rawValue) == CFStringGetTypeID(),
+              let value = rawValue as? String, !value.isEmpty else {
+            return .malformed
+        }
+        return .value(value)
+    case .noValue, .attributeUnsupported:
+        return .missing
+    default:
+        return .unreadable
+    }
+}
+
+private func relayKitProtocolEnabledRead(_ element: AXUIElement) -> RelayKitProtocolEnabledRead {
+    var rawValue: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(
+        element,
+        kAXEnabledAttribute as CFString,
+        &rawValue
+    )
+    switch status {
+    case .success:
+        guard let rawValue, CFGetTypeID(rawValue) == CFBooleanGetTypeID(),
+              let value = rawValue as? NSNumber else {
+            return .malformed
+        }
+        return .value(value.boolValue)
+    case .noValue, .attributeUnsupported:
+        return .missing
+    default:
+        return .unreadable
+    }
+}
+
+private func relayKitProtocolNodeState(_ element: AXUIElement) -> RelayKitProtocolNodeState {
+    RelayKitProtocolNodeState(
+        identifier: relayKitProtocolStringRead(element, attribute: axIdentifierAttribute),
+        enabled: relayKitProtocolEnabledRead(element),
+        selectedValues: [
+            relayKitProtocolStringRead(element, attribute: kAXValueAttribute as CFString),
+            relayKitProtocolStringRead(element, attribute: axSelectedValueAttribute),
+        ]
+    )
+}
+
+private func relayKitProtocolTraversal(from root: AXUIElement) -> RelayKitProtocolTraversal {
+    var states: [RelayKitProtocolNodeState] = []
+    var visited: [AXUIElement] = []
+    var complete = true
+
+    func append(_ element: AXUIElement, depth: Int) {
+        guard complete else { return }
+        guard depth <= maximumAXDepth, states.count < maximumAXNodes else {
+            complete = false
+            return
+        }
+        guard !visited.contains(where: { CFEqual($0, element) }) else {
+            complete = false
+            return
+        }
+        visited.append(element)
+        states.append(relayKitProtocolNodeState(element))
+
+        var rawChildren: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            element,
+            kAXChildrenAttribute as CFString,
+            &rawChildren
+        )
+        let children: [AXUIElement]
+        switch status {
+        case .success:
+            guard let resolved = rawChildren as? [AXUIElement] else {
+                complete = false
+                return
+            }
+            children = resolved
+        case .noValue:
+            children = []
+        default:
+            complete = false
+            return
+        }
+        if depth == maximumAXDepth, !children.isEmpty {
+            complete = false
+            return
+        }
+        for child in children {
+            append(child, depth: depth + 1)
+        }
+    }
+
+    append(root, depth: 0)
+    return RelayKitProtocolTraversal(nodes: states, complete: complete)
 }
 
 private func semanticRecord(for element: AXUIElement) -> SemanticRecord {
@@ -1527,7 +1806,7 @@ private func verifyAXDiagnosticIdentity(_ context: DriverContext) throws {
         windowServerMetadata: currentWindowServerMetadata,
         frontmostPID: { NSWorkspace.shared.frontmostApplication?.processIdentifier },
         accessibilityTrusted: { AXIsProcessTrusted() },
-        requireFrontmost: true
+        requireFrontmost: false
     )
 }
 
@@ -1875,12 +2154,38 @@ private func waitForRelayKitSemantic(
     }
 }
 
-private func executeRelayKitProviderConfigure(options: [String: String]) throws -> DriverReport {
+private func waitForRelayKitProtocolSelection(context: DriverContext) throws {
+    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    while true {
+        let bound = try verifyBoundWindow(context)
+        let traversal = relayKitProtocolTraversal(from: bound.window)
+        let classification = classifyRelayKitProtocolSelection(
+            nodes: traversal.nodes,
+            traversalComplete: traversal.complete
+        )
+        if classification.verified {
+            return
+        }
+        if classification.code == "relaykit_protocol_identifier_multiple" || Date() >= deadline {
+            throw DriverFailure(
+                classification.code,
+                exitStatus: 6,
+                candidateCount: classification.candidateCount
+            )
+        }
+        Thread.sleep(forTimeInterval: selectorPollSeconds)
+    }
+}
+
+private func performRelayKitProviderDraftSelection(
+    options: [String: String],
+    command: DriverCommand
+) throws -> (context: DriverContext, providerName: String) {
     let provider = try validatedRelayKitProviderOptions(options, requireSyntheticKey: true)
     guard let syntheticKey = provider.syntheticKey else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
-    let context = try makeContext(options: options, command: .relayKitProviderConfigure)
+    let context = try makeContext(options: options, command: command)
     let buttonRoles = Set([kAXButtonRole as String])
     let popupRoles = Set([kAXPopUpButtonRole as String, kAXButtonRole as String])
 
@@ -1932,11 +2237,18 @@ private func executeRelayKitProviderConfigure(options: [String: String]) throws 
         selector: responsesOption,
         targetProvider: { try applicationOverlayNode(context: $0, selector: responsesOption) }
     )
-    try waitForRelayKitSemantic(
-        context: context,
-        identifier: "provider-upstream-protocol-selector",
-        expected: "OpenAI Responses"
+    try waitForRelayKitProtocolSelection(context: context)
+
+    return (context, provider.name)
+}
+
+private func executeRelayKitProviderConfigure(options: [String: String]) throws -> DriverReport {
+    let draft = try performRelayKitProviderDraftSelection(
+        options: options,
+        command: .relayKitProviderConfigure
     )
+    let context = draft.context
+    let buttonRoles = Set([kAXButtonRole as String])
 
     let saveSelector = relayKitIdentifierSelector("provider-form-save", roles: buttonRoles, pressable: true)
     try waitForUniqueSelector(context: context, selector: saveSelector)
@@ -1944,7 +2256,7 @@ private func executeRelayKitProviderConfigure(options: [String: String]) throws 
     try waitForUniqueSelector(
         context: context,
         selector: relayKitIdentifierSelector(
-            "provider-\(relayKitProviderID(provider.name))",
+            "provider-\(relayKitProviderID(draft.providerName))",
             roles: buttonRoles,
             pressable: true
         )
@@ -1954,6 +2266,19 @@ private func executeRelayKitProviderConfigure(options: [String: String]) throws 
         windowVerified: true,
         candidateCount: 1,
         actionCount: 10
+    )
+}
+
+private func executeRelayKitProviderProtocolProbe(options: [String: String]) throws -> DriverReport {
+    _ = try performRelayKitProviderDraftSelection(
+        options: options,
+        command: .relayKitProviderProtocolProbe
+    )
+    return .success(
+        command: "relaykit-provider-protocol-probe",
+        windowVerified: true,
+        candidateCount: 1,
+        actionCount: 9
     )
 }
 
@@ -2053,9 +2378,118 @@ private func syntheticHeading(_ value: String) -> SemanticRecord {
     )
 }
 
+private func syntheticProtocolNode(
+    identifier: RelayKitProtocolStringRead = .missing,
+    enabled: RelayKitProtocolEnabledRead = .value(true),
+    selectedValues: [RelayKitProtocolStringRead] = [.missing, .missing]
+) -> RelayKitProtocolNodeState {
+    RelayKitProtocolNodeState(
+        identifier: identifier,
+        enabled: enabled,
+        selectedValues: selectedValues
+    )
+}
+
+private func syntheticProtocolScenario(
+    _ scenario: String
+) -> (nodes: [RelayKitProtocolNodeState], complete: Bool)? {
+    let exactIdentifier = RelayKitProtocolStringRead.value(relayKitProtocolSelectorIdentifier)
+    let expectedValue = RelayKitProtocolStringRead.value(relayKitProtocolExpectedValue)
+    switch scenario {
+    case "protocol-identifier-distractors":
+        return (
+            [
+                syntheticProtocolNode(
+                    identifier: .value("provider-upstream-protocol-selector-distractor"),
+                    selectedValues: [expectedValue, .missing]
+                ),
+                syntheticProtocolNode(selectedValues: [expectedValue, .missing]),
+            ],
+            true
+        )
+    case "protocol-identifier-zero":
+        return ([], true)
+    case "protocol-identifier-multiple":
+        return (
+            [
+                syntheticProtocolNode(identifier: exactIdentifier),
+                syntheticProtocolNode(identifier: exactIdentifier),
+            ],
+            true
+        )
+    case "protocol-identifier-disabled-false":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, enabled: .value(false))], true)
+    case "protocol-identifier-disabled-missing":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, enabled: .missing)], true)
+    case "protocol-identifier-disabled-malformed":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, enabled: .malformed)], true)
+    case "protocol-identifier-disabled-unreadable":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, enabled: .unreadable)], true)
+    case "protocol-same-node-success":
+        return (
+            [syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [expectedValue, .missing])],
+            true
+        )
+    case "protocol-values-both-expected":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [expectedValue, expectedValue])], true)
+    case "protocol-selected-value-success":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [.missing, expectedValue])], true)
+    case "protocol-value-conflict-value-expected":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [expectedValue, .value("Other")])], true)
+    case "protocol-value-conflict-selected-expected":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [.value("Other"), expectedValue])], true)
+    case "protocol-value-expected-selected-malformed":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [expectedValue, .malformed])], true)
+    case "protocol-value-expected-selected-unreadable":
+        return ([syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [expectedValue, .unreadable])], true)
+    case "protocol-value-split":
+        return (
+            [
+                syntheticProtocolNode(identifier: exactIdentifier),
+                syntheticProtocolNode(selectedValues: [expectedValue, .missing]),
+            ],
+            true
+        )
+    case "protocol-value-not-verified":
+        return ([syntheticProtocolNode(identifier: exactIdentifier)], true)
+    case "protocol-value-unreadable":
+        return (
+            [syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [.unreadable, .missing])],
+            true
+        )
+    case "protocol-value-split-unreadable":
+        return (
+            [
+                syntheticProtocolNode(identifier: exactIdentifier),
+                syntheticProtocolNode(selectedValues: [expectedValue, .missing]),
+                syntheticProtocolNode(selectedValues: [.unreadable, .missing]),
+            ],
+            true
+        )
+    case "protocol-traversal-truncated":
+        return (
+            [syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [expectedValue, .missing])],
+            false
+        )
+    default:
+        return nil
+    }
+}
+
 private func executeSelfTest(options: [String: String]) throws -> DriverReport {
     guard let scenario = options["--scenario"] else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    if let protocolScenario = syntheticProtocolScenario(scenario) {
+        let candidateCount = try verifyRelayKitProtocolSelection(
+            nodes: protocolScenario.nodes,
+            traversalComplete: protocolScenario.complete
+        )
+        return .success(
+            command: "self-test",
+            candidateCount: candidateCount,
+            actionCount: 0
+        )
     }
     switch scenario {
     case "exact":
@@ -2438,7 +2872,7 @@ private func executeAXDiagnosticTest(
         windowServerMetadata: { input.windows },
         frontmostPID: { input.frontmostPID },
         accessibilityTrusted: { input.accessibilityTrusted },
-        requireFrontmost: true
+        requireFrontmost: false
     )
 
     let nodesByID = Dictionary(uniqueKeysWithValues: input.nodes.map { ($0.id, $0) })
@@ -2488,6 +2922,8 @@ private func execute(_ parsed: ParsedArguments) throws -> DriverReport {
         return try executeSubmit(options: parsed.options)
     case .relayKitProviderConfigure:
         return try executeRelayKitProviderConfigure(options: parsed.options)
+    case .relayKitProviderProtocolProbe:
+        return try executeRelayKitProviderProtocolProbe(options: parsed.options)
     case .relayKitProviderVerify:
         return try executeRelayKitProviderVerify(options: parsed.options)
     case .relayKitGatewayStart:

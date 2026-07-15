@@ -1011,6 +1011,47 @@ func expectGatewayCredentialHandoff() throws {
     }
 }
 
+func expectStatusPopoverAccessibilityContract() throws {
+    let sourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift")
+    let source = try String(contentsOf: sourceURL, encoding: .utf8)
+    guard source.contains("final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate"),
+          source.contains("private let popover = NSPopover()"),
+          source.contains("popover.delegate = self"),
+          source.components(separatedBy: "relaykit-popover-root").count == 2,
+          source.contains("func popoverDidShow") && source.contains("attachPopoverAccessibilityRoot()"),
+          source.contains("func popoverDidClose") && source.contains("detachPopoverAccessibilityRoot()") else {
+        fatalError("status popover AX delegate contract is missing")
+    }
+    guard let attachStart = source.range(of: "private func attachPopoverAccessibilityRoot()"),
+          let detachStart = source.range(of: "private func detachPopoverAccessibilityRoot()", range: attachStart.upperBound..<source.endIndex),
+          let terminateStart = source.range(of: "func applicationWillTerminate", range: detachStart.upperBound..<source.endIndex),
+          let terminateEnd = source.range(of: "@objc private func togglePopover", range: terminateStart.upperBound..<source.endIndex) else {
+        fatalError("status popover AX helper boundaries are missing")
+    }
+    let attach = source[attachStart.lowerBound..<detachStart.lowerBound]
+    let detach = source[detachStart.lowerBound..<terminateStart.lowerBound]
+    let termination = source[terminateStart.lowerBound..<terminateEnd.lowerBound]
+    for required in ["statusItem.button", "popover.setAccessibilityElement(true)", "popover.setAccessibilityRole(.popover)", "popover.setAccessibilityIdentifier", "popover.setAccessibilityParent(button)", "button.setAccessibilityChildren([popover])"] {
+        if !attach.contains(required) { fatalError("popover attach is missing \(required)") }
+    }
+    for required in ["setAccessibilityChildren([])", "popover.setAccessibilityParent(nil)"] {
+        if !detach.contains(required) { fatalError("popover detach is missing \(required)") }
+    }
+    guard let detachCall = termination.range(of: "detachPopoverAccessibilityRoot()"),
+          let gatewayStop = termination.range(of: "model.stopGateway()"),
+          let authStop = termination.range(of: "model.stopOfficialAuthProcessForShutdown()"),
+          detachCall.lowerBound < gatewayStop.lowerBound && gatewayStop.lowerBound < authStop.lowerBound else {
+        fatalError("termination must detach popover AX linkage before shutdown")
+    }
+    for forbidden in ["ContentView", "ProviderForm", "Keychain", "Gateway", "NSPanel", "NSWindow", "accessibilityTitle", "accessibilityValue", "coordinate", "hitTest"] {
+        if attach.contains(forbidden) || detach.contains(forbidden) { fatalError("popover AX helper must not use \(forbidden)") }
+    }
+    for required in ["togglePopover", "popover.show(relativeTo:", "popover.performClose", "showStatusMenu", "quitRelayKit", "addGlobalMonitorForEvents"] {
+        if !source.contains(required) { fatalError("existing popover behavior regressed: \(required)") }
+    }
+}
+
 try expectValid(validConfig)
 try expectProviderDraftWriter()
 try expectProviderDraftWriterWithPrototypeMetadata()
@@ -1042,6 +1083,7 @@ expectProviderConnectionClassification()
 expectUsageAnalytics()
 try expectKeychainCredentialStore()
 try expectGatewayCredentialHandoff()
+try expectStatusPopoverAccessibilityContract()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }
