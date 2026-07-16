@@ -54,13 +54,22 @@ Also run the scans listed in `docs/public-boundary-checklist.md`.
 
 ## RC1 Public Proof Handoff
 
-### Native Responses Chain Wave 2 checkpoint
+### Native Responses Chain Wave 2 closeout
 
-Wave 1 focused contracts passed. Wave 2 now has checked-in non-live contracts for the redacted Responses fixture, exact RelayKit AX provider setup/reopen/Gateway actions, the App-owned-Gateway `rc1_native_responses_three_stage` Desktop profile, and the immutable phase-B manifest with negative branches. This is an implementation/focused-validation checkpoint only: this lane did not build a package, launch RelayKit App or Codex Desktop, write `dist/`, send live requests, or produce a fresh phase-B PASS.
+The final local ad-hoc RC1 candidate completed one fresh App-first plus isolated Codex Desktop native Responses run. Run `rc1-native-20260716T111701Z-external-sandbox` is bound to `dist/RelayKitApp-local.zip` SHA-256 `abf74744aedbe699e20b37064802d8753e40424d8886e68d2c32954eadec776a` and the byte-identical extracted App under `dist/verify-release-10c63cd5/RelayKitApp.app`.
 
-The deferred `relaykit_test` run must bind one current App zip and extracted App to an initially empty isolated provider destination, save the provider through exact AX with `api_format=openai_responses` and a Keychain reference only, relaunch and verify restored UI state, start the bundled Gateway through the UI, then complete A/B/C once each through isolated Desktop. Acceptance additionally requires Desktop WebSocket usage, Gateway SSE fixture events, the exact `printf '<marker>\n'; pwd` call and `function_call_output`, process-bound screenshot evidence, empty `failed_events`, and matching run ids and hashes in the manifest. Independent `relaykit_cr` follows that Test result.
+Authoritative current-run evidence is split by layer:
 
-Do not rewrite historical proof artifacts. Any prior `observation_failed_*` record remains failed and is explicitly ineligible for manifest PASS.
+- `dist/rc1-native-20260716T111701Z-external-sandbox/native-app-evidence.json` proves exact-AX provider creation from an empty destination, `api_format=openai_responses`, Keychain-reference-only persistence, App relaunch, restored protocol/URL/model/saved-key state, and bundled Gateway startup through the App UI.
+- `dist/rc1-native-20260716T111701Z-external-sandbox/desktop-evidence/rc1-native-responses-evidence.json` records `manual_status=route_complete`, `route_proof_status=complete`, empty `failed_events`, Desktop WebSocket ingress, Gateway `/v1/responses` SSE egress, and the current-run tool roundtrip.
+- `dist/rc1-native-20260716T111701Z-external-sandbox/desktop-evidence/automated-stages.json` proves A/B/C each reached `evidence_verified` with one submitted request. `screenshots/rc1-text-1.png`, `screenshots/rc1-markdown-1.png`, and `screenshots/rc1-tool-1.png` show plain text, native Markdown structure, and the native tool block with the exact marker, successful process exit, and current workspace output.
+- `dist/rc1-native-20260716T111701Z-external-sandbox/manifest.json` derives `phase_b=PASS` from those artifacts and records matching run, App zip, harness, scenario, screenshot, usage, provider-event, and provider-config hashes. Its `failed_events` list is empty.
+
+The generic `desktop-render-evidence.json` retains broader manual-proof fields and is not the authority for this three-stage RC1 profile. RC1 rendering is decided by the stage ledger, process-bound screenshot ledger, rollout binding, usage, and tool evidence above; evidence layers must not be mixed.
+
+Historical `observation_failed_*` artifacts remain failed and untouched. They are explicitly ineligible for manifest PASS and must not be copied or relabeled as current evidence.
+
+The final validation passed fresh Go tests including race/vet/gofmt, Swift build and `RelayKitAppValidationTests`, manual-proof/AX/fixture/manifest contract tests, current-artifact menu-bar smoke, diagnostics redaction, Desktop acceptance, public-boundary, shell syntax, and diff checks. After the run, global Codex config SHA-256 remained `af6e93f71db72eaa1a38c1d7018da1f93bc88fdbef357b0cb233627190137b19`, global auth SHA-256 remained `e39d2073d5fee94ab016df8e70341b064569981fd61be486135690113683f043`, and neither `18787` nor `19777` had a RelayKit proof listener.
 
 The RC1 public-proof final matrix passed in a fresh `relaykit_test` lane, and an independent `relaykit_cr` review passed. The visual review type was `independent_visual_review`; `automated_classifier=false` was preserved and was not relabeled. This accepts the public-proof evidence for the local ad-hoc RC1 candidate only. Planner completion still requires a final release inspection of the current artifact.
 
@@ -108,7 +117,7 @@ Current release status:
 - local beta: ready.
 - open-source public-safe: ready.
 - local beta packaging pipeline: ready.
-- Desktop live proof: complete for the current local artifact through one fresh four-stage zero-human run; this does not make the artifact a signed beta.
+- Desktop native Responses proof: complete for the current local artifact through the fresh A/B/C run above. The earlier four-stage standard route proof is a separate evidence layer; neither makes the artifact a signed beta.
 - signed beta scaffolding: present, blocked until real Apple distribution inputs exist.
 - signed beta: blocked by Apple Developer Program approval.
 - public release: not complete.

@@ -100,9 +100,12 @@ jq -e --argjson required "${required_native_predicates}" '
   all($required[]; $root.predicate_ledger[.] == true)
 ' "${native_evidence}" >/dev/null || fail "native predicate ledger is incomplete or false"
 
-jq -e '
-  .status == "complete" and
-  .profile == "rc1_native_responses_three_stage" and
+	jq -e '
+	  .status == "complete" and
+	  .manual_status == "route_complete" and
+	  .route_proof_status == "complete" and
+	  .harness_exit_code == 0 and
+	  .profile == "rc1_native_responses_three_stage" and
   .desktop_websocket_to_gateway == true and
   .gateway_sse_to_fixture == true and
   .tool_roundtrip_verified == true and
@@ -164,8 +167,11 @@ jq -n \
     run_id: $run_id,
     provider_api_format: "openai_responses",
     predicate_ledger: {
-      native_predicates_complete: true,
-      failed_events_empty: true,
+	      native_predicates_complete: true,
+	      manual_status_success: true,
+	      route_proof_complete: true,
+	      harness_exit_zero: true,
+	      failed_events_empty: true,
       three_stages_verified: true,
       one_submission_per_stage: true,
       desktop_websocket_to_gateway: true,

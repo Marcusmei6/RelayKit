@@ -8,38 +8,62 @@ import Foundation
 
 private let codexBundleIdentifier = "com.openai.codex"
 private let relayKitBundleIdentifier = "dev.relaykit.app"
-private let axWindowNumberAttribute = "AXWindowNumber" as CFString
+private let desktopAXWindowNumberAttribute = "AXWindowNumber" as CFString
 private let axIdentifierAttribute = "AXIdentifier" as CFString
 private let axSelectedValueAttribute = "AXSelectedValue" as CFString
+private let axSelectedAttribute = "AXSelected" as CFString
+private let axURLAttribute = "AXURL" as CFString
+private let axOpenAction = "AXOpen" as CFString
 private let axLabelAttribute = "AXLabel" as CFString
 private let axPlaceholderValueAttribute = "AXPlaceholderValue" as CFString
 private let axLinkRole = "AXLink"
 private let maximumIdentityBytes: off_t = 64 * 1024
 private let maximumCatalogBytes: off_t = 1024 * 1024
 private let maximumQueryBytes: off_t = 4 * 1024 * 1024
-private let maximumAXDepth = 32
-private let maximumAXNodes = 10_000
+private let maximumAXDepth = 64
+private let maximumAXNodes = 50_000
 private let maximumAXDiagnosticDepth = 12
 private let maximumAXDiagnosticNodes = 512
 private let maximumRelayKitSemanticDepth = 12
 private let maximumRelayKitSemanticNodes = 512
+private let relayKitPopoverRootIdentifier = "relaykit-popover-root"
 private let relayKitWindowSemanticIdentifiers = Set([
+    "tab-connect",
+    "tab-usage",
+    "tab-settings",
     "provider-add-entry",
     "official-provider-row",
 ])
 private let selectorWaitSeconds: TimeInterval = 3
 private let selectorPollSeconds: TimeInterval = 0.05
+private let maximumWorkspacePathComponents = 32
 private let requiredPrivatePermissions: mode_t = 0o600
 
 private struct DriverFailure: Error {
     let code: String
     let exitStatus: Int32
     let candidateCount: Int?
+    let axWindowsCount: Int?
+    let windowServerSurfaceCount: Int?
+    let axPopoverCount: Int?
+    let semanticIdentifierCount: Int?
 
-    init(_ code: String, exitStatus: Int32, candidateCount: Int? = nil) {
+    init(
+        _ code: String,
+        exitStatus: Int32,
+        candidateCount: Int? = nil,
+        axWindowsCount: Int? = nil,
+        windowServerSurfaceCount: Int? = nil,
+        axPopoverCount: Int? = nil,
+        semanticIdentifierCount: Int? = nil
+    ) {
         self.code = code
         self.exitStatus = exitStatus
         self.candidateCount = candidateCount
+        self.axWindowsCount = axWindowsCount
+        self.windowServerSurfaceCount = windowServerSurfaceCount
+        self.axPopoverCount = axPopoverCount
+        self.semanticIdentifierCount = semanticIdentifierCount
     }
 }
 
@@ -53,6 +77,10 @@ private struct DriverReport: Encodable {
     var sendCount: Int?
     var candidateCount: Int?
     var actionCount: Int?
+    var axWindowsCount: Int?
+    var windowServerSurfaceCount: Int?
+    var axPopoverCount: Int?
+    var semanticIdentifierCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case command
@@ -64,6 +92,10 @@ private struct DriverReport: Encodable {
         case sendCount = "send_count"
         case candidateCount = "candidate_count"
         case actionCount = "action_count"
+        case axWindowsCount = "ax_windows_count"
+        case windowServerSurfaceCount = "window_server_surface_count"
+        case axPopoverCount = "ax_popover_count"
+        case semanticIdentifierCount = "semantic_identifier_count"
     }
 
     static func success(
@@ -73,7 +105,11 @@ private struct DriverReport: Encodable {
         composerCount: Int? = nil,
         sendCount: Int? = nil,
         candidateCount: Int? = nil,
-        actionCount: Int? = nil
+        actionCount: Int? = nil,
+        axWindowsCount: Int? = nil,
+        windowServerSurfaceCount: Int? = nil,
+        axPopoverCount: Int? = nil,
+        semanticIdentifierCount: Int? = nil
     ) -> DriverReport {
         DriverReport(
             command: command,
@@ -84,7 +120,11 @@ private struct DriverReport: Encodable {
             composerCount: composerCount,
             sendCount: sendCount,
             candidateCount: candidateCount,
-            actionCount: actionCount
+            actionCount: actionCount,
+            axWindowsCount: axWindowsCount,
+            windowServerSurfaceCount: windowServerSurfaceCount,
+            axPopoverCount: axPopoverCount,
+            semanticIdentifierCount: semanticIdentifierCount
         )
     }
 
@@ -98,7 +138,11 @@ private struct DriverReport: Encodable {
             composerCount: nil,
             sendCount: nil,
             candidateCount: failure.candidateCount,
-            actionCount: nil
+            actionCount: nil,
+            axWindowsCount: failure.axWindowsCount,
+            windowServerSurfaceCount: failure.windowServerSurfaceCount,
+            axPopoverCount: failure.axPopoverCount,
+            semanticIdentifierCount: failure.semanticIdentifierCount
         )
     }
 }
@@ -119,6 +163,7 @@ private enum DriverCommand: String {
     case inspect
     case reveal
     case ready
+    case dismissModelNux = "dismiss-model-nux"
     case prepare
     case submit
     case relayKitProviderConfigure = "relaykit-provider-configure"
@@ -143,7 +188,7 @@ private enum DriverApplicationMode {
 
 private func applicationMode(for command: DriverCommand) -> DriverApplicationMode? {
     switch command {
-    case .inspect, .reveal, .ready, .prepare, .submit:
+    case .inspect, .reveal, .ready, .dismissModelNux, .prepare, .submit:
         return .desktop
     case .relayKitProviderConfigure, .relayKitProviderProtocolProbe,
          .relayKitProviderVerify, .relayKitGatewayStart, .relayKitAXInspect:
@@ -161,7 +206,7 @@ private struct ParsedArguments {
 private func redactedCommandName(_ arguments: [String]) -> String {
     guard let raw = arguments.first else { return "unknown" }
     let known = Set([
-        "inspect", "reveal", "ready", "prepare", "submit", "self-test",
+        "inspect", "reveal", "ready", "dismiss-model-nux", "prepare", "submit", "self-test",
         "relaykit-provider-configure", "relaykit-provider-protocol-probe",
         "relaykit-provider-verify", "relaykit-gateway-start",
         "relaykit-ax-inspect",
@@ -177,6 +222,8 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
         return ["--pid", "--window-identity", "--text"]
     case .ready:
         return ["--pid", "--window-identity", "--catalog-labels-file"]
+    case .dismissModelNux:
+        return ["--pid", "--window-identity"]
     case .prepare:
         return ["--pid", "--window-identity", "--workspace"]
     case .submit:
@@ -184,10 +231,13 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
     case .relayKitProviderConfigure, .relayKitProviderProtocolProbe:
         return [
             "--pid", "--window-identity", "--provider-name", "--base-url",
-            "--synthetic-key", "--model-id",
+            "--synthetic-key", "--model-id", "--upstream-model-id",
         ]
     case .relayKitProviderVerify:
-        return ["--pid", "--window-identity", "--provider-name", "--base-url", "--model-id"]
+        return [
+            "--pid", "--window-identity", "--provider-name", "--base-url",
+            "--model-id", "--upstream-model-id",
+        ]
     case .relayKitGatewayStart:
         return ["--pid", "--window-identity"]
     case .relayKitAXInspect:
@@ -197,7 +247,9 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
             throw DriverFailure("invalid_arguments", exitStatus: 2)
         }
         switch scenario {
-        case "exact", "zero", "multiple", "reveal-exact", "reveal-multiple", "window-fallback", "window-ambiguous", "model-ui-labels", "send-structure", "composer-value", "empty-composer",
+        case "exact", "zero", "multiple", "reveal-exact", "reveal-multiple", "window-fallback", "window-ambiguous", "model-ui-labels", "model-nux-exact", "model-nux-absent", "model-nux-multiple", "desktop-login-required", "send-structure", "send-structure-custom", "composer-value", "empty-composer",
+             "workspace-path-exact", "workspace-url-exact", "workspace-url-multiple",
+             "workspace-ancestor-exact", "workspace-ancestor-multiple",
              "protocol-identifier-distractors", "protocol-identifier-zero",
              "protocol-identifier-multiple", "protocol-identifier-disabled-false",
              "protocol-identifier-disabled-missing", "protocol-identifier-disabled-malformed",
@@ -207,7 +259,10 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
              "protocol-value-expected-selected-malformed", "protocol-value-expected-selected-unreadable",
              "protocol-value-split", "protocol-value-not-verified",
              "protocol-value-unreadable", "protocol-value-split-unreadable",
-             "protocol-traversal-truncated":
+             "protocol-traversal-truncated", "protocol-rerender-single-popup",
+             "protocol-rerender-nonpopup", "protocol-rerender-multiple-popups",
+             "protocol-rerender-multiple-then-single", "protocol-rerender-wrong-value",
+             "protocol-rerender-traversal-incomplete":
             return ["--scenario"]
         case "query-permissions":
             return ["--scenario", "--query-file"]
@@ -488,11 +543,15 @@ private func copyAXAttribute(_ element: AXUIElement, _ attribute: CFString) -> C
     return value
 }
 
-private func axWindowNumber(_ element: AXUIElement) -> UInt32? {
-    guard let value = copyAXAttribute(element, axWindowNumberAttribute) as? NSNumber else {
+private func desktopAXWindowNumber(_ element: AXUIElement) -> UInt32? {
+    guard let value = copyAXAttribute(element, desktopAXWindowNumberAttribute) as? NSNumber else {
         return nil
     }
     return value.uint32Value
+}
+
+private func isRelayKitPopover(role: String?, identifier: String?) -> Bool {
+    role == kAXPopoverRole as String && identifier == relayKitPopoverRootIdentifier
 }
 
 private struct BoundWindow {
@@ -546,13 +605,33 @@ private func verifyWindowServerIdentity(
     let matches = processWindows.filter {
         $0.windowID == context.identity.windowID
     }
-    guard matches.count == 1 else {
-        throw DriverFailure("window_identity_changed", exitStatus: 4, candidateCount: matches.count)
-    }
     switch context.applicationMode {
     case .desktop:
+        guard matches.count == 1 else {
+            throw DriverFailure("window_identity_changed", exitStatus: 4, candidateCount: matches.count)
+        }
         return processWindows.count
     case .relayKit:
+        guard !matches.isEmpty else {
+            throw DriverFailure(
+                "window_identity_changed",
+                exitStatus: 4,
+                candidateCount: 0,
+                windowServerSurfaceCount: 0,
+                axPopoverCount: 0,
+                semanticIdentifierCount: 0
+            )
+        }
+        guard matches.count == 1 else {
+            throw DriverFailure(
+                "window_selector_not_unique",
+                exitStatus: 4,
+                candidateCount: matches.count,
+                windowServerSurfaceCount: matches.count,
+                axPopoverCount: 0,
+                semanticIdentifierCount: 0
+            )
+        }
         return matches.count
     }
 }
@@ -637,12 +716,15 @@ private struct BoundActionRoot<Node> {
     let root: Node
     let candidateCount: Int
     let axWindowsCount: Int
+    let windowServerSurfaceCount: Int
+    let axPopoverCount: Int
     let semanticIdentifierCount: Int
 }
 
 private struct RelayKitSemanticBinding {
     let identifierCount: Int
     let complete: Bool
+    let unique: Bool
 }
 
 private func relayKitSemanticBinding<Node>(
@@ -654,6 +736,8 @@ private func relayKitSemanticBinding<Node>(
     var visited: [Node] = []
     var identifierCount = 0
     var complete = true
+    var identifiers = Set<String>()
+    var unique = true
 
     func append(_ node: Node, depth: Int) {
         guard depth <= maximumRelayKitSemanticDepth,
@@ -667,8 +751,12 @@ private func relayKitSemanticBinding<Node>(
         }
         visited.append(node)
 
-        if identifier(node).map({ relayKitWindowSemanticIdentifiers.contains($0) }) == true {
+        if let semanticIdentifier = identifier(node),
+           relayKitWindowSemanticIdentifiers.contains(semanticIdentifier) {
             identifierCount += 1
+            if !identifiers.insert(semanticIdentifier).inserted {
+                unique = false
+            }
         }
         guard let nodeChildren = children(node) else {
             complete = false
@@ -690,7 +778,7 @@ private func relayKitSemanticBinding<Node>(
     }
 
     append(root, depth: 0)
-    return RelayKitSemanticBinding(identifierCount: identifierCount, complete: complete)
+    return RelayKitSemanticBinding(identifierCount: identifierCount, complete: complete, unique: unique)
 }
 
 private func normalizedAXChildren<Node>(
@@ -729,24 +817,110 @@ private func relayKitSemanticBinding(root: AXUIElement) -> RelayKitSemanticBindi
     )
 }
 
-private func isExactRelayKitAXWindow(
-    role: String?,
-    windowNumber: UInt32?,
-    expectedWindowID: UInt32
-) -> Bool {
-    role == kAXWindowRole as String && windowNumber == expectedWindowID
+private func requireUniqueRelayKitPopover<Node>(
+    roots: [Node],
+    axWindowsCount: Int,
+    role: (Node) -> String?,
+    identifier: (Node) -> String?
+) throws -> Node {
+    let popovers = roots.filter { role($0) == kAXPopoverRole as String }
+    guard popovers.count == 1, let selected = popovers.first else {
+        throw DriverFailure(
+            "window_selector_not_unique",
+            exitStatus: 4,
+            candidateCount: popovers.count,
+            axWindowsCount: axWindowsCount,
+            axPopoverCount: popovers.count,
+            semanticIdentifierCount: 0
+        )
+    }
+    guard isRelayKitPopover(role: role(selected), identifier: identifier(selected)) else {
+        throw DriverFailure(
+            "relaykit_popover_identifier_missing",
+            exitStatus: 4,
+            candidateCount: popovers.count,
+            axWindowsCount: axWindowsCount,
+            axPopoverCount: popovers.count,
+            semanticIdentifierCount: 0
+        )
+    }
+    return selected
 }
 
-private func normalizedAXWindows<Node>(status: AXError, valuePresent: Bool, roots: [Node]?, applicationMode: DriverApplicationMode) -> (available: Bool, roots: [Node]) {
+private struct AXActionRoots<Node> {
+    let available: Bool
+    let axWindowsCount: Int
+    let roots: [Node]
+}
+
+private func normalizedAXWindows<Node>(status: AXError, valuePresent: Bool, roots: [Node]?, applicationMode: DriverApplicationMode) -> AXActionRoots<Node> {
     switch status {
     case .success:
-        guard valuePresent, let roots else { return (false, []) }
-        return (true, roots)
+        guard valuePresent, let roots else {
+            return AXActionRoots(available: false, axWindowsCount: 0, roots: [])
+        }
+        return AXActionRoots(available: true, axWindowsCount: roots.count, roots: roots)
     case .noValue where !valuePresent && roots == nil && applicationMode == .relayKit:
-        return (true, [])
+        return AXActionRoots(available: true, axWindowsCount: 0, roots: [])
     default:
-        return (false, [])
+        return AXActionRoots(available: false, axWindowsCount: 0, roots: [])
     }
+}
+
+private func relayKitSurfaceRoots<Node>(
+    axWindows: AXActionRoots<Node>,
+    applicationRoot: Node,
+    role: (Node) -> String?,
+    children: (Node) -> [Node]?,
+    identical: (Node, Node) -> Bool
+) -> AXActionRoots<Node> {
+    guard axWindows.available else { return axWindows }
+    var visited: [Node] = []
+    var roots: [Node] = []
+    var complete = true
+
+    func append(_ node: Node, depth: Int) {
+        guard complete else { return }
+        guard depth <= maximumRelayKitSemanticDepth,
+              visited.count < maximumRelayKitSemanticNodes else {
+            complete = false
+            return
+        }
+        guard !visited.contains(where: { identical($0, node) }) else { return }
+        visited.append(node)
+
+        let nodeRole = role(node)
+        if nodeRole == kAXPopoverRole as String {
+            roots.append(node)
+            return
+        }
+        if nodeRole == kAXWindowRole as String { return }
+        guard let nodeChildren = children(node) else {
+            complete = false
+            return
+        }
+        if depth == maximumRelayKitSemanticDepth {
+            if !nodeChildren.isEmpty { complete = false }
+            return
+        }
+        for child in nodeChildren {
+            append(child, depth: depth + 1)
+        }
+    }
+
+    append(applicationRoot, depth: 0)
+    if complete {
+        return AXActionRoots(
+            available: true,
+            axWindowsCount: axWindows.axWindowsCount,
+            roots: roots
+        )
+    }
+    return AXActionRoots(
+        available: false,
+        axWindowsCount: axWindows.axWindowsCount,
+        roots: []
+    )
 }
 
 private func resolveBoundActionRoot<Node>(
@@ -757,9 +931,10 @@ private func resolveBoundActionRoot<Node>(
     windowServerMetadata: () -> [WindowServerMetadata],
     frontmostPID: () -> pid_t?,
     accessibilityTrusted: () -> Bool,
-    axWindows: () -> (available: Bool, roots: [Node]),
-    axWindowNumber: (Node) -> UInt32?,
+    axWindows: () -> AXActionRoots<Node>,
+    desktopWindowNumber: (Node) -> UInt32?,
     axRole: (Node) -> String?,
+    axIdentifier: (Node) -> String?,
     relayKitSemanticBinding: (Node) -> RelayKitSemanticBinding
 ) throws -> BoundActionRoot<Node> {
     let windowServerWindowCount = try verifyApplicationIdentity(
@@ -779,7 +954,7 @@ private func resolveBoundActionRoot<Node>(
     let axWindowRoots = availableAXWindows.roots
     switch context.applicationMode {
     case .desktop:
-        let windowNumbers = axWindowRoots.map(axWindowNumber)
+        let windowNumbers = axWindowRoots.map(desktopWindowNumber)
         let selectedIndex = try boundWindowIndex(
             windowNumbers: windowNumbers,
             expectedWindowID: context.identity.windowID,
@@ -788,39 +963,58 @@ private func resolveBoundActionRoot<Node>(
         return BoundActionRoot(
             root: axWindowRoots[selectedIndex],
             candidateCount: axWindowRoots.count,
-            axWindowsCount: axWindowRoots.count,
+            axWindowsCount: availableAXWindows.axWindowsCount,
+            windowServerSurfaceCount: windowServerWindowCount,
+            axPopoverCount: 0,
             semanticIdentifierCount: 0
         )
     case .relayKit:
-        let exactMatches = axWindowRoots.filter {
-            isExactRelayKitAXWindow(
-                role: axRole($0),
-                windowNumber: axWindowNumber($0),
-                expectedWindowID: context.identity.windowID
-            )
-        }
-        guard exactMatches.count == 1, let selected = exactMatches.first else {
-            throw DriverFailure(
-                "window_selector_not_unique",
-                exitStatus: 4,
-                candidateCount: exactMatches.count
-            )
-        }
+        let selected = try requireUniqueRelayKitPopover(
+            roots: axWindowRoots,
+            axWindowsCount: availableAXWindows.axWindowsCount,
+            role: axRole,
+            identifier: axIdentifier
+        )
         let semanticBinding = relayKitSemanticBinding(selected)
         guard semanticBinding.complete else {
             throw DriverFailure(
                 "relaykit_semantic_traversal_incomplete",
                 exitStatus: 4,
-                candidateCount: semanticBinding.identifierCount
+                candidateCount: semanticBinding.identifierCount,
+                axWindowsCount: availableAXWindows.axWindowsCount,
+                windowServerSurfaceCount: windowServerWindowCount,
+                axPopoverCount: 1,
+                semanticIdentifierCount: semanticBinding.identifierCount
+            )
+        }
+        guard semanticBinding.unique else {
+            throw DriverFailure(
+                "relaykit_semantic_node_not_unique",
+                exitStatus: 4,
+                candidateCount: semanticBinding.identifierCount,
+                axWindowsCount: availableAXWindows.axWindowsCount,
+                windowServerSurfaceCount: windowServerWindowCount,
+                axPopoverCount: 1,
+                semanticIdentifierCount: semanticBinding.identifierCount
             )
         }
         guard semanticBinding.identifierCount > 0 else {
-            throw DriverFailure("relaykit_semantic_node_missing", exitStatus: 4, candidateCount: 0)
+            throw DriverFailure(
+                "relaykit_semantic_node_missing",
+                exitStatus: 4,
+                candidateCount: 0,
+                axWindowsCount: availableAXWindows.axWindowsCount,
+                windowServerSurfaceCount: windowServerWindowCount,
+                axPopoverCount: 1,
+                semanticIdentifierCount: 0
+            )
         }
         return BoundActionRoot(
             root: selected,
-            candidateCount: exactMatches.count,
-            axWindowsCount: axWindowRoots.count,
+            candidateCount: 1,
+            axWindowsCount: availableAXWindows.axWindowsCount,
+            windowServerSurfaceCount: windowServerWindowCount,
+            axPopoverCount: 1,
             semanticIdentifierCount: semanticBinding.identifierCount
         )
     }
@@ -845,15 +1039,24 @@ private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
                 kAXWindowsAttribute as CFString,
                 &value
             )
-            return normalizedAXWindows(
+            let windows = normalizedAXWindows(
                 status: status,
                 valuePresent: value != nil,
                 roots: value as? [AXUIElement],
                 applicationMode: context.applicationMode
             )
+            guard context.applicationMode == .relayKit else { return windows }
+            return relayKitSurfaceRoots(
+                axWindows: windows,
+                applicationRoot: application,
+                role: { copyAXString($0, kAXRoleAttribute as CFString) },
+                children: relayKitAXChildren,
+                identical: { CFEqual($0, $1) }
+            )
         },
-        axWindowNumber: axWindowNumber,
+        desktopWindowNumber: desktopAXWindowNumber,
         axRole: { copyAXString($0, kAXRoleAttribute as CFString) },
+        axIdentifier: { copyAXString($0, axIdentifierAttribute) },
         relayKitSemanticBinding: relayKitSemanticBinding
     )
     return BoundWindow(
@@ -876,6 +1079,11 @@ private struct AXNode {
     let semantic: SemanticRecord
 }
 
+private struct WorkspaceTarget {
+    let label: String
+    let path: String?
+}
+
 private enum RelayKitProtocolStringRead {
     case value(String)
     case missing
@@ -891,6 +1099,7 @@ private enum RelayKitProtocolEnabledRead {
 }
 
 private struct RelayKitProtocolNodeState {
+    let role: RelayKitProtocolStringRead
     let identifier: RelayKitProtocolStringRead
     let enabled: RelayKitProtocolEnabledRead
     let selectedValues: [RelayKitProtocolStringRead]
@@ -912,7 +1121,8 @@ private let relayKitProtocolExpectedValue = "OpenAI Responses"
 
 private func classifyRelayKitProtocolSelection(
     nodes: [RelayKitProtocolNodeState],
-    traversalComplete: Bool
+    traversalComplete: Bool,
+    allowRerenderedPopupFallback: Bool = false
 ) -> RelayKitProtocolClassification {
     let exactMatches = nodes.indices.filter { index in
         if case .value(let value) = nodes[index].identifier {
@@ -922,6 +1132,38 @@ private func classifyRelayKitProtocolSelection(
     }
     let candidateCount = exactMatches.count
     if candidateCount == 0 {
+        if allowRerenderedPopupFallback, traversalComplete {
+            let rerenderedMatches = nodes.indices.filter { index in
+                guard case .value(let role) = nodes[index].role,
+                      role == kAXPopUpButtonRole as String,
+                      case .value(true) = nodes[index].enabled else {
+                    return false
+                }
+                let values = nodes[index].selectedValues
+                guard !values.contains(where: {
+                    if case .malformed = $0 { return true }
+                    if case .unreadable = $0 { return true }
+                    return false
+                }) else {
+                    return false
+                }
+                let explicitValues = values.compactMap { value -> String? in
+                    if case .value(let value) = value { return value }
+                    return nil
+                }
+                return Set(explicitValues) == Set([relayKitProtocolExpectedValue])
+            }
+            if rerenderedMatches.count == 1 {
+                return RelayKitProtocolClassification(code: "ok", candidateCount: 1, verified: true)
+            }
+            if rerenderedMatches.count > 1 {
+                return RelayKitProtocolClassification(
+                    code: "relaykit_protocol_rerender_multiple",
+                    candidateCount: rerenderedMatches.count,
+                    verified: false
+                )
+            }
+        }
         return RelayKitProtocolClassification(
             code: "relaykit_protocol_identifier_missing",
             candidateCount: 0,
@@ -1022,11 +1264,13 @@ private func classifyRelayKitProtocolSelection(
 
 private func verifyRelayKitProtocolSelection(
     nodes: [RelayKitProtocolNodeState],
-    traversalComplete: Bool
+    traversalComplete: Bool,
+    allowRerenderedPopupFallback: Bool = false
 ) throws -> Int {
     let classification = classifyRelayKitProtocolSelection(
         nodes: nodes,
-        traversalComplete: traversalComplete
+        traversalComplete: traversalComplete,
+        allowRerenderedPopupFallback: allowRerenderedPopupFallback
     )
     guard classification.verified else {
         throw DriverFailure(
@@ -1038,10 +1282,97 @@ private func verifyRelayKitProtocolSelection(
     return classification.candidateCount
 }
 
+private func relayKitProtocolFailureIsTerminal(
+    _ classification: RelayKitProtocolClassification
+) -> Bool {
+    classification.code == "relaykit_protocol_identifier_multiple" ||
+        classification.code == "relaykit_protocol_rerender_multiple"
+}
+
 private typealias SemanticSelector = (SemanticRecord) -> Bool
 
 private func copyAXString(_ element: AXUIElement, _ attribute: CFString) -> String? {
     copyAXAttribute(element, attribute) as? String
+}
+
+private func normalizedFilePath(_ rawPath: String) -> String {
+    URL(fileURLWithPath: rawPath)
+        .standardizedFileURL
+        .resolvingSymlinksInPath()
+        .path
+}
+
+private func workspaceLabel(forAbsolutePath path: String) throws -> String {
+    guard path.hasPrefix("/"), !path.contains("\n"), !path.contains("\0") else {
+        throw DriverFailure("workspace_path_invalid", exitStatus: 3)
+    }
+    let label = URL(fileURLWithPath: path).lastPathComponent
+    guard !label.isEmpty else {
+        throw DriverFailure("workspace_path_invalid", exitStatus: 3)
+    }
+    return label
+}
+
+private func workspaceTarget(_ rawValue: String) throws -> WorkspaceTarget {
+    if !rawValue.hasPrefix("/") {
+        guard !rawValue.contains("/"), !rawValue.contains("\n"), !rawValue.contains("\0") else {
+            throw DriverFailure("workspace_path_invalid", exitStatus: 3)
+        }
+        return WorkspaceTarget(label: rawValue, path: nil)
+    }
+
+    let path = normalizedFilePath(rawValue)
+    let home = normalizedFilePath(NSHomeDirectory())
+    guard path == home || path.hasPrefix(home + "/") else {
+        throw DriverFailure("workspace_path_outside_home", exitStatus: 3)
+    }
+    guard URL(fileURLWithPath: path).pathComponents.count <= maximumWorkspacePathComponents else {
+        throw DriverFailure("workspace_path_invalid", exitStatus: 3)
+    }
+    var isDirectory = ObjCBool(false)
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+        throw DriverFailure("workspace_path_invalid", exitStatus: 3)
+    }
+    return WorkspaceTarget(label: try workspaceLabel(forAbsolutePath: path), path: path)
+}
+
+private func copyAXFilePath(_ element: AXUIElement) -> String? {
+    guard let rawValue = copyAXAttribute(element, axURLAttribute) else {
+        return nil
+    }
+    let url: URL?
+    if let nativeURL = rawValue as? URL {
+        url = nativeURL
+    } else if let nativeURL = rawValue as? NSURL {
+        url = nativeURL as URL
+    } else {
+        url = nil
+    }
+    guard let url, url.isFileURL else { return nil }
+    return normalizedFilePath(url.path)
+}
+
+private func uniqueExactWorkspacePathIndex(paths: [String?], targetPath: String) throws -> Int {
+    let matches = paths.indices.filter { paths[$0] == targetPath }
+    return try requireUniqueIndex(matches)
+}
+
+private func uniqueDeepestWorkspaceAncestorIndex(paths: [String?], targetPath: String) throws -> Int {
+    let candidates = paths.indices.compactMap { index -> (index: Int, depth: Int)? in
+        guard let path = paths[index], path != targetPath,
+              targetPath.hasPrefix(path.hasSuffix("/") ? path : path + "/") else {
+            return nil
+        }
+        return (index, URL(fileURLWithPath: path).pathComponents.count)
+    }
+    guard let deepest = candidates.map(\.depth).max() else {
+        throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: 0)
+    }
+    let matches = candidates.filter { $0.depth == deepest }
+    guard matches.count == 1 else {
+        throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: matches.count)
+    }
+    return matches[0].index
 }
 
 private func relayKitProtocolStringRead(
@@ -1087,6 +1418,7 @@ private func relayKitProtocolEnabledRead(_ element: AXUIElement) -> RelayKitProt
 
 private func relayKitProtocolNodeState(_ element: AXUIElement) -> RelayKitProtocolNodeState {
     RelayKitProtocolNodeState(
+        role: relayKitProtocolStringRead(element, attribute: kAXRoleAttribute as CFString),
         identifier: relayKitProtocolStringRead(element, attribute: axIdentifierAttribute),
         enabled: relayKitProtocolEnabledRead(element),
         selectedValues: [
@@ -1337,7 +1669,7 @@ private let sendSelector: SemanticSelector = { record in
 }
 
 private let addContentLabels = Set(["添加文件等内容", "Add files and more", "Add files"])
-private let fullAccessLabels = Set(["完全访问", "Full access"])
+private let accessModeLabels = Set(["完全访问", "Full access", "自定义", "Custom"])
 private let dictationLabels = Set(["听写", "Dictation"])
 private let unlabeledButtonSelector: SemanticSelector = { record in
     record.role == kAXButtonRole as String &&
@@ -1348,10 +1680,10 @@ private let unlabeledButtonSelector: SemanticSelector = { record in
 
 private func structuralSendButtonIndex(in records: [SemanticRecord]) throws -> Int {
     let hasAddContent = records.contains { exactSemanticMatch($0, accepted: addContentLabels) }
-    let hasFullAccess = records.contains { exactSemanticMatch($0, accepted: fullAccessLabels) }
+    let hasAccessMode = records.contains { exactSemanticMatch($0, accepted: accessModeLabels) }
     let hasDictation = records.contains { exactSemanticMatch($0, accepted: dictationLabels) }
     let candidates = matchingIndices(in: records, selector: unlabeledButtonSelector)
-    guard hasAddContent, hasFullAccess, hasDictation, candidates.count == 1 else {
+    guard hasAddContent, hasAccessMode, hasDictation, candidates.count == 1 else {
         throw DriverFailure("send_selector_not_unique", exitStatus: 5, candidateCount: candidates.count)
     }
     return candidates[0]
@@ -1379,6 +1711,71 @@ private func modelPickerSelector(catalogLabels: Set<String>) -> SemanticSelector
             record.pressable &&
             exactSemanticMatch(record, accepted: accepted)
     }
+}
+
+private let knownModelNuxTitles = Set([
+    "GPT-5.6 Sol 简介",
+    "Introducing GPT-5.6 Sol",
+])
+private let knownModelNuxDismissLabels = Set([
+    "继续使用当前模型",
+    "Keep using current model",
+    "Continue with current model",
+])
+private let knownModelNuxTitleSelector: SemanticSelector = { record in
+    return record.role == kAXHeadingRole as String &&
+        exactSemanticMatch(record, accepted: knownModelNuxTitles)
+}
+private let knownModelNuxDismissSelector: SemanticSelector = { record in
+    record.role == kAXButtonRole as String &&
+        record.enabled &&
+        record.pressable &&
+        exactSemanticMatch(record, accepted: knownModelNuxDismissLabels)
+}
+
+private func knownModelNuxDismissIndex(in records: [SemanticRecord]) throws -> Int? {
+    guard matchingIndices(in: records, selector: knownModelNuxTitleSelector).count == 1 else {
+        return nil
+    }
+    let matches = matchingIndices(in: records, selector: knownModelNuxDismissSelector)
+    guard matches.count <= 1 else {
+        throw DriverFailure("model_nux_selector_not_unique", exitStatus: 5, candidateCount: matches.count)
+    }
+    return matches.first
+}
+
+private let desktopLoginHeadingLabels = Set(["登录 ChatGPT", "Sign in to ChatGPT"])
+private let desktopLoginContinueLabels = Set(["继续登录", "Continue", "Continue sign in"])
+private let desktopLoginBrowserLabels = Set([
+    "请继续在浏览器中登录",
+    "Continue signing in in your browser",
+])
+private let desktopLoginCancelLabels = Set(["取消登录", "Cancel sign in"])
+
+private func desktopLoginRequired(in records: [SemanticRecord]) -> Bool {
+    let headingCount = records.filter { record in
+        record.role == kAXHeadingRole as String &&
+            exactSemanticMatch(record, accepted: desktopLoginHeadingLabels)
+    }.count
+    let continueCount = records.filter { record in
+        record.role == kAXButtonRole as String &&
+            record.enabled &&
+            record.pressable &&
+            exactSemanticMatch(record, accepted: desktopLoginContinueLabels)
+    }.count
+    let browserPromptCount = records.filter { record in
+        let roles = Set([kAXHeadingRole as String, kAXStaticTextRole as String])
+        return roles.contains(record.role) &&
+            exactSemanticMatch(record, accepted: desktopLoginBrowserLabels)
+    }.count
+    let cancelCount = records.filter { record in
+        record.role == kAXButtonRole as String &&
+            record.enabled &&
+            record.pressable &&
+            exactSemanticMatch(record, accepted: desktopLoginCancelLabels)
+    }.count
+    return (headingCount == 1 && continueCount == 1) ||
+        (browserPromptCount == 1 && cancelCount == 1)
 }
 
 private func menuItemSelector(modelLabel: String) -> SemanticSelector {
@@ -1418,6 +1815,45 @@ private func workspaceOpenerSelector(workspace: String) -> SemanticSelector {
     }
 }
 
+private let projectPickerLabels = Set(["选择项目", "Select project"])
+private let projectPickerSelector: SemanticSelector = { record in
+    record.role == kAXPopUpButtonRole as String &&
+        record.enabled &&
+        record.pressable &&
+        exactSemanticMatch(record, accepted: projectPickerLabels)
+}
+
+private let newProjectLabels = Set(["新建项目", "New project"])
+private let newProjectSelector: SemanticSelector = { record in
+    record.role == kAXMenuItemRole as String &&
+        record.enabled &&
+        record.pressable &&
+        exactSemanticMatch(record, accepted: newProjectLabels)
+}
+
+private let existingFolderLabels = Set(["使用现有文件夹", "Use existing folder"])
+private let existingFolderSelector: SemanticSelector = { record in
+    record.role == kAXMenuItemRole as String &&
+        record.enabled &&
+        record.pressable &&
+        exactSemanticMatch(record, accepted: existingFolderLabels)
+}
+
+private let workspaceOpenPanelSelector: SemanticSelector = { record in
+    record.role == kAXSheetRole as String &&
+        record.semanticStrings.contains("open-panel") &&
+        record.semanticStrings.contains("select project root")
+}
+
+private let workspaceOpenConfirmLabels = Set(["打开", "Open"])
+private let workspaceOpenConfirmSelector: SemanticSelector = { record in
+    record.role == kAXButtonRole as String &&
+        record.enabled &&
+        record.pressable &&
+        record.semanticStrings.contains("OKButton") &&
+        exactSemanticMatch(record, accepted: workspaceOpenConfirmLabels)
+}
+
 private func markdownHeadingSelector(text: String) -> SemanticSelector {
     { record in
         record.role == kAXHeadingRole as String &&
@@ -1427,6 +1863,14 @@ private func markdownHeadingSelector(text: String) -> SemanticSelector {
 
 private func performAXAction(_ element: AXUIElement, action: CFString) -> AXError {
     AXUIElementPerformAction(element, action)
+}
+
+private func setAXAttributeValue(
+    _ element: AXUIElement,
+    attribute: CFString,
+    value: CFTypeRef
+) -> AXError {
+    AXUIElementSetAttributeValue(element, attribute, value)
 }
 
 private func currentNodes(_ context: DriverContext) throws -> [AXNode] {
@@ -1489,14 +1933,34 @@ private func performVerifiedWrite(
     context: DriverContext,
     selector: SemanticSelector,
     value: String,
-    failureCode: String = "composer_write_failed"
+    failureCode: String = "composer_write_failed",
+    focusBeforeWrite: Bool = false
 ) throws {
     let before = try verifyBoundWindow(context)
     let target = try requireUniqueNode(in: collectAXNodes(from: before.window), selector: selector)
-    guard AXUIElementSetAttributeValue(
+    if focusBeforeWrite {
+        let application = AXUIElementCreateApplication(context.pid)
+        var focusedValue: CFTypeRef?
+        guard setAXAttributeValue(
+            target.element,
+            attribute: kAXFocusedAttribute as CFString,
+            value: kCFBooleanTrue
+        ) == .success,
+        AXUIElementCopyAttributeValue(
+            application,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        ) == .success,
+        let focusedValue,
+        CFGetTypeID(focusedValue) == AXUIElementGetTypeID(),
+        CFEqual(focusedValue, target.element) else {
+            throw DriverFailure(failureCode, exitStatus: 6)
+        }
+    }
+    guard setAXAttributeValue(
         target.element,
-        kAXValueAttribute as CFString,
-        value as CFString
+        attribute: kAXValueAttribute as CFString,
+        value: value as CFString
     ) == .success else {
         throw DriverFailure(failureCode, exitStatus: 6)
     }
@@ -1536,6 +2000,178 @@ private func waitForUniqueApplicationOverlaySelector(
         }
         Thread.sleep(forTimeInterval: selectorPollSeconds)
     }
+}
+
+private func applicationNodes(context: DriverContext) throws -> [AXNode] {
+    _ = try verifyBoundWindow(context)
+    return try collectAXNodes(from: AXUIElementCreateApplication(context.pid))
+}
+
+private func workspacePathRows(in nodes: [AXNode]) -> [(node: AXNode, path: String)] {
+    nodes.compactMap { node in
+        guard node.semantic.role == kAXTextFieldRole as String,
+              let path = copyAXFilePath(node.element) else {
+            return nil
+        }
+        return (node, path)
+    }
+}
+
+private func waitForWorkspaceNavigationProgress(
+    context: DriverContext,
+    targetPath: String,
+    previousAncestorDepth: Int
+) throws {
+    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    while true {
+        let rows = workspacePathRows(in: try applicationNodes(context: context))
+        let paths = rows.map(\.path)
+        let exactMatches = paths.indices.filter { paths[$0] == targetPath }
+        if exactMatches.count == 1 {
+            return
+        }
+        if exactMatches.count > 1 {
+            throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: exactMatches.count)
+        }
+        if let deepest = paths.enumerated().compactMap({ index, path -> Int? in
+            guard path != targetPath,
+                  targetPath.hasPrefix(path.hasSuffix("/") ? path : path + "/") else {
+                return nil
+            }
+            return URL(fileURLWithPath: path).pathComponents.count
+        }).max(), deepest > previousAncestorDepth {
+            return
+        }
+        if Date() >= deadline {
+            throw DriverFailure("workspace_navigation_failed", exitStatus: 6, candidateCount: exactMatches.count)
+        }
+        Thread.sleep(forTimeInterval: selectorPollSeconds)
+    }
+}
+
+private func waitForWorkspaceBootstrapCompletion(
+    context: DriverContext,
+    workspaceLabel: String
+) throws {
+    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    while true {
+        let panelMatches = try applicationOverlayMatches(context: context, selector: workspaceOpenPanelSelector)
+        let openerMatches = try applicationOverlayMatches(
+            context: context,
+            selector: workspaceOpenerSelector(workspace: workspaceLabel)
+        )
+        if panelMatches.isEmpty, openerMatches.count == 1 {
+            return
+        }
+        if panelMatches.count > 1 || openerMatches.count > 1 {
+            throw DriverFailure(
+                "selector_not_unique",
+                exitStatus: 5,
+                candidateCount: max(panelMatches.count, openerMatches.count)
+            )
+        }
+        if Date() >= deadline {
+            throw DriverFailure("workspace_bootstrap_not_verified", exitStatus: 6, candidateCount: openerMatches.count)
+        }
+        Thread.sleep(forTimeInterval: selectorPollSeconds)
+    }
+}
+
+private func selectWorkspaceDirectory(
+    context: DriverContext,
+    targetPath: String,
+    workspaceLabel: String
+) throws -> Int {
+    var actionCount = 0
+    var selectedRow: AXNode?
+
+    for _ in 0..<maximumWorkspacePathComponents {
+        let rows = workspacePathRows(in: try applicationNodes(context: context))
+        let paths = rows.map(\.path)
+        let exactMatches = paths.indices.filter { paths[$0] == targetPath }
+        if exactMatches.count == 1 {
+            selectedRow = rows[exactMatches[0]].node
+            break
+        }
+        if exactMatches.count > 1 {
+            throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: exactMatches.count)
+        }
+
+        let ancestorIndex = try uniqueDeepestWorkspaceAncestorIndex(paths: paths, targetPath: targetPath)
+        let ancestorDepth = URL(fileURLWithPath: paths[ancestorIndex]).pathComponents.count
+        let actionResult = performAXAction(rows[ancestorIndex].node.element, action: axOpenAction)
+        guard actionResult == .success || actionResult == .cannotComplete else {
+            throw DriverFailure("workspace_navigation_failed", exitStatus: 6)
+        }
+        actionCount += 1
+        try waitForWorkspaceNavigationProgress(
+            context: context,
+            targetPath: targetPath,
+            previousAncestorDepth: ancestorDepth
+        )
+    }
+
+    guard let selectedRow else {
+        throw DriverFailure("workspace_path_not_found", exitStatus: 5, candidateCount: 0)
+    }
+    guard setAXAttributeValue(
+        selectedRow.element,
+        attribute: axSelectedAttribute,
+        value: kCFBooleanTrue
+    ) == .success,
+    (copyAXAttribute(selectedRow.element, axSelectedAttribute) as? NSNumber)?.boolValue == true else {
+        throw DriverFailure("workspace_selection_failed", exitStatus: 6)
+    }
+    actionCount += 1
+
+    try waitForUniqueApplicationOverlaySelector(context: context, selector: workspaceOpenConfirmSelector)
+    try performVerifiedPress(
+        context: context,
+        selector: workspaceOpenConfirmSelector,
+        targetProvider: { try applicationOverlayNode(context: $0, selector: workspaceOpenConfirmSelector) }
+    )
+    actionCount += 1
+    try waitForWorkspaceBootstrapCompletion(context: context, workspaceLabel: workspaceLabel)
+    return actionCount
+}
+
+private func bootstrapWorkspaceIfNeeded(
+    context: DriverContext,
+    target: WorkspaceTarget
+) throws -> Int {
+    let existing = try applicationOverlayMatches(
+        context: context,
+        selector: workspaceOpenerSelector(workspace: target.label)
+    )
+    if existing.count == 1 {
+        return 0
+    }
+    guard existing.isEmpty else {
+        throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: existing.count)
+    }
+    guard let targetPath = target.path else {
+        throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: 0)
+    }
+
+    try performVerifiedPress(context: context, selector: projectPickerSelector)
+    try waitForUniqueApplicationOverlaySelector(context: context, selector: newProjectSelector)
+    try performVerifiedPress(
+        context: context,
+        selector: newProjectSelector,
+        targetProvider: { try applicationOverlayNode(context: $0, selector: newProjectSelector) }
+    )
+    try waitForUniqueApplicationOverlaySelector(context: context, selector: existingFolderSelector)
+    try performVerifiedPress(
+        context: context,
+        selector: existingFolderSelector,
+        targetProvider: { try applicationOverlayNode(context: $0, selector: existingFolderSelector) }
+    )
+    try waitForUniqueApplicationOverlaySelector(context: context, selector: workspaceOpenPanelSelector)
+    return 3 + (try selectWorkspaceDirectory(
+        context: context,
+        targetPath: targetPath,
+        workspaceLabel: target.label
+    ))
 }
 
 private func waitForFreshComposer(
@@ -1631,8 +2267,7 @@ private struct AXDiagnosticNodeRecord: Encodable {
     let role: String
     let subrole: String?
     let childCount: Int
-    let windowNumberPresent: Bool
-    let matchesExpectedWindow: Bool
+    let boundSurfaceRoot: Bool
 
     enum CodingKeys: String, CodingKey {
         case ordinal
@@ -1641,8 +2276,7 @@ private struct AXDiagnosticNodeRecord: Encodable {
         case role
         case subrole
         case childCount = "child_count"
-        case windowNumberPresent = "window_number_present"
-        case matchesExpectedWindow = "matches_expected_window"
+        case boundSurfaceRoot = "bound_surface_root"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1661,8 +2295,7 @@ private struct AXDiagnosticNodeRecord: Encodable {
             try container.encodeNil(forKey: .subrole)
         }
         try container.encode(childCount, forKey: .childCount)
-        try container.encode(windowNumberPresent, forKey: .windowNumberPresent)
-        try container.encode(matchesExpectedWindow, forKey: .matchesExpectedWindow)
+        try container.encode(boundSurfaceRoot, forKey: .boundSurfaceRoot)
     }
 }
 
@@ -1683,8 +2316,8 @@ private struct AXDiagnosticReport: Encodable {
     let depthCounts: [AXDiagnosticDepthCount]
     let axWindowsAvailable: Bool
     let axWindowsCount: Int
-    let numberedWindowCount: Int
-    let matchingWindowCount: Int
+    let windowServerSurfaceCount: Int
+    let axPopoverCount: Int
     let semanticIdentifierCount: Int
     let truncated: Bool
 
@@ -1695,8 +2328,8 @@ private struct AXDiagnosticReport: Encodable {
         case depthCounts = "depth_counts"
         case axWindowsAvailable = "ax_windows_available"
         case axWindowsCount = "ax_windows_count"
-        case numberedWindowCount = "numbered_window_count"
-        case matchingWindowCount = "matching_window_count"
+        case windowServerSurfaceCount = "window_server_surface_count"
+        case axPopoverCount = "ax_popover_count"
         case semanticIdentifierCount = "semantic_identifier_count"
         case truncated
     }
@@ -1722,14 +2355,10 @@ private func sanitizedAXRole(_ value: String?) -> String {
 private struct RelayKitAXInspectSnapshot {
     let records: [AXDiagnosticNodeRecord]
     let axWindowsCount: Int
+    let windowServerSurfaceCount: Int
+    let axPopoverCount: Int
     let semanticIdentifierCount: Int
     let truncated: Bool
-}
-
-private struct RelayKitAXInspectWindow<Node> {
-    let root: Node
-    let role: String?
-    let windowNumber: UInt32?
 }
 
 private func captureVerifiedRelayKitAXInspectSnapshot<Node>(
@@ -1739,15 +2368,14 @@ private func captureVerifiedRelayKitAXInspectSnapshot<Node>(
     bundleIdentifier: String?,
     windowServerMetadata: () -> [WindowServerMetadata],
     accessibilityTrusted: () -> Bool,
-    axWindows: () -> (available: Bool, roots: [Node]),
+    axWindows: () -> AXActionRoots<Node>,
     role: (Node) -> String?,
     subrole: (Node) -> String?,
     identifier: (Node) -> String?,
     children: (Node) -> [Node]?,
-    windowNumber: (Node) -> UInt32?,
     identical: (Node, Node) -> Bool
 ) throws -> RelayKitAXInspectSnapshot {
-    _ = try verifyApplicationIdentity(
+    let windowServerSurfaceCount = try verifyApplicationIdentity(
         context: context,
         currentIdentity: currentIdentity,
         processIsRunning: processIsRunning,
@@ -1761,40 +2389,26 @@ private func captureVerifiedRelayKitAXInspectSnapshot<Node>(
     guard availableAXWindows.available else {
         throw DriverFailure("window_selector_not_unique", exitStatus: 4, candidateCount: 0)
     }
-    let windowSnapshots = availableAXWindows.roots.map { root in
-        RelayKitAXInspectWindow(
-            root: root,
-            role: role(root),
-            windowNumber: windowNumber(root)
-        )
-    }
-    let exactMatches = windowSnapshots.filter {
-        isExactRelayKitAXWindow(
-            role: $0.role,
-            windowNumber: $0.windowNumber,
-            expectedWindowID: context.identity.windowID
-        )
-    }
-    guard exactMatches.count == 1, let selected = exactMatches.first else {
-        throw DriverFailure(
-            "window_selector_not_unique",
-            exitStatus: 4,
-            candidateCount: exactMatches.count
-        )
-    }
+    let selected = try requireUniqueRelayKitPopover(
+        roots: availableAXWindows.roots,
+        axWindowsCount: availableAXWindows.axWindowsCount,
+        role: role,
+        identifier: identifier
+    )
 
     var records: [AXDiagnosticNodeRecord] = []
     var visited: [Node] = []
     var truncated = false
     var complete = true
     var semanticIdentifierCount = 0
+    var semanticIdentifiers = Set<String>()
+    var semanticIdentifiersUnique = true
 
     func append(
         _ node: Node,
         parent: Int?,
         depth: Int,
-        knownRole: String? = nil,
-        knownWindowNumber: UInt32? = nil
+        knownRole: String? = nil
     ) {
         guard complete else { return }
         guard depth <= maximumAXDiagnosticDepth,
@@ -1810,14 +2424,17 @@ private func captureVerifiedRelayKitAXInspectSnapshot<Node>(
         }
         visited.append(node)
 
-        if identifier(node).map({ relayKitWindowSemanticIdentifiers.contains($0) }) == true {
+        if let semanticIdentifier = identifier(node),
+           relayKitWindowSemanticIdentifiers.contains(semanticIdentifier) {
             semanticIdentifierCount += 1
+            if !semanticIdentifiers.insert(semanticIdentifier).inserted {
+                semanticIdentifiersUnique = false
+            }
         }
         guard let nodeChildren = children(node) else {
             complete = false
             return
         }
-        let nodeWindowNumber = depth == 0 ? knownWindowNumber : windowNumber(node)
         let ordinal = records.count
         let rawSubrole = subrole(node)
         records.append(AXDiagnosticNodeRecord(
@@ -1827,8 +2444,7 @@ private func captureVerifiedRelayKitAXInspectSnapshot<Node>(
             role: sanitizedAXRole(depth == 0 ? knownRole : role(node)),
             subrole: rawSubrole.map { sanitizedAXRole($0) },
             childCount: nodeChildren.count,
-            windowNumberPresent: nodeWindowNumber != nil,
-            matchesExpectedWindow: nodeWindowNumber == context.identity.windowID
+            boundSurfaceRoot: depth == 0
         ))
 
         if depth == maximumAXDiagnosticDepth {
@@ -1849,25 +2465,49 @@ private func captureVerifiedRelayKitAXInspectSnapshot<Node>(
     }
 
     append(
-        selected.root,
+        selected,
         parent: nil,
         depth: 0,
-        knownRole: selected.role,
-        knownWindowNumber: selected.windowNumber
+        knownRole: role(selected)
     )
     guard complete, !truncated else {
         throw DriverFailure(
             "relaykit_semantic_traversal_incomplete",
             exitStatus: 4,
-            candidateCount: semanticIdentifierCount
+            candidateCount: semanticIdentifierCount,
+            axWindowsCount: availableAXWindows.axWindowsCount,
+            windowServerSurfaceCount: windowServerSurfaceCount,
+            axPopoverCount: 1,
+            semanticIdentifierCount: semanticIdentifierCount
+        )
+    }
+    guard semanticIdentifiersUnique else {
+        throw DriverFailure(
+            "relaykit_semantic_node_not_unique",
+            exitStatus: 4,
+            candidateCount: semanticIdentifierCount,
+            axWindowsCount: availableAXWindows.axWindowsCount,
+            windowServerSurfaceCount: windowServerSurfaceCount,
+            axPopoverCount: 1,
+            semanticIdentifierCount: semanticIdentifierCount
         )
     }
     guard semanticIdentifierCount > 0 else {
-        throw DriverFailure("relaykit_semantic_node_missing", exitStatus: 4, candidateCount: 0)
+        throw DriverFailure(
+            "relaykit_semantic_node_missing",
+            exitStatus: 4,
+            candidateCount: 0,
+            axWindowsCount: availableAXWindows.axWindowsCount,
+            windowServerSurfaceCount: windowServerSurfaceCount,
+            axPopoverCount: 1,
+            semanticIdentifierCount: 0
+        )
     }
     return RelayKitAXInspectSnapshot(
         records: records,
-        axWindowsCount: windowSnapshots.count,
+        axWindowsCount: availableAXWindows.axWindowsCount,
+        windowServerSurfaceCount: windowServerSurfaceCount,
+        axPopoverCount: 1,
         semanticIdentifierCount: semanticIdentifierCount,
         truncated: truncated
     )
@@ -1889,8 +2529,8 @@ private func makeAXDiagnosticReport(
         depthCounts: depthCounts,
         axWindowsAvailable: true,
         axWindowsCount: snapshot.axWindowsCount,
-        numberedWindowCount: snapshot.records.filter(\.windowNumberPresent).count,
-        matchingWindowCount: snapshot.records.filter(\.matchesExpectedWindow).count,
+        windowServerSurfaceCount: snapshot.windowServerSurfaceCount,
+        axPopoverCount: snapshot.axPopoverCount,
         semanticIdentifierCount: snapshot.semanticIdentifierCount,
         truncated: snapshot.truncated
     )
@@ -1979,18 +2619,24 @@ private func executeRelayKitAXInspect(options: [String: String]) throws -> Drive
                 kAXWindowsAttribute as CFString,
                 &value
             )
-            return normalizedAXWindows(
+            let windows = normalizedAXWindows(
                 status: status,
                 valuePresent: value != nil,
                 roots: value as? [AXUIElement],
                 applicationMode: context.applicationMode
+            )
+            return relayKitSurfaceRoots(
+                axWindows: windows,
+                applicationRoot: application,
+                role: { copyAXString($0, kAXRoleAttribute as CFString) },
+                children: relayKitAXChildren,
+                identical: { CFEqual($0, $1) }
             )
         },
         role: { copyAXString($0, kAXRoleAttribute as CFString) },
         subrole: { copyAXString($0, kAXSubroleAttribute as CFString) },
         identifier: { copyAXString($0, axIdentifierAttribute) },
         children: relayKitAXChildren,
-        windowNumber: axWindowNumber,
         identical: { CFEqual($0, $1) }
     )
     let report = makeAXDiagnosticReport(snapshot: snapshot)
@@ -1998,7 +2644,11 @@ private func executeRelayKitAXInspect(options: [String: String]) throws -> Drive
     return .success(
         command: "relaykit-ax-inspect",
         windowVerified: true,
-        actionCount: 0
+        actionCount: 0,
+        axWindowsCount: snapshot.axWindowsCount,
+        windowServerSurfaceCount: snapshot.windowServerSurfaceCount,
+        axPopoverCount: snapshot.axPopoverCount,
+        semanticIdentifierCount: snapshot.semanticIdentifierCount
     )
 }
 
@@ -2049,6 +2699,10 @@ private func executeReady(options: [String: String]) throws -> DriverReport {
     let records = nodes.map(\.semantic)
     let pickerCount = matchingIndices(in: records, selector: modelPickerSelector(catalogLabels: catalogLabels)).count
     let composerCount = matchingIndices(in: records, selector: composerSelector).count
+    if pickerCount != 1 || composerCount != 1,
+       desktopLoginRequired(in: records) {
+        throw DriverFailure("desktop_login_required", exitStatus: 5, candidateCount: 1)
+    }
     guard pickerCount == 1, composerCount == 1 else {
         throw DriverFailure("desktop_ui_not_ready", exitStatus: 5, candidateCount: pickerCount)
     }
@@ -2062,10 +2716,47 @@ private func executeReady(options: [String: String]) throws -> DriverReport {
     )
 }
 
+private func knownModelNuxDismissNode(context: DriverContext) throws -> AXNode? {
+    let nodes = try currentNodes(context)
+    guard let index = try knownModelNuxDismissIndex(in: nodes.map(\.semantic)) else {
+        return nil
+    }
+    return nodes[index]
+}
+
+private func executeDismissModelNux(options: [String: String]) throws -> DriverReport {
+    let context = try makeContext(options: options, command: .dismissModelNux)
+    guard try knownModelNuxDismissNode(context: context) != nil else {
+        return .success(
+            command: "dismiss-model-nux",
+            windowVerified: true,
+            candidateCount: 0,
+            actionCount: 0
+        )
+    }
+    try performVerifiedPress(
+        context: context,
+        selector: knownModelNuxDismissSelector,
+        targetProvider: { reboundContext in
+            guard let target = try knownModelNuxDismissNode(context: reboundContext) else {
+                throw DriverFailure("model_nux_dismissal_target_changed", exitStatus: 5, candidateCount: 0)
+            }
+            return target
+        }
+    )
+    return .success(
+        command: "dismiss-model-nux",
+        windowVerified: true,
+        candidateCount: 1,
+        actionCount: 1
+    )
+}
+
 private func executePrepare(options: [String: String]) throws -> DriverReport {
-    guard let workspace = options["--workspace"] else {
+    guard let workspaceValue = options["--workspace"] else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
+    let target = try workspaceTarget(workspaceValue)
     let context = try makeContext(options: options, command: .prepare)
     let previousNodes = try currentNodes(context)
     let previousMatches = matchingIndices(in: previousNodes.map(\.semantic), selector: composerSelector)
@@ -2074,7 +2765,8 @@ private func executePrepare(options: [String: String]) throws -> DriverReport {
     }
     let previousComposer = previousMatches.first.map { previousNodes[$0].element }
     let previousSnapshot = semanticSnapshot(previousNodes)
-    try performVerifiedPress(context: context, selector: workspaceOpenerSelector(workspace: workspace))
+    let bootstrapActionCount = try bootstrapWorkspaceIfNeeded(context: context, target: target)
+    try performVerifiedPress(context: context, selector: workspaceOpenerSelector(workspace: target.label))
     let nodes = try waitForFreshComposer(
         context: context,
         previousComposer: previousComposer,
@@ -2090,7 +2782,7 @@ private func executePrepare(options: [String: String]) throws -> DriverReport {
         modelPickerCount: pickerCount,
         composerCount: composerMatches.count,
         sendCount: sendCount,
-        actionCount: 1
+        actionCount: bootstrapActionCount + 1
     )
 }
 
@@ -2207,14 +2899,17 @@ private func relayKitProviderID(_ name: String) -> String {
 private func validatedRelayKitProviderOptions(
     _ options: [String: String],
     requireSyntheticKey: Bool
-) throws -> (name: String, baseURL: String, modelID: String, syntheticKey: String?) {
+) throws -> (name: String, baseURL: String, modelID: String, upstreamModelID: String, syntheticKey: String?) {
     guard let name = options["--provider-name"],
           let baseURL = options["--base-url"],
           let modelID = options["--model-id"],
+          let upstreamModelID = options["--upstream-model-id"],
           !name.isEmpty, name.utf8.count <= 128,
           !modelID.isEmpty, modelID.utf8.count <= 256,
+          !upstreamModelID.isEmpty, upstreamModelID.utf8.count <= 256,
           !name.contains("\n"), !name.contains("\r"),
           !modelID.contains("\n"), !modelID.contains("\r"),
+          !upstreamModelID.contains("\n"), !upstreamModelID.contains("\r"),
           relayKitProviderID(name).hasPrefix("dogfood-") else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
@@ -2238,7 +2933,7 @@ private func validatedRelayKitProviderOptions(
             throw DriverFailure("invalid_arguments", exitStatus: 2)
         }
     }
-    return (name, baseURL, modelID, syntheticKey)
+    return (name, baseURL, modelID, upstreamModelID, syntheticKey)
 }
 
 private func waitForRelayKitValue(
@@ -2282,11 +2977,38 @@ private func writeRelayKitField(
         context: context,
         selector: selector,
         value: value,
-        failureCode: "relaykit_field_write_failed"
+        failureCode: "relaykit_field_write_failed",
+        focusBeforeWrite: true
     )
     if verifyReadback {
         try waitForRelayKitValue(context: context, identifier: identifier, expected: value)
     }
+}
+
+private func activateRelayKitForProviderInput(context: DriverContext) throws {
+    guard let running = NSRunningApplication(processIdentifier: context.pid),
+          running.bundleIdentifier == relayKitBundleIdentifier else {
+        throw DriverFailure("relaykit_provider_activation_failed", exitStatus: 6)
+    }
+    let application = AXUIElementCreateApplication(context.pid)
+    guard setAXAttributeValue(
+        application,
+        attribute: kAXFrontmostAttribute as CFString,
+        value: kCFBooleanTrue
+    ) == .success else {
+        throw DriverFailure("relaykit_provider_activation_failed", exitStatus: 6)
+    }
+    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    while true {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == context.pid {
+            break
+        }
+        if Date() >= deadline {
+            throw DriverFailure("relaykit_provider_activation_not_verified", exitStatus: 6)
+        }
+        Thread.sleep(forTimeInterval: selectorPollSeconds)
+    }
+    _ = try verifyBoundWindow(context)
 }
 
 private func waitForRelayKitSemantic(
@@ -2317,12 +3039,13 @@ private func waitForRelayKitProtocolSelection(context: DriverContext) throws {
         let traversal = relayKitProtocolTraversal(from: bound.window)
         let classification = classifyRelayKitProtocolSelection(
             nodes: traversal.nodes,
-            traversalComplete: traversal.complete
+            traversalComplete: traversal.complete,
+            allowRerenderedPopupFallback: true
         )
         if classification.verified {
             return
         }
-        if classification.code == "relaykit_protocol_identifier_multiple" || Date() >= deadline {
+        if relayKitProtocolFailureIsTerminal(classification) || Date() >= deadline {
             throw DriverFailure(
                 classification.code,
                 exitStatus: 6,
@@ -2344,11 +3067,14 @@ private func performRelayKitProviderDraftSelection(
     let context = try makeContext(options: options, command: command)
     let buttonRoles = Set([kAXButtonRole as String])
     let popupRoles = Set([kAXPopUpButtonRole as String, kAXButtonRole as String])
+    var selectorStage = "connect_tab"
+    do {
 
     try performVerifiedPress(
         context: context,
         selector: relayKitIdentifierSelector("tab-connect", roles: buttonRoles, pressable: true)
     )
+    selectorStage = "add_entry"
     try waitForUniqueSelector(
         context: context,
         selector: relayKitIdentifierSelector("provider-add-entry", roles: buttonRoles, pressable: true)
@@ -2357,7 +3083,9 @@ private func performRelayKitProviderDraftSelection(
         context: context,
         selector: relayKitIdentifierSelector("provider-add-entry", roles: buttonRoles, pressable: true)
     )
+    try activateRelayKitForProviderInput(context: context)
 
+    selectorStage = "initial_fields"
     try writeRelayKitField(context: context, identifier: "provider-provider-name-field", value: provider.name)
     try writeRelayKitField(context: context, identifier: "provider-api-base-url-field", value: provider.baseURL)
     try writeRelayKitField(
@@ -2373,12 +3101,14 @@ private func performRelayKitProviderDraftSelection(
         roles: buttonRoles,
         pressable: true
     )
+    selectorStage = "advanced_toggle"
     try performVerifiedPress(context: context, selector: advancedSelector)
     let protocolSelector = relayKitIdentifierSelector(
         "provider-upstream-protocol-selector",
         roles: popupRoles,
         pressable: true
     )
+    selectorStage = "protocol_selector"
     try waitForUniqueSelector(context: context, selector: protocolSelector)
     try performVerifiedPress(context: context, selector: protocolSelector)
 
@@ -2387,6 +3117,7 @@ private func performRelayKitProviderDraftSelection(
         roles: Set([kAXMenuItemRole as String]),
         pressable: true
     )
+    selectorStage = "responses_option"
     try waitForUniqueApplicationOverlaySelector(context: context, selector: responsesOption)
     try performVerifiedPress(
         context: context,
@@ -2394,6 +3125,23 @@ private func performRelayKitProviderDraftSelection(
         targetProvider: { try applicationOverlayNode(context: $0, selector: responsesOption) }
     )
     try waitForRelayKitProtocolSelection(context: context)
+    selectorStage = "fields_after_protocol"
+    try writeRelayKitField(context: context, identifier: "provider-provider-name-field", value: provider.name)
+    try writeRelayKitField(context: context, identifier: "provider-api-base-url-field", value: provider.baseURL)
+    try writeRelayKitField(
+        context: context,
+        identifier: "api-key-new-input-field",
+        value: syntheticKey,
+        verifyReadback: false
+    )
+    try writeRelayKitField(context: context, identifier: "provider-model-id-field", value: provider.modelID)
+    try writeRelayKitField(context: context, identifier: "provider-upstream-model-override-field", value: provider.upstreamModelID)
+    try waitForRelayKitProtocolSelection(context: context)
+    selectorStage = "advanced_toggle_after_protocol"
+    try performVerifiedPress(context: context, selector: advancedSelector)
+    } catch let failure as DriverFailure where failure.code == "selector_not_unique" {
+        throw DriverFailure("relaykit_provider_\(selectorStage)_selector_not_unique", exitStatus: failure.exitStatus, candidateCount: failure.candidateCount)
+    }
 
     return (context, provider.name)
 }
@@ -2421,7 +3169,7 @@ private func executeRelayKitProviderConfigure(options: [String: String]) throws 
         command: "relaykit-provider-configure",
         windowVerified: true,
         candidateCount: 1,
-        actionCount: 10
+        actionCount: 16
     )
 }
 
@@ -2434,7 +3182,7 @@ private func executeRelayKitProviderProtocolProbe(options: [String: String]) thr
         command: "relaykit-provider-protocol-probe",
         windowVerified: true,
         candidateCount: 1,
-        actionCount: 9
+        actionCount: 15
     )
 }
 
@@ -2469,20 +3217,49 @@ private func executeRelayKitProviderVerify(options: [String: String]) throws -> 
         identifier: "provider-model-id-field",
         expected: provider.modelID
     )
+    try waitForUniqueSelector(
+        context: context,
+        selector: relayKitIdentifierSelector("provider-saved-key-state")
+    )
+    try performVerifiedPress(
+        context: context,
+        selector: relayKitIdentifierSelector(
+            "provider-advanced-toggle-row",
+            roles: buttonRoles,
+            pressable: true
+        )
+    )
     try waitForRelayKitSemantic(
         context: context,
         identifier: "provider-upstream-protocol-selector",
         expected: "OpenAI Responses"
     )
+    try waitForRelayKitValue(
+        context: context,
+        identifier: "provider-upstream-model-override-field",
+        expected: provider.upstreamModelID
+    )
+    try performVerifiedPress(
+        context: context,
+        selector: relayKitIdentifierSelector(
+            "provider-form-cancel",
+            roles: buttonRoles,
+            pressable: true
+        )
+    )
     try waitForUniqueSelector(
         context: context,
-        selector: relayKitIdentifierSelector("provider-saved-key-state")
+        selector: relayKitIdentifierSelector(
+            "official-provider-row",
+            roles: buttonRoles,
+            pressable: true
+        )
     )
     return .success(
         command: "relaykit-provider-verify",
         windowVerified: true,
         candidateCount: 1,
-        actionCount: 2
+        actionCount: 4
     )
 }
 
@@ -2535,11 +3312,13 @@ private func syntheticHeading(_ value: String) -> SemanticRecord {
 }
 
 private func syntheticProtocolNode(
+    role: RelayKitProtocolStringRead = .missing,
     identifier: RelayKitProtocolStringRead = .missing,
     enabled: RelayKitProtocolEnabledRead = .value(true),
     selectedValues: [RelayKitProtocolStringRead] = [.missing, .missing]
 ) -> RelayKitProtocolNodeState {
     RelayKitProtocolNodeState(
+        role: role,
         identifier: identifier,
         enabled: enabled,
         selectedValues: selectedValues
@@ -2627,6 +3406,52 @@ private func syntheticProtocolScenario(
             [syntheticProtocolNode(identifier: exactIdentifier, selectedValues: [expectedValue, .missing])],
             false
         )
+    case "protocol-rerender-single-popup":
+        return (
+            [syntheticProtocolNode(
+                role: .value(kAXPopUpButtonRole as String),
+                selectedValues: [expectedValue, .missing]
+            )],
+            true
+        )
+    case "protocol-rerender-nonpopup":
+        return (
+            [syntheticProtocolNode(
+                role: .value(kAXStaticTextRole as String),
+                selectedValues: [expectedValue, .missing]
+            )],
+            true
+        )
+    case "protocol-rerender-multiple-popups":
+        return (
+            [
+                syntheticProtocolNode(
+                    role: .value(kAXPopUpButtonRole as String),
+                    selectedValues: [expectedValue, .missing]
+                ),
+                syntheticProtocolNode(
+                    role: .value(kAXPopUpButtonRole as String),
+                    selectedValues: [.missing, expectedValue]
+                ),
+            ],
+            true
+        )
+    case "protocol-rerender-wrong-value":
+        return (
+            [syntheticProtocolNode(
+                role: .value(kAXPopUpButtonRole as String),
+                selectedValues: [.value("OpenAI Chat Completions"), .missing]
+            )],
+            true
+        )
+    case "protocol-rerender-traversal-incomplete":
+        return (
+            [syntheticProtocolNode(
+                role: .value(kAXPopUpButtonRole as String),
+                selectedValues: [expectedValue, .missing]
+            )],
+            false
+        )
     default:
         return nil
     }
@@ -2636,10 +3461,39 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
     guard let scenario = options["--scenario"] else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
     }
+    if scenario == "protocol-rerender-multiple-then-single" {
+        let sequence = ["protocol-rerender-multiple-popups", "protocol-rerender-single-popup"]
+        for name in sequence {
+            guard let protocolScenario = syntheticProtocolScenario(name) else {
+                throw DriverFailure("internal_error", exitStatus: 70)
+            }
+            let classification = classifyRelayKitProtocolSelection(
+                nodes: protocolScenario.nodes,
+                traversalComplete: protocolScenario.complete,
+                allowRerenderedPopupFallback: true
+            )
+            if classification.verified {
+                return .success(
+                    command: "self-test",
+                    candidateCount: classification.candidateCount,
+                    actionCount: 0
+                )
+            }
+            if relayKitProtocolFailureIsTerminal(classification) {
+                throw DriverFailure(
+                    classification.code,
+                    exitStatus: 6,
+                    candidateCount: classification.candidateCount
+                )
+            }
+        }
+        throw DriverFailure("relaykit_protocol_value_not_verified", exitStatus: 6)
+    }
     if let protocolScenario = syntheticProtocolScenario(scenario) {
         let candidateCount = try verifyRelayKitProtocolSelection(
             nodes: protocolScenario.nodes,
-            traversalComplete: protocolScenario.complete
+            traversalComplete: protocolScenario.complete,
+            allowRerenderedPopupFallback: scenario.hasPrefix("protocol-rerender-")
         )
         return .success(
             command: "self-test",
@@ -2648,6 +3502,39 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
         )
     }
     switch scenario {
+    case "workspace-path-exact":
+        guard try workspaceLabel(forAbsolutePath: "/tmp/relaykit-public-fixture/workplace/RelayKit") == "RelayKit" else {
+            throw DriverFailure("workspace_path_projection_failed", exitStatus: 8)
+        }
+        return .success(command: "self-test", candidateCount: 1, actionCount: 0)
+    case "workspace-url-exact":
+        let target = "/tmp/relaykit-public-fixture/workplace/RelayKit"
+        let index = try uniqueExactWorkspacePathIndex(
+            paths: [target, "/tmp/relaykit-public-fixture/workplace/RelayKit-other", nil],
+            targetPath: target
+        )
+        return .success(command: "self-test", candidateCount: index + 1, actionCount: 0)
+    case "workspace-url-multiple":
+        let target = "/tmp/relaykit-public-fixture/workplace/RelayKit"
+        _ = try uniqueExactWorkspacePathIndex(paths: [target, target], targetPath: target)
+        throw DriverFailure("internal_error", exitStatus: 70)
+    case "workspace-ancestor-exact":
+        let target = "/tmp/relaykit-public-fixture/workplace/RelayKit"
+        let index = try uniqueDeepestWorkspaceAncestorIndex(
+            paths: ["/tmp/relaykit-public-fixture", "/tmp/relaykit-public-fixture/workplace", "/tmp/relaykit-other-fixture"],
+            targetPath: target
+        )
+        guard index == 1 else {
+            throw DriverFailure("workspace_ancestor_projection_failed", exitStatus: 8)
+        }
+        return .success(command: "self-test", candidateCount: 1, actionCount: 0)
+    case "workspace-ancestor-multiple":
+        let target = "/tmp/relaykit-public-fixture/workplace/RelayKit"
+        _ = try uniqueDeepestWorkspaceAncestorIndex(
+            paths: ["/tmp/relaykit-public-fixture/workplace", "/tmp/relaykit-public-fixture/workplace"],
+            targetPath: target
+        )
+        throw DriverFailure("internal_error", exitStatus: 70)
     case "exact":
         let target = "Official GPT-5.5"
         let records = [syntheticRecord(target), syntheticRecord("Official GPT-5.5 Extended")]
@@ -2707,10 +3594,79 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
         let categoryMatches = matchingIndices(in: categoryRecords, selector: modelCategorySelector(catalogLabels: labels))
         _ = try requireUniqueIndex(categoryMatches)
         return .success(command: "self-test", candidateCount: matches.count, actionCount: 0)
+    case "model-nux-exact":
+        let records = [
+            syntheticHeading("GPT-5.6 Sol 简介"),
+            SemanticRecord(
+                role: kAXStaticTextRole as String,
+                semanticStrings: Set(["GPT-5.6 Sol 简介"]),
+                enabled: true,
+                writable: false,
+                pressable: false
+            ),
+            syntheticButton("继续使用当前模型"),
+            syntheticButton("继续使用当前模型 Plus"),
+        ]
+        guard let index = try knownModelNuxDismissIndex(in: records), index == 2 else {
+            throw DriverFailure("model_nux_selector_failed", exitStatus: 8)
+        }
+        return .success(command: "self-test", candidateCount: 1, actionCount: 0)
+    case "model-nux-absent":
+        let records = [
+            syntheticHeading("Unrelated modal"),
+            syntheticButton("继续使用当前模型"),
+        ]
+        guard try knownModelNuxDismissIndex(in: records) == nil else {
+            throw DriverFailure("model_nux_selector_failed", exitStatus: 8)
+        }
+        return .success(command: "self-test", candidateCount: 0, actionCount: 0)
+    case "model-nux-multiple":
+        let records = [
+            syntheticHeading("GPT-5.6 Sol 简介"),
+            syntheticButton("继续使用当前模型"),
+            syntheticButton("继续使用当前模型"),
+        ]
+        _ = try knownModelNuxDismissIndex(in: records)
+        throw DriverFailure("internal_error", exitStatus: 70)
+    case "desktop-login-required":
+        let loginRecords = [
+            syntheticHeading("登录 ChatGPT"),
+            syntheticButton("继续登录"),
+            syntheticButton("使用其他方式登录"),
+        ]
+        let unrelatedRecords = [
+            syntheticHeading("登录 ChatGPT Extended"),
+            syntheticButton("继续登录 Plus"),
+        ]
+        let browserLoginRecords = [
+            SemanticRecord(
+                role: kAXStaticTextRole as String,
+                semanticStrings: Set(["请继续在浏览器中登录"]),
+                enabled: true,
+                writable: false,
+                pressable: false
+            ),
+            syntheticButton("取消登录"),
+        ]
+        guard desktopLoginRequired(in: loginRecords),
+              desktopLoginRequired(in: browserLoginRecords),
+              !desktopLoginRequired(in: unrelatedRecords) else {
+            throw DriverFailure("desktop_login_detection_failed", exitStatus: 8)
+        }
+        return .success(command: "self-test", candidateCount: 1, actionCount: 0)
     case "send-structure":
         let records = [
             syntheticButton("添加文件等内容"),
             syntheticButton("完全访问"),
+            syntheticButton("听写"),
+            syntheticButton(nil),
+        ]
+        _ = try structuralSendButtonIndex(in: records)
+        return .success(command: "self-test", candidateCount: 1, actionCount: 0)
+    case "send-structure-custom":
+        let records = [
+            syntheticButton("添加文件等内容"),
+            syntheticButton("自定义"),
             syntheticButton("听写"),
             syntheticButton(nil),
         ]
@@ -2847,7 +3803,6 @@ private struct AXDiagnosticTestNode: Decodable {
     let role: String?
     let subrole: String?
     let identifier: String?
-    let windowNumber: UInt32?
     let childrenStatus: String?
     let childrenValue: String?
     let children: [Int]
@@ -2860,7 +3815,6 @@ private struct AXDiagnosticTestNode: Decodable {
         case role
         case subrole
         case identifier
-        case windowNumber = "window_number"
         case childrenStatus = "children_status"
         case childrenValue = "children_value"
         case children
@@ -2879,7 +3833,6 @@ private struct AXDiagnosticTestInput: Decodable {
     let accessibilityTrusted: Bool
     let axWindowsAvailable: Bool
     let axWindowNodeIDs: [Int]?
-    let axWindowNumbers: [UInt32?]?
     let rootID: Int
     let nodes: [AXDiagnosticTestNode]
     let expectedMaxChildrenReads: Int?
@@ -2893,7 +3846,6 @@ private struct AXDiagnosticTestInput: Decodable {
         case accessibilityTrusted = "accessibility_trusted"
         case axWindowsAvailable = "ax_windows_available"
         case axWindowNodeIDs = "ax_window_node_ids"
-        case axWindowNumbers = "ax_window_numbers"
         case rootID = "root_id"
         case nodes
         case expectedMaxChildrenReads = "expected_max_children_reads"
@@ -2975,18 +3927,31 @@ private func executeBoundWindowTest(
         frontmostPID: { input.frontmostPID },
         accessibilityTrusted: { input.accessibilityTrusted },
         axWindows: {
-            normalizedAXWindows(
+            let windows = normalizedAXWindows(
                 status: axWindowsStatus,
                 valuePresent: axWindowsValuePresent,
                 roots: decodedAXWindowRoots,
                 applicationMode: context.applicationMode
             )
+            guard context.applicationMode == .relayKit,
+                  let rootID = input.rootID,
+                  let applicationRoot = nodesByID[rootID] else {
+                return windows
+            }
+            return relayKitSurfaceRoots(
+                axWindows: windows,
+                applicationRoot: applicationRoot,
+                role: { $0.role },
+                children: testChildren,
+                identical: { $0.id == $1.id }
+            )
         },
-        axWindowNumber: { node in
+        desktopWindowNumber: { node in
             guard let index = windowNodeIDs.firstIndex(of: node.id) else { return nil }
             return input.axWindowNumbers[index]
         },
         axRole: { $0.role },
+        axIdentifier: { $0.identifier },
         relayKitSemanticBinding: { root in
             relayKitSemanticBinding(
                 root: root,
@@ -3020,7 +3985,9 @@ private func executeBoundWindowTest(
         command: parsed.command.rawValue,
         windowVerified: true,
         candidateCount: selection.candidateCount,
-        actionCount: 0
+        actionCount: 0,
+        windowServerSurfaceCount: selection.windowServerSurfaceCount,
+        axPopoverCount: selection.axPopoverCount
     )
 }
 
@@ -3051,10 +4018,6 @@ private func executeAXDiagnosticTest(
     let windowNodeIDs = input.axWindowNodeIDs ?? input.nodes
         .filter { $0.role == kAXWindowRole as String }
         .map(\.id)
-    let windowNumbers = input.axWindowNumbers ?? windowNodeIDs.map { nodesByID[$0]?.windowNumber }
-    guard windowNodeIDs.count == windowNumbers.count else {
-        throw DriverFailure("invalid_arguments", exitStatus: 2)
-    }
     let axWindowRoots = windowNodeIDs.compactMap { nodesByID[$0] }
     guard axWindowRoots.count == windowNodeIDs.count else {
         throw DriverFailure("invalid_arguments", exitStatus: 2)
@@ -3089,17 +4052,25 @@ private func executeAXDiagnosticTest(
         bundleIdentifier: input.bundleIdentifier,
         windowServerMetadata: { input.windows },
         accessibilityTrusted: { input.accessibilityTrusted },
-        axWindows: { (input.axWindowsAvailable, axWindowRoots) },
+        axWindows: {
+            let windows = AXActionRoots(
+                available: input.axWindowsAvailable,
+                axWindowsCount: axWindowRoots.count,
+                roots: axWindowRoots
+            )
+            guard let applicationRoot = nodesByID[input.rootID] else { return windows }
+            return relayKitSurfaceRoots(
+                axWindows: windows,
+                applicationRoot: applicationRoot,
+                role: { $0.role },
+                children: testChildren,
+                identical: { $0.id == $1.id }
+            )
+        },
         role: { $0.role },
         subrole: { $0.subrole },
         identifier: { $0.identifier },
         children: testChildren,
-        windowNumber: { node in
-            guard let index = windowNodeIDs.firstIndex(of: node.id) else {
-                return node.windowNumber
-            }
-            return windowNumbers[index]
-        },
         identical: { $0.id == $1.id }
     )
     let report = makeAXDiagnosticReport(snapshot: snapshot)
@@ -3111,7 +4082,11 @@ private func executeAXDiagnosticTest(
     return .success(
         command: parsed.command.rawValue,
         windowVerified: true,
-        actionCount: 0
+        actionCount: 0,
+        axWindowsCount: snapshot.axWindowsCount,
+        windowServerSurfaceCount: snapshot.windowServerSurfaceCount,
+        axPopoverCount: snapshot.axPopoverCount,
+        semanticIdentifierCount: snapshot.semanticIdentifierCount
     )
 }
 #endif
@@ -3132,6 +4107,8 @@ private func execute(_ parsed: ParsedArguments) throws -> DriverReport {
         return try executeReveal(options: parsed.options)
     case .ready:
         return try executeReady(options: parsed.options)
+    case .dismissModelNux:
+        return try executeDismissModelNux(options: parsed.options)
     case .prepare:
         return try executePrepare(options: parsed.options)
     case .submit:

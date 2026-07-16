@@ -38,7 +38,7 @@ jq -n --arg run_id "${run_id}" \
   --arg screenshot "$(sha "${tmp_dir}/screenshot.png")" \
   --arg usage "$(sha "${tmp_dir}/usage.json")" \
   --arg events "$(sha "${tmp_dir}/provider-events.jsonl")" \
-  '{status:"complete",run_id:$run_id,profile:"rc1_native_responses_three_stage",desktop_websocket_to_gateway:true,gateway_sse_to_fixture:true,tool_roundtrip_verified:true,failed_events:[],harness_sha256:$harness,scenario_sha256:$scenario,screenshot_sha256:$screenshot,usage_sha256:$usage,provider_events_sha256:$events,stages:[
+  '{status:"complete",manual_status:"route_complete",route_proof_status:"complete",harness_exit_code:0,run_id:$run_id,profile:"rc1_native_responses_three_stage",desktop_websocket_to_gateway:true,gateway_sse_to_fixture:true,tool_roundtrip_verified:true,failed_events:[],harness_sha256:$harness,scenario_sha256:$scenario,screenshot_sha256:$screenshot,usage_sha256:$usage,provider_events_sha256:$events,stages:[
     {id:"A",state:"evidence_verified",submission_state:"submitted",submission_count:1},
     {id:"B",state:"evidence_verified",submission_state:"submitted",submission_count:1},
     {id:"C",state:"evidence_verified",submission_state:"submitted",submission_count:1}
@@ -65,7 +65,7 @@ jq -e --arg run_id "${run_id}" '
   (.bindings | all(.sha256 | test("^[0-9a-f]{64}$")))
 ' "${tmp_dir}/manifest.json" >/dev/null || fail "manifest did not derive a fully bound PASS"
 
-for mutation in missing_predicate failed_event stale_run failed_stage screenshot_relabel wrong_api_format; do
+for mutation in missing_predicate failed_event stale_run failed_stage screenshot_relabel wrong_api_format bad_manual_status bad_route_status nonzero_harness_exit; do
   cp "${tmp_dir}/native.json" "${tmp_dir}/native-bad.json"
   cp "${tmp_dir}/desktop.json" "${tmp_dir}/desktop-bad.json"
   cp "${tmp_dir}/providers.json" "${tmp_dir}/providers-bad.json"
@@ -76,6 +76,9 @@ for mutation in missing_predicate failed_event stale_run failed_stage screenshot
     failed_stage) jq '.stages[1].state="failed"' "${tmp_dir}/desktop.json" >"${tmp_dir}/desktop-bad.json" ;;
     screenshot_relabel) jq '.screenshot_sha256=("0" * 64)' "${tmp_dir}/desktop.json" >"${tmp_dir}/desktop-bad.json" ;;
     wrong_api_format) jq '.providers[0].api_format="openai_chat"' "${tmp_dir}/providers.json" >"${tmp_dir}/providers-bad.json" ;;
+    bad_manual_status) jq '.manual_status="route_incomplete"' "${tmp_dir}/desktop.json" >"${tmp_dir}/desktop-bad.json" ;;
+    bad_route_status) jq '.route_proof_status="observation_failed_3"' "${tmp_dir}/desktop.json" >"${tmp_dir}/desktop-bad.json" ;;
+    nonzero_harness_exit) jq '.harness_exit_code=1' "${tmp_dir}/desktop.json" >"${tmp_dir}/desktop-bad.json" ;;
   esac
   bad_args=("${args[@]}")
   bad_args[1]="${tmp_dir}/native-bad.json"

@@ -13,6 +13,9 @@ fail() {
   exit 1
 }
 
+grep -Fq '.code == "desktop_login_required"' "${PROOF_SCRIPT}" ||
+  fail "manual proof readiness does not preserve the typed Desktop login blocker"
+
 expect_failure() {
   local message="$1"
   shift
@@ -80,6 +83,8 @@ grep -Fq 'wait_for_desktop_window()' "${PROOF_SCRIPT}" ||
   fail "manual proof must wait for a real isolated Desktop window"
 grep -Fq 'wait_for_desktop_ui_ready()' "${PROOF_SCRIPT}" ||
   fail "manual proof must wait for the isolated Desktop AX tree to become interactive"
+grep -Fq 'dismiss_known_model_nux()' "${PROOF_SCRIPT}" ||
+  fail "manual proof must dismiss only the known first-run model NUX"
 grep -Fq 'run_automated_proof()' "${PROOF_SCRIPT}" ||
   fail "Desktop proof needs a zero-human automated state machine"
 grep -Fq 'automated_ax' "${PROOF_SCRIPT}" ||
@@ -96,16 +101,17 @@ grep -Fq 'scripts/codex-desktop-ax-driver.swift' "${PROOF_SCRIPT}" ||
   fail "automated proof must bind the tracked AX driver into the harness"
 grep -Fq 'sandbox_mode = "read-only"' "${PROOF_SCRIPT}" ||
   fail "unattended Desktop proof must use the read-only Codex sandbox"
-if grep -Fq 'sandbox_mode = "danger-full-access"' "${PROOF_SCRIPT}"; then
-  fail "unattended Desktop proof must not grant danger-full-access"
-fi
+grep -Fq 'sandbox_mode = "danger-full-access"' "${PROOF_SCRIPT}" ||
+  fail "externally sandboxed RC1 tool proof must avoid a conflicting nested Codex sandbox"
 grep -Fq 'desktop_ui_ready()' "${PROOF_SCRIPT}" ||
   fail "manual proof needs a condition-based Desktop UI readiness probe"
 desktop_launch_body="$(sed -n '/^launch_desktop() {/,/^}/p' "${PROOF_SCRIPT}")"
 window_wait_line="$(grep -n 'wait_for_desktop_window' <<<"${desktop_launch_body}" | cut -d: -f1 | head -1)"
+nux_dismiss_line="$(grep -n 'dismiss_known_model_nux' <<<"${desktop_launch_body}" | cut -d: -f1 | head -1)"
 ui_wait_line="$(grep -n 'wait_for_desktop_ui_ready' <<<"${desktop_launch_body}" | cut -d: -f1 | head -1)"
-[[ -n "${window_wait_line}" && -n "${ui_wait_line}" && "${window_wait_line}" -lt "${ui_wait_line}" ]] ||
-  fail "manual proof must wait for an interactive AX tree after binding the Desktop window"
+[[ -n "${window_wait_line}" && -n "${nux_dismiss_line}" && -n "${ui_wait_line}" &&
+   "${window_wait_line}" -lt "${nux_dismiss_line}" && "${nux_dismiss_line}" -lt "${ui_wait_line}" ]] ||
+  fail "manual proof must dismiss the known model NUX after binding and before readiness"
 grep -Fq 'Codex Desktop process started without an isolated GUI window' "${PROOF_SCRIPT}" ||
   fail "manual proof must fail closed when the isolated GUI window is missing"
 if grep -Fq 'as? CFDictionary' "${PROOF_SCRIPT}"; then
@@ -236,6 +242,38 @@ cleanup() {
   rm -rf "${tmp_dir}"
 }
 trap cleanup EXIT
+
+stale_lock_root="${tmp_dir}/stale-lock-root"
+stale_lock_profile="${stale_lock_root}/desktop-user-data"
+mkdir -p "${stale_lock_profile}"
+ln -s "relaykit-test-999999" "${stale_lock_profile}/SingletonLock"
+ln -s "${tmp_dir}/missing-singleton-socket" "${stale_lock_profile}/SingletonSocket"
+ln -s "relaykit-cookie-999999" "${stale_lock_profile}/SingletonCookie"
+"${PROOF_SCRIPT}" --test-stale-desktop-lock-cleanup "${stale_lock_root}" "${stale_lock_profile}"
+for singleton_name in SingletonLock SingletonSocket SingletonCookie; do
+  [[ ! -e "${stale_lock_profile}/${singleton_name}" && ! -L "${stale_lock_profile}/${singleton_name}" ]] ||
+    fail "dead isolated Desktop ${singleton_name} was not removed"
+done
+
+ln -s "relaykit-test-$$" "${stale_lock_profile}/SingletonLock"
+ln -s "${tmp_dir}/missing-live-singleton-socket" "${stale_lock_profile}/SingletonSocket"
+ln -s "relaykit-cookie-$$" "${stale_lock_profile}/SingletonCookie"
+expect_failure "manual proof removed a live isolated Desktop lock" \
+  "${PROOF_SCRIPT}" --test-stale-desktop-lock-cleanup "${stale_lock_root}" "${stale_lock_profile}"
+for singleton_name in SingletonLock SingletonSocket SingletonCookie; do
+  [[ -L "${stale_lock_profile}/${singleton_name}" ]] ||
+    fail "live isolated Desktop ${singleton_name} was changed"
+  rm -f "${stale_lock_profile}/${singleton_name}"
+done
+
+printf 'not a symlink\n' >"${stale_lock_profile}/SingletonLock"
+expect_failure "manual proof removed an ambiguous non-symlink Desktop lock" \
+  "${PROOF_SCRIPT}" --test-stale-desktop-lock-cleanup "${stale_lock_root}" "${stale_lock_profile}"
+[[ -f "${stale_lock_profile}/SingletonLock" ]] ||
+  fail "ambiguous non-symlink Desktop lock was changed"
+rm -f "${stale_lock_profile}/SingletonLock"
+
+echo "Manual proof isolated stale Desktop lock tests passed"
 
 source_fixture="${tmp_dir}/source-fixture"
 mkdir -p \
@@ -746,6 +784,13 @@ grep -Fx 'model = "gpt-5.5"' "${isolated_config}" >/dev/null
 grep -Fx 'sandbox_mode = "read-only"' "${isolated_config}" >/dev/null
 grep -Fx 'openai_base_url = "http://127.0.0.1:19999/v1"' "${isolated_config}" >/dev/null
 
+rc1_config_home="${tmp_dir}/isolated-rc1-config-home"
+mkdir -p "${rc1_config_home}"
+HOME="${rc1_config_home}" "${PROOF_SCRIPT}" --test-write-codex-config 19998 rc1_native_responses
+rc1_config="${rc1_config_home}/Library/Application Support/RelayKit/DesktopProof/official-proof/codex-home/config.toml"
+grep -Fx 'sandbox_mode = "danger-full-access"' "${rc1_config}" >/dev/null ||
+  fail "RC1 tool proof did not disable only the conflicting inner Codex sandbox"
+
 scenario_dir="${tmp_dir}/auto-scenario"
 mkdir -m 700 "${scenario_dir}"
 query_file="${scenario_dir}/query.txt"
@@ -1070,6 +1115,11 @@ desktop_launch_line="$(grep -n 'launch_desktop' <<<"${auto_body}" | cut -d: -f1 
 ready_body="$(sed -n '/^wait_for_desktop_ui_ready() {/,/^}/p' "${PROOF_SCRIPT}")"
 grep -Fq '"${AX_DRIVER_BINARY}" ready' <<<"${ready_body}" ||
   fail "automated Desktop readiness must require the exact catalog picker and composer"
+nux_body="$(sed -n '/^dismiss_known_model_nux() {/,/^}/p' "${PROOF_SCRIPT}")"
+grep -Fq '"${AX_DRIVER_BINARY}" dismiss-model-nux' <<<"${nux_body}" ||
+  fail "manual proof must use the bounded AX model NUX command"
+grep -Fq '.candidate_count <= 1 and .action_count <= 1' <<<"${nux_body}" ||
+  fail "model NUX handling must allow at most one exact action"
 prepare_call_line="$(grep -n '"${AX_DRIVER_BINARY}" prepare' <<<"${auto_body}" | cut -d: -f1)"
 submit_call_line="$(grep -n '"${AX_DRIVER_BINARY}" submit' <<<"${auto_body}" | cut -d: -f1)"
 activation_lines="$(grep -n 'activate_isolated_desktop' <<<"${auto_body}" | cut -d: -f1)"
@@ -1464,6 +1514,73 @@ test ! -e "${marker_run_dir}/tool-since-epoch"
 
 echo "Manual proof run marker reset test passed"
 
+rc1_auth_real_home="${tmp_dir}/rc1-auth-user"
+rc1_auth_home="${rc1_auth_real_home}/Library/Application Support/RelayKit/DesktopProof/official-proof/codex-home"
+mkdir -p "${rc1_auth_home}" "${rc1_auth_real_home}/.codex"
+printf '{"auth":"isolated-test-fixture"}\n' >"${rc1_auth_home}/auth.json"
+chmod 600 "${rc1_auth_home}/auth.json"
+HOME="${rc1_auth_real_home}" "${PROOF_SCRIPT}" --test-rc1-isolated-auth-home "${rc1_auth_home}" >/dev/null
+
+rc1_status_cli="${tmp_dir}/rc1-status-cli"
+cat >"${rc1_status_cli}" <<'SH'
+#!/usr/bin/env bash
+test "${1:-}" = "login" && test "${2:-}" = "status" || exit 2
+printf '%s\n' 'Logged in using ChatGPT' >&2
+SH
+chmod 700 "${rc1_status_cli}"
+HOME="${rc1_auth_real_home}" "${PROOF_SCRIPT}" --test-rc1-auth-status "${rc1_auth_home}" "${rc1_status_cli}"
+
+rc1_noisy_status_cli="${tmp_dir}/rc1-noisy-status-cli"
+cat >"${rc1_noisy_status_cli}" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'warning' 'Logged in using ChatGPT' >&2
+SH
+chmod 700 "${rc1_noisy_status_cli}"
+if HOME="${rc1_auth_real_home}" "${PROOF_SCRIPT}" --test-rc1-auth-status "${rc1_auth_home}" "${rc1_noisy_status_cli}"; then
+  fail "RC1 isolated auth status accepted non-exact output"
+fi
+
+rc1_mutating_status_cli="${tmp_dir}/rc1-mutating-status-cli"
+cat >"${rc1_mutating_status_cli}" <<'SH'
+#!/usr/bin/env bash
+printf '\n' >>"${CODEX_HOME}/auth.json"
+printf '%s\n' 'Logged in using ChatGPT' >&2
+SH
+chmod 700 "${rc1_mutating_status_cli}"
+if HOME="${rc1_auth_real_home}" "${PROOF_SCRIPT}" --test-rc1-auth-status "${rc1_auth_home}" "${rc1_mutating_status_cli}"; then
+  fail "RC1 isolated auth status accepted an auth mutation"
+fi
+printf '{"auth":"isolated-test-fixture"}\n' >"${rc1_auth_home}/auth.json"
+chmod 600 "${rc1_auth_home}/auth.json"
+
+printf '{"auth":"global-test-fixture"}\n' >"${rc1_auth_real_home}/.codex/auth.json"
+chmod 600 "${rc1_auth_real_home}/.codex/auth.json"
+if HOME="${rc1_auth_real_home}" "${PROOF_SCRIPT}" --test-rc1-isolated-auth-home "${rc1_auth_real_home}/.codex" >/dev/null 2>&1; then
+  fail "RC1 isolated auth validation accepted the global Codex home"
+fi
+
+rc1_symlink_auth_home="${rc1_auth_real_home}/Library/Application Support/RelayKit/OfficialProof/codex-home"
+mkdir -p "${rc1_symlink_auth_home}"
+ln -s "${rc1_auth_home}/auth.json" "${rc1_symlink_auth_home}/auth.json"
+if HOME="${rc1_auth_real_home}" "${PROOF_SCRIPT}" --test-rc1-isolated-auth-home "${rc1_symlink_auth_home}" >/dev/null 2>&1; then
+  fail "RC1 isolated auth validation accepted a symlinked auth source"
+fi
+
+chmod 640 "${rc1_auth_home}/auth.json"
+if HOME="${rc1_auth_real_home}" "${PROOF_SCRIPT}" --test-rc1-isolated-auth-home "${rc1_auth_home}" >/dev/null 2>&1; then
+  fail "RC1 isolated auth validation accepted non-private auth permissions"
+fi
+chmod 600 "${rc1_auth_home}/auth.json"
+
+rc1_fresh_codex_home="${tmp_dir}/rc1-fresh-codex-home"
+source_auth_hash_before="$(/usr/bin/shasum -a 256 "${rc1_auth_home}/auth.json" | awk '{print $1}')"
+HOME="${rc1_auth_real_home}" "${PROOF_SCRIPT}" --test-rc1-auth-link-lifecycle "${rc1_auth_home}" "${rc1_fresh_codex_home}"
+test ! -e "${rc1_fresh_codex_home}/auth.json"
+test ! -L "${rc1_fresh_codex_home}/auth.json"
+test "$(/usr/bin/shasum -a 256 "${rc1_auth_home}/auth.json" | awk '{print $1}')" = "${source_auth_hash_before}"
+
+echo "Manual proof isolated RC1 auth link tests passed"
+
 grep -Fq 'rc1_native_responses_three_stage' "${PROOF_SCRIPT}" ||
   fail "manual proof must expose the dedicated RC1 native Responses profile"
 grep -Fq 'rc1-native-responses-three-stage)' "${PROOF_SCRIPT}" ||
@@ -1478,8 +1595,14 @@ grep -Fq 'submission_count' "${PROOF_SCRIPT}" ||
   fail "RC1 stages must prove exactly one submission each"
 grep -Fq 'failed_events' "${PROOF_SCRIPT}" ||
   fail "RC1 evidence must preserve failed events instead of relabeling them"
-grep -Fq 'predicate_ledger' "${PROOF_SCRIPT}" ||
-  fail "RC1 evidence must expose a named predicate ledger"
+	grep -Fq 'predicate_ledger' "${PROOF_SCRIPT}" ||
+	  fail "RC1 evidence must expose a named predicate ledger"
+	grep -Fq 'manual_status:"route_complete"' "${PROOF_SCRIPT}" ||
+	  fail "RC1 evidence must require a successful manual status"
+	grep -Fq 'route_proof_status:"complete"' "${PROOF_SCRIPT}" ||
+	  fail "RC1 evidence must require a complete route proof"
+	grep -Fq 'harness_exit_code:0' "${PROOF_SCRIPT}" ||
+	  fail "RC1 evidence must require a zero harness exit"
 
 rc1_contract="$(${PROOF_SCRIPT} --print-rc1-native-responses-contract)"
 jq -e '

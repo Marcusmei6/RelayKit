@@ -23,12 +23,20 @@ grep -Fq 'func exactIdentity(_ element: AXUIElement) -> Bool' "${SCRIPT}" ||
 grep -Fq 'func pressDescendant(_ element: AXUIElement' "${SCRIPT}" ||
   fail "AX press must descend to a real button"
 press_descendant_body="$(sed -n '/^func pressDescendant(_ element: AXUIElement/,/^}/p' "${SCRIPT}")"
-grep -Fq 'AXUIElementPerformAction(element, kAXPressAction as CFString) == .success' <<<"${press_descendant_body}" ||
-  fail "AX button descendants must perform the press action directly"
 if grep -Fq 'AXUIElementCopyActionNames' <<<"${press_descendant_body}" ||
    grep -Fq 'actionsRef as? [String]' <<<"${press_descendant_body}"; then
   fail "AX button descendants must not enumerate or cast action names before pressing"
 fi
+grep -Fq 'AXUIElementPerformAction(target, kAXPressAction as CFString) == .success' "${SCRIPT}" ||
+  fail "the unique AX button target must perform the press action directly"
+grep -Fq 'let attempts = 30' "${SCRIPT}" ||
+  fail "AX press must use a bounded readiness poll"
+grep -Fq 'if exactMatches.count > 1 { exit(3) }' "${SCRIPT}" ||
+  fail "AX press must fail closed when an exact identity is not unique"
+grep -Fq 'if actionable.count > 1 { exit(3) }' "${SCRIPT}" ||
+  fail "AX press must fail closed when an exact wrapper contains multiple actionable controls"
+grep -Fq 'usleep(200_000)' "${SCRIPT}" ||
+  fail "AX press readiness polling must remain bounded and explicit"
 grep -Fq 'kAXRadioButtonRole' "${SCRIPT}" ||
   fail "segmented controls must press an exact AXRadioButton"
 grep -Fq 'func focusTextFieldDescendant(_ element: AXUIElement' "${SCRIPT}" ||

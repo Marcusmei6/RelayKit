@@ -12,9 +12,12 @@ MANUAL_PROOF="${ROOT}/scripts/codex-desktop-manual-proof.sh"
 MANIFEST="${ROOT}/scripts/rc1-native-responses-manifest.sh"
 OUT="${RELAYKIT_RC1_NATIVE_RESPONSES_OUT:-${ROOT}/dist/rc1-native-responses-proof}"
 RUN_ID="${RELAYKIT_RC1_RUN_ID:-rc1-native-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+RC1_PERSISTENT_PROOF_ROOT="${HOME}/Library/Application Support/RelayKit/DesktopProof"
 PROVIDER_NAME="Dogfood RC1 Native Responses"
 PROVIDER_ID="dogfood-rc1-native-responses"
-PROVIDER_MODEL="dogfood/native-responses"
+PROVIDER_FORM_MODEL="dogfood-native-responses"
+PROVIDER_PUBLIC_MODEL="custom/${PROVIDER_FORM_MODEL}"
+PROVIDER_UPSTREAM_MODEL="native-upstream"
 KEYCHAIN_SERVICE="relaykit.provider.${PROVIDER_ID}"
 SYNTHETIC_KEY="RELAYKIT_FAKE_RC1_NATIVE_RESPONSES_DO_NOT_USE"
 APP_PID=""
@@ -197,7 +200,6 @@ on run argv
       set statusItemCount to count of statusItems
     end tell
     if requestedAction is "click" and menuBarCount is 1 and statusItemCount is 1 then
-      set frontmost of targetProcess to true
       tell targetProcess to click item 1 of statusItems
     end if
     return (processCount as text) & tab & (menuBarCount as text) & tab & (statusItemCount as text)
@@ -213,8 +215,8 @@ APPLESCRIPT
   printf '%s\t%s\n' "${menu_bar_count}" "${item_count}"
 }
 
-open_exact_nonactivating_menu_bar_panel() {
-  # The exact status item opens RelayKit's canonical nonactivating NSPanel menu-bar panel.
+open_exact_menu_bar_popover() {
+  # The exact status item opens RelayKit's native menu-bar popover.
   local attempt state read_status=0 menu_bar_count item_count ready=false
   for ((attempt = 1; attempt <= STATUS_ITEM_READINESS_ATTEMPTS; attempt++)); do
     read_status=0
@@ -412,10 +414,10 @@ guard let maximumArea = eligible.map(\.area).max() else {
 }
 
 let largest = eligible.filter { $0.area == maximumArea }
-guard largest.count == 1, let selected = largest.first else {
+guard eligible.count == 1, let selected = eligible.first else {
     try writeAtomicJSON(
         baseDiagnostic(
-            status: "ambiguous_largest_window",
+            status: "eligible_window_not_unique",
             ownerWindowCount: ownerWindows.count,
             candidates: candidates,
             largestCandidateCount: largest.count
@@ -453,11 +455,48 @@ activate_exact_app() {
   /usr/bin/osascript -e "tell application \"System Events\" to tell first process whose unix id is ${APP_PID} to set frontmost to true" >/dev/null
 }
 
+wait_for_relaykit_ax_surface() {
+  local identity_path="$1" diagnostic_output="$2"
+  local driver_binary="${3:-${OUT}/run/codex-desktop-ax-driver}"
+  local exact_pid="${4:-${APP_PID}}"
+  local report_output="${diagnostic_output%.json}-report.json"
+  local temporary_report="${report_output}.tmp.$$.$RANDOM"
+  local driver_status=0
+  for _ in {1..100}; do
+    rm -f "${diagnostic_output}" "${temporary_report}"
+    driver_status=0
+    RELAYKIT_AX_DRIVER_DIAGNOSTIC=1 "${driver_binary}" \
+      relaykit-ax-inspect --pid "${exact_pid}" --window-identity "${identity_path}" \
+      --diagnostic-output "${diagnostic_output}" >"${temporary_report}" 2>/dev/null || driver_status=$?
+    if [[ -s "${temporary_report}" ]]; then
+      atomic_copy_private "${temporary_report}" "${report_output}" || return 1
+    fi
+    if [[ "${driver_status}" -eq 0 ]] &&
+       jq -e '
+         .status == "ok" and .code == "ok" and .window_verified == true and
+         .action_count == 0 and (.ax_windows_count == 0 or .ax_windows_count == 1) and
+         .window_server_surface_count == 1 and .ax_popover_count == 1 and
+         .semantic_identifier_count > 0
+       ' "${report_output}" >/dev/null 2>&1 &&
+       jq -e '
+         (.ax_windows_count == 0 or .ax_windows_count == 1) and
+         .window_server_surface_count == 1 and .ax_popover_count == 1 and
+         .semantic_identifier_count > 0
+       ' "${diagnostic_output}" >/dev/null 2>&1; then
+      rm -f "${temporary_report}"
+      return 0
+    fi
+    sleep 0.1
+  done
+  rm -f "${temporary_report}"
+  return 1
+}
+
 launch_ordinary_app() {
   local identity_path="$1"
   local diagnostic_path="$2"
   /usr/bin/open -n \
-    --env "RELAYKIT_OFFICIAL_PROOF_ROOT=${OUT}/app-official-proof" \
+    --env "RELAYKIT_OFFICIAL_PROOF_ROOT=${RC1_PERSISTENT_PROOF_ROOT}/official-proof" \
     "${APP_BUNDLE}" --args \
     --ui-smoke-provider-config "${OUT}/providers.json" \
     --ui-smoke-usage-log "${OUT}/app-usage.jsonl" >/dev/null
@@ -467,10 +506,10 @@ launch_ordinary_app() {
     sleep 0.1
   done
   [[ -n "${APP_PID}" ]] || return 1
-  open_exact_nonactivating_menu_bar_panel
+  open_exact_menu_bar_popover
   for _ in {1..100}; do
     if write_exact_app_window_identity "${identity_path}" "${diagnostic_path}" 2>/dev/null; then
-      activate_exact_app
+      wait_for_relaykit_ax_surface "${identity_path}" "${diagnostic_path%.json}-ax.json" || return 1
       return 0
     fi
     sleep 0.1
@@ -486,7 +525,7 @@ run_ax() {
   local temporary="${report}.tmp.$$.$RANDOM"
   local driver_status=0
   shift
-  activate_exact_app
+  sleep 0.25
   (umask 077; "${OUT}/run/codex-desktop-ax-driver" "$@" >"${temporary}") || driver_status=$?
   if ! atomic_copy_private "${temporary}" "${report}"; then
     rm -f "${temporary}"
@@ -536,7 +575,7 @@ run_window_identity_repro() {
   done
   [[ -n "${APP_PID}" ]] || fail "window repro App did not expose an exact PID"
   launched_pid="${APP_PID}"
-  open_exact_nonactivating_menu_bar_panel || fail "window repro did not open the exact nonactivating menu-bar panel"
+  open_exact_menu_bar_popover || fail "window repro did not open the exact menu-bar popover"
   for _ in {1..100}; do
     if write_exact_app_window_identity "${identity_path}" "${diagnostic_path}" 2>/dev/null; then
       break
@@ -583,33 +622,44 @@ atomic_copy_private() {
 
 ax_driver_report_is_redacted() {
   jq -e '
+    def nonnegative_integer:
+      if type == "number" then . >= 0 and floor == . else false end;
     type == "object" and .command == "relaykit-ax-inspect" and
     (.status == "ok" or .status == "error") and (.code | type == "string") and
-    ((keys - ["action_count","candidate_count","code","command","composer_count",
-      "model_picker_count","send_count","status","window_verified"]) | length == 0) and
-    ((has("candidate_count") | not) or .candidate_count == null or (.candidate_count | type == "number"))
+    ((keys - ["action_count","ax_popover_count","ax_windows_count","candidate_count","code","command","composer_count",
+      "model_picker_count","semantic_identifier_count","send_count","status","window_server_surface_count",
+      "window_verified"]) | length == 0) and
+    ((has("candidate_count") | not) or .candidate_count == null or (.candidate_count | nonnegative_integer)) and
+    ((has("ax_windows_count") | not) or .ax_windows_count == null or (.ax_windows_count | nonnegative_integer)) and
+    ((has("window_server_surface_count") | not) or .window_server_surface_count == null or (.window_server_surface_count | nonnegative_integer)) and
+    ((has("ax_popover_count") | not) or .ax_popover_count == null or (.ax_popover_count | nonnegative_integer)) and
+    ((has("semantic_identifier_count") | not) or .semantic_identifier_count == null or (.semantic_identifier_count | nonnegative_integer))
   ' "$1" >/dev/null 2>&1
 }
 
 ax_tree_is_allowlisted() {
   jq -e '
+    def nonnegative_integer:
+      if type == "number" then . >= 0 and floor == . else false end;
     (keys | sort) == [
-      "ax_windows_available","ax_windows_count","depth_counts",
-      "matching_window_count","nodes","numbered_window_count",
-      "role_counts","semantic_identifier_count","status","truncated"
+      "ax_popover_count","ax_windows_available","ax_windows_count","depth_counts","nodes","role_counts",
+      "semantic_identifier_count","status","truncated","window_server_surface_count"
     ] and .status == "ok" and .ax_windows_available == true and
-    .ax_windows_count >= 1 and .numbered_window_count == 1 and
-    .matching_window_count == 1 and .semantic_identifier_count >= 1 and
+    (.ax_windows_count | nonnegative_integer) and
+    (.window_server_surface_count | nonnegative_integer) and
+    (.ax_popover_count | nonnegative_integer) and
+    (.semantic_identifier_count | nonnegative_integer) and
+	    (.ax_windows_count == 0 or .ax_windows_count == 1) and
+    .window_server_surface_count == 1 and .ax_popover_count == 1 and .semantic_identifier_count >= 1 and
     .truncated == false and (.nodes | length >= 1) and
     .nodes[0].parent == null and .nodes[0].depth == 0 and
-    .nodes[0].role == "AXWindow" and .nodes[0].window_number_present == true and
-    .nodes[0].matches_expected_window == true and
-    ([.role_counts[] | select(.role == "AXWindow") | .count] == [1]) and
+    .nodes[0].role == "AXPopover" and
+    .nodes[0].bound_surface_root == true and
+	    ([.role_counts[] | select(.role == "AXPopover") | .count] == [1]) and
     (.nodes | length <= 512) and ([.nodes[].depth] | max // 0) <= 12 and
     (.nodes | all(.[];
       (keys | sort) == [
-        "child_count","depth","matches_expected_window","ordinal","parent",
-        "role","subrole","window_number_present"
+        "bound_surface_root","child_count","depth","ordinal","parent","role","subrole"
       ])) and
     (.role_counts | all(.[]; (keys | sort) == ["count","role"])) and
     (.depth_counts | all(.[]; (keys | sort) == ["count","depth"]))
@@ -618,8 +668,16 @@ ax_tree_is_allowlisted() {
 
 ax_driver_report_is_success() {
   jq -e '
+    def nonnegative_integer:
+      if type == "number" then . >= 0 and floor == . else false end;
     .command == "relaykit-ax-inspect" and .status == "ok" and .code == "ok" and
-    .window_verified == true
+    .window_verified == true and
+    (.ax_windows_count | nonnegative_integer) and
+    (.window_server_surface_count | nonnegative_integer) and
+    (.ax_popover_count | nonnegative_integer) and
+    (.semantic_identifier_count | nonnegative_integer) and
+	    (.ax_windows_count == 0 or .ax_windows_count == 1) and
+    .window_server_surface_count == 1 and .ax_popover_count == 1 and .semantic_identifier_count >= 1
   ' "$1" >/dev/null 2>&1
 }
 
@@ -627,7 +685,7 @@ ax_window_identity_is_exact() {
   local identity="$1" diagnostic="$2" expected_pid="$3"
   jq -e --argjson expected_pid "${expected_pid}" --slurpfile identity "${identity}" '
     .status == "selected" and .pid == $expected_pid and
-    .largest_candidate_count == 1 and
+    .eligible_count == 1 and .largest_candidate_count == 1 and
     ($identity | length == 1) and $identity[0].pid == $expected_pid and
     (.selected_window_id as $selected |
       $identity[0].window_id == $selected and
@@ -731,6 +789,7 @@ ax_inspect_finalize() {
   local original_exit="$1"
   local final_exit="${original_exit}"
   local stable_identity="${AX_INSPECT_OUT}/window-identity.json"
+  local stable_pre_click_window_diagnostic="${AX_INSPECT_OUT}/pre-click-window-diagnostic.json"
   local stable_window_diagnostic="${AX_INSPECT_OUT}/window-diagnostic.json"
   local stable_driver_report="${AX_INSPECT_OUT}/ax-driver-report.json"
   local stable_tree="${AX_INSPECT_OUT}/ax-tree.json"
@@ -748,7 +807,14 @@ ax_inspect_finalize() {
   local driver_code=not_created
   local driver_command=relaykit-ax-inspect
   local driver_candidate_count=null
+  local driver_ax_windows_count=null
+  local driver_window_server_surface_count=null
+  local driver_ax_popover_count=null
+  local driver_semantic_identifier_count=null
   local artifact_tree_hash=""
+  local surface_absent_before_click=false
+  local surface_appeared_after_click=false
+  local same_run_lifecycle_verified=false
 
   [[ "${AX_INSPECT_FINALIZED}" == "false" ]] || return 0
   AX_INSPECT_FINALIZED=true
@@ -758,6 +824,11 @@ ax_inspect_finalize() {
     atomic_copy_private "${AX_INSPECT_TEMP}/window-identity.json" "${stable_identity}"
   else
     jq -n '{status:"not_created"}' | atomic_write_private "${stable_identity}"
+  fi
+  if [[ -s "${AX_INSPECT_TEMP}/pre-click-window-diagnostic.json" ]]; then
+    atomic_copy_private "${AX_INSPECT_TEMP}/pre-click-window-diagnostic.json" "${stable_pre_click_window_diagnostic}"
+  else
+    jq -n '{status:"not_created"}' | atomic_write_private "${stable_pre_click_window_diagnostic}"
   fi
   if [[ -s "${AX_INSPECT_TEMP}/window-diagnostic.json" ]]; then
     atomic_copy_private "${AX_INSPECT_TEMP}/window-diagnostic.json" "${stable_window_diagnostic}"
@@ -862,9 +933,33 @@ ax_inspect_finalize() {
   driver_code="$(jq -r '.code' "${stable_driver_report}")"
   driver_command="$(jq -r '.command' "${stable_driver_report}")"
   driver_candidate_count="$(jq -c 'if has("candidate_count") then .candidate_count else null end' "${stable_driver_report}")"
+  driver_ax_windows_count="$(jq -c 'if has("ax_windows_count") then .ax_windows_count else null end' "${stable_driver_report}")"
+  driver_window_server_surface_count="$(jq -c 'if has("window_server_surface_count") then .window_server_surface_count else null end' "${stable_driver_report}")"
+  driver_ax_popover_count="$(jq -c 'if has("ax_popover_count") then .ax_popover_count else null end' "${stable_driver_report}")"
+  driver_semantic_identifier_count="$(jq -c 'if has("semantic_identifier_count") then .semantic_identifier_count else null end' "${stable_driver_report}")"
+  if jq -e --slurpfile post "${stable_window_diagnostic}" '
+      .status == "no_eligible_window" and .eligible_count == 0 and
+      ($post | length == 1) and .pid == $post[0].pid
+    ' "${stable_pre_click_window_diagnostic}" >/dev/null 2>&1; then
+    surface_absent_before_click=true
+  fi
+  if jq -e --slurpfile before "${stable_pre_click_window_diagnostic}" --slurpfile identity "${stable_identity}" '
+      .status == "selected" and .eligible_count == 1 and .largest_candidate_count == 1 and
+      ($before | length == 1) and ($identity | length == 1) and
+      .pid == $before[0].pid and .pid == $identity[0].pid and
+      .selected_window_id == $identity[0].window_id and
+      ($before[0].captured_at <= .captured_at)
+    ' "${stable_window_diagnostic}" >/dev/null 2>&1; then
+    surface_appeared_after_click=true
+  fi
+  if [[ "${surface_absent_before_click}" == "true" && "${surface_appeared_after_click}" == "true" ]]; then
+    same_run_lifecycle_verified=true
+  fi
   if [[ "${final_exit}" -eq 0 &&
         "${driver_status}" == "ok" && "${driver_code}" == "ok" &&
-        "${tree_status}" == "created" && "${AX_INSPECT_EXACT_PID_COUNT}" -eq 1 ]]; then
+        "${tree_status}" == "created" && "${AX_INSPECT_EXACT_PID_COUNT}" -eq 1 &&
+        "${driver_window_server_surface_count}" == "1" && "${driver_ax_popover_count}" == "1" &&
+        "${same_run_lifecycle_verified}" == "true" ]]; then
     result_status=passed
     AX_INSPECT_FAILURE=none
   elif [[ "${final_exit}" -eq 0 ]]; then
@@ -879,6 +974,13 @@ ax_inspect_finalize() {
     --arg driver_code "${driver_code}" \
     --arg driver_command "${driver_command}" \
     --argjson driver_candidate_count "${driver_candidate_count}" \
+    --argjson driver_ax_windows_count "${driver_ax_windows_count}" \
+    --argjson driver_window_server_surface_count "${driver_window_server_surface_count}" \
+    --argjson driver_ax_popover_count "${driver_ax_popover_count}" \
+    --argjson driver_semantic_identifier_count "${driver_semantic_identifier_count}" \
+    --argjson surface_absent_before_click "${surface_absent_before_click}" \
+    --argjson surface_appeared_after_click "${surface_appeared_after_click}" \
+    --argjson same_run_lifecycle_verified "${same_run_lifecycle_verified}" \
     --argjson open_invocation_count "${AX_INSPECT_OPEN_INVOCATION_COUNT}" \
     --argjson open_success_count "${AX_INSPECT_OPEN_SUCCESS_COUNT}" \
     --argjson open_exit_status "${AX_INSPECT_OPEN_EXIT_STATUS}" \
@@ -894,6 +996,13 @@ ax_inspect_finalize() {
       driver_code:$driver_code,
       driver_command:$driver_command,
       driver_candidate_count:$driver_candidate_count,
+      driver_ax_windows_count:$driver_ax_windows_count,
+      driver_window_server_surface_count:$driver_window_server_surface_count,
+      driver_ax_popover_count:$driver_ax_popover_count,
+      driver_semantic_identifier_count:$driver_semantic_identifier_count,
+      surface_absent_before_click:$surface_absent_before_click,
+      surface_appeared_after_click:$surface_appeared_after_click,
+      same_run_lifecycle_verified:$same_run_lifecycle_verified,
       open_invocation_count:$open_invocation_count,
       open_success_count:$open_success_count,
       open_exit_status:$open_exit_status,
@@ -914,6 +1023,7 @@ ax_inspect_finalize() {
     --arg failure "${AX_INSPECT_FAILURE}" \
     --arg run_metadata_hash "$(ax_inspect_artifact_hash "${AX_INSPECT_OUT}/run-metadata.json")" \
     --arg identity_hash "$(ax_inspect_artifact_hash "${stable_identity}")" \
+    --arg pre_click_window_diagnostic_hash "$(ax_inspect_artifact_hash "${stable_pre_click_window_diagnostic}")" \
     --arg window_diagnostic_hash "$(ax_inspect_artifact_hash "${stable_window_diagnostic}")" \
     --arg driver_report_hash "$(ax_inspect_artifact_hash "${stable_driver_report}")" \
     --arg tree_status "${tree_status}" \
@@ -927,6 +1037,7 @@ ax_inspect_finalize() {
       artifacts:[
         {name:"run_metadata",path:"run-metadata.json",status:"created",sha256:$run_metadata_hash},
         {name:"window_identity",path:"window-identity.json",status:"created",sha256:$identity_hash},
+        {name:"pre_click_window_diagnostic",path:"pre-click-window-diagnostic.json",status:"created",sha256:$pre_click_window_diagnostic_hash},
         {name:"window_diagnostic",path:"window-diagnostic.json",status:"created",sha256:$window_diagnostic_hash},
         {name:"driver_report",path:"ax-driver-report.json",status:"created",sha256:$driver_report_hash},
         {name:"ax_tree",path:"ax-tree.json",status:$tree_status,sha256:(if $tree_status == "created" then $tree_hash else null end)},
@@ -994,6 +1105,8 @@ run_window_ax_inspect_repro() {
   mkdir "${AX_INSPECT_TEMP}"
   chmod 700 "${AX_INSPECT_TEMP}"
   identity_path="${AX_INSPECT_TEMP}/window-identity.json"
+  pre_click_identity_path="${AX_INSPECT_TEMP}/pre-click-window-identity.json"
+  pre_click_window_diagnostic_path="${AX_INSPECT_TEMP}/pre-click-window-diagnostic.json"
   window_diagnostic_path="${AX_INSPECT_TEMP}/window-diagnostic.json"
   diagnostic_output="${AX_INSPECT_TEMP}/ax-tree.json"
   report_temporary="${AX_INSPECT_TEMP}/ax-driver-report.json"
@@ -1047,11 +1160,15 @@ run_window_ax_inspect_repro() {
       APP_PID="$$"
     fi
     AX_INSPECT_EXACT_PID_COUNT=1
-    jq -n --argjson pid "${APP_PID}" '{pid:$pid,window_id:101,width:640,height:480,captured_at:"test"}' |
+    jq -n --argjson pid "${APP_PID}" '{
+      status:"no_eligible_window",pid:$pid,owner_window_count:0,eligible_count:0,
+      largest_candidate_count:0,captured_at:"2026-07-16T00:00:00.000Z",candidates:[]
+    }' | atomic_write_private "${pre_click_window_diagnostic_path}"
+    jq -n --argjson pid "${APP_PID}" '{pid:$pid,window_id:101,width:640,height:480,captured_at:"2026-07-16T00:00:01.000Z"}' |
       atomic_write_private "${identity_path}"
     jq -n --argjson pid "${APP_PID}" '{
       status:"selected",pid:$pid,owner_window_count:1,eligible_count:1,largest_candidate_count:1,
-      captured_at:"test",selected_window_id:101,
+      captured_at:"2026-07-16T00:00:01.000Z",selected_window_id:101,
       candidates:[{window_id:101,layer:25,width:640,height:480,area:307200,eligible:true}]
     }' | atomic_write_private "${window_diagnostic_path}"
   else
@@ -1061,7 +1178,14 @@ run_window_ax_inspect_repro() {
       ax_inspect_finalize "${launch_exit}"
       exit "${AX_INSPECT_FINAL_STATUS}"
     fi
-    open_exact_nonactivating_menu_bar_panel || fail "AX inspect repro did not open the exact nonactivating menu-bar panel"
+    if write_exact_app_window_identity "${pre_click_identity_path}" "${pre_click_window_diagnostic_path}" 2>/dev/null; then
+      fail "AX inspect repro found a RelayKit product surface before the status-item click"
+    fi
+    rm -f "${pre_click_identity_path}"
+    jq -e '.status == "no_eligible_window" and .eligible_count == 0 and (.pid | type == "number")' \
+      "${pre_click_window_diagnostic_path}" >/dev/null ||
+      fail "AX inspect repro could not prove the product surface was absent before click"
+    open_exact_menu_bar_popover || fail "AX inspect repro did not open the exact menu-bar popover"
     for _ in {1..100}; do
       if write_exact_app_window_identity "${identity_path}" "${window_diagnostic_path}" 2>/dev/null; then
         break
@@ -1135,20 +1259,28 @@ if [[ "${1:-}" == "--window-ax-inspect-repro" ]]; then
   run_window_ax_inspect_repro
   exit 0
 fi
+if [[ "${1:-}" == "--test-wait-relaykit-ax-surface" ]]; then
+  [[ "$#" -eq 5 ]] || exit 2
+  wait_for_relaykit_ax_surface "$3" "$4" "$2" "$5"
+  exit $?
+fi
 [[ "$#" -eq 0 ]] || exit 2
 
 [[ "${RUN_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{5,63}$ ]] || fail "run id is invalid"
 [[ "${OUT}" == /* && ! -e "${OUT}" ]] || fail "output must be a fresh absolute run-specific path"
 [[ "${RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY:-0}" == "0" ||
    "${RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY:-0}" == "1" ]] || fail "provider protocol probe mode is invalid"
+if [[ -n "${CONFIG_REBASELINE_EVIDENCE}" || -n "${CONFIG_REBASELINE_EVIDENCE_SHA256}" ]]; then
+  validate_config_rebaseline
+fi
 global_config_before="$(sha256 "${HOME}/.codex/config.toml")"
 global_auth_before="$(sha256 "${HOME}/.codex/auth.json")"
 [[ "${global_config_before}" != "missing" ]] || fail "global Codex config baseline is missing"
 [[ "${global_auth_before}" != "missing" ]] || fail "global Codex auth baseline is missing"
 
 if [[ "${RELAYKIT_RC1_FULL_PROOF_TEST_STOP_AFTER_SETUP:-0}" == "1" ]]; then
-  mkdir -p "${OUT}/run" "${OUT}/desktop-root"
-  chmod 700 "${OUT}" "${OUT}/run" "${OUT}/desktop-root"
+  mkdir -p "${OUT}/run" "${RC1_PERSISTENT_PROOF_ROOT}"
+  chmod 700 "${OUT}" "${OUT}/run" "${RC1_PERSISTENT_PROOF_ROOT}"
   : >"${OUT}/run/full-proof-test-ready"
   chmod 600 "${OUT}/run/full-proof-test-ready"
   for _ in {1..500}; do
@@ -1174,9 +1306,7 @@ port_is_free 19777 || fail "127.0.0.1:19777 is already in use"
 
 shared_18787_before="$(listener_snapshot 18787)"
 mkdir -p "${OUT}/run"
-[[ "${RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY:-0}" == "1" ]] || mkdir -p "${OUT}/desktop-root"
 chmod 700 "${OUT}" "${OUT}/run"
-[[ "${RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY:-0}" == "1" ]] || chmod 700 "${OUT}/desktop-root"
 trap cleanup EXIT INT TERM HUP
 
 printf '{\n  "providers": []\n}\n' >"${OUT}/providers.json"
@@ -1203,7 +1333,8 @@ if [[ "${RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY:-0}" == "1" ]]; then
   run_ax "${OUT}/run/ax-provider-protocol-probe.json" \
     relaykit-provider-protocol-probe --pid "${APP_PID}" --window-identity "${first_identity}" \
     --provider-name "${PROVIDER_NAME}" --base-url "${base_url}" \
-    --synthetic-key "${SYNTHETIC_KEY}" --model-id "${PROVIDER_MODEL}" || fail "exact AX provider protocol probe failed"
+    --synthetic-key "${SYNTHETIC_KEY}" --model-id "${PROVIDER_FORM_MODEL}" \
+    --upstream-model-id "${PROVIDER_UPSTREAM_MODEL}" || fail "exact AX provider protocol probe failed"
   jq -e '.providers == []' "${OUT}/providers.json" >/dev/null || fail "protocol probe changed provider config before Save"
   [[ "$(sha256 "${HOME}/.codex/config.toml")" == "${global_config_before}" ]] || fail "global Codex config changed"
   [[ "$(sha256 "${HOME}/.codex/auth.json")" == "${global_auth_before}" ]] || fail "global Codex auth changed"
@@ -1212,9 +1343,12 @@ fi
 run_ax "${OUT}/run/ax-provider-configure.json" \
   relaykit-provider-configure --pid "${APP_PID}" --window-identity "${first_identity}" \
   --provider-name "${PROVIDER_NAME}" --base-url "${base_url}" \
-  --synthetic-key "${SYNTHETIC_KEY}" --model-id "${PROVIDER_MODEL}" || fail "exact AX provider setup failed"
+  --synthetic-key "${SYNTHETIC_KEY}" --model-id "${PROVIDER_FORM_MODEL}" \
+  --upstream-model-id "${PROVIDER_UPSTREAM_MODEL}" || fail "exact AX provider setup failed"
 KEYCHAIN_CREATED=true
-jq -e --arg name "${PROVIDER_NAME}" --arg base "${base_url}" --arg model "${PROVIDER_MODEL}" --arg service "${KEYCHAIN_SERVICE}" '
+jq -e --arg name "${PROVIDER_NAME}" --arg base "${base_url}" \
+  --arg public_model "${PROVIDER_PUBLIC_MODEL}" --arg upstream_model "${PROVIDER_UPSTREAM_MODEL}" \
+  --arg service "${KEYCHAIN_SERVICE}" '
   (.providers | length == 1) and
   .providers[0].name == $name and .providers[0].base_url == $base and
   .providers[0].api_format == "openai_responses" and
@@ -1222,7 +1356,8 @@ jq -e --arg name "${PROVIDER_NAME}" --arg base "${base_url}" --arg model "${PROV
   .providers[0].credential_ref.value == $service and
   .providers[0].credential_ref.header == "Authorization" and
   ((.providers[0].credential_ref | keys | sort) == ["header","kind","value"]) and
-  ([.providers[0].models[].id] == [$model]) and
+  ([.providers[0].models[].id] == [$public_model]) and
+  .providers[0].models[0].upstream_model == $upstream_model and
   ([.. | objects | select(has("key_file") or has("api_key") or has("token") or has("secret"))] | length == 0)
 ' "${OUT}/providers.json" >/dev/null || fail "saved provider JSON is not Responses plus Keychain-reference-only"
 provider_config_sha="$(sha256 "${OUT}/providers.json")"
@@ -1242,7 +1377,8 @@ launch_ordinary_app "${second_identity}" "${second_window_diagnostic}" ||
 [[ "$(sha256 "${OUT}/providers.json")" == "${provider_config_sha}" ]] || fail "provider config changed during relaunch"
 run_ax "${OUT}/run/ax-provider-verify.json" \
   relaykit-provider-verify --pid "${APP_PID}" --window-identity "${second_identity}" \
-  --provider-name "${PROVIDER_NAME}" --base-url "${base_url}" --model-id "${PROVIDER_MODEL}" || fail "restored provider UI state was not verified"
+  --provider-name "${PROVIDER_NAME}" --base-url "${base_url}" --model-id "${PROVIDER_PUBLIC_MODEL}" \
+  --upstream-model-id "${PROVIDER_UPSTREAM_MODEL}" || fail "restored provider UI state was not verified"
 run_ax "${OUT}/run/ax-gateway-start.json" \
   relaykit-gateway-start --pid "${APP_PID}" --window-identity "${second_identity}" || fail "App gateway Start AX action failed"
 wait_for_gateway || fail "App-owned gateway did not become healthy"
@@ -1271,7 +1407,7 @@ EOF
 printf "Use the shell tool to run exactly: printf '%s\\n'; pwd\nThen report only the exact tool output.\n" "${marker_c}" >"${OUT}/query-C.txt"
 chmod 600 "${OUT}/query-A.txt" "${OUT}/query-B.txt" "${OUT}/query-C.txt"
 jq -n \
-  --arg model "${PROVIDER_MODEL}" \
+  --arg model "${PROVIDER_PUBLIC_MODEL}" \
   --arg a "${OUT}/query-A.txt" --arg b "${OUT}/query-B.txt" --arg c "${OUT}/query-C.txt" \
   --arg ma "${marker_a}" --arg mb "${marker_b}" --arg mc "${marker_c}" '{
     version:1,
@@ -1286,7 +1422,7 @@ chmod 600 "${OUT}/scenario.json"
 
 RELAYKIT_DESKTOP_PROOF_INPUT_MODE=automated_ax \
 RELAYKIT_RC1_RUN_ID="${RUN_ID}" \
-RELAYKIT_RC1_DESKTOP_ROOT="${OUT}/desktop-root" \
+RELAYKIT_RC1_DESKTOP_ROOT="${RC1_PERSISTENT_PROOF_ROOT}" \
 RELAYKIT_RC1_OUTPUT="${OUT}/desktop-evidence" \
 RELAYKIT_RC1_APP_PID_FILE="${OUT}/run/app.pid" \
 RELAYKIT_RC1_APP_WINDOW_IDENTITY="${second_identity}" \
@@ -1301,7 +1437,11 @@ RELAYKIT_RC1_PROVIDER_EVENTS="${OUT}/provider-events.jsonl" \
 
 desktop_evidence="${OUT}/desktop-evidence/rc1-native-responses-evidence.json"
 jq -e --arg run_id "${RUN_ID}" '
-  .status == "complete" and .run_id == $run_id and
+  .status == "complete" and
+  .manual_status == "route_complete" and
+  .route_proof_status == "complete" and
+  .harness_exit_code == 0 and
+  .run_id == $run_id and
   .profile == "rc1_native_responses_three_stage" and
   .desktop_websocket_to_gateway == true and .gateway_sse_to_fixture == true and
   .tool_roundtrip_verified == true and .failed_events == [] and

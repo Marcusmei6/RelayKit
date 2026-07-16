@@ -18,7 +18,7 @@ from typing import Any
 BIND_HOST = "127.0.0.1"
 UPSTREAM_MODEL = "native-upstream"
 DEFAULT_MARKER = "RELAYKIT_NATIVE_RESPONSES_OK"
-MARKER_PATTERN = re.compile(r"RELAYKIT_[A-Z0-9_]{4,128}")
+MARKER_PATTERN = re.compile(r"RELAYKIT_[A-Za-z0-9_]{4,192}")
 LOG_FIELDS = ["run_id", "method", "path", "model_rewrite", "auth_present", "event_types"]
 
 
@@ -77,6 +77,13 @@ def response_mode(body: dict[str, Any]) -> str:
         requested = metadata.get("relaykit_fixture_mode")
         if requested in {"plain", "markdown", "tool", "function_call_output"}:
             return requested
+    marker = response_marker(body)
+    if marker.startswith("RELAYKIT_NATIVE_MARKDOWN_"):
+        return "markdown"
+    if marker.startswith("RELAYKIT_NATIVE_TOOL_"):
+        return "tool"
+    if marker.startswith("RELAYKIT_NATIVE_TEXT_"):
+        return "plain"
     text = message_text(body.get("input")).lower()
     if "markdown" in text or "native responses" in text and "table" in text:
         return "markdown"

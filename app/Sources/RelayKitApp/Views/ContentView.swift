@@ -313,7 +313,7 @@ struct ContentView: View {
                         .disabled(true)
                 }
             }
-            .smokeSection("tab-connect", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("tab-connect", recorder: smokeSectionRecorder)
             .smokeSection("cli-route", recorder: smokeSectionRecorder)
             .smokeSection("local-cli-scan", recorder: smokeSectionRecorder)
             .smokeSection("cli-selected-state", recorder: smokeSectionRecorder)
@@ -496,8 +496,8 @@ struct ContentView: View {
             openOfficialChannelFromRowAction()
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: "checkmark.seal")
-                    .foregroundStyle(Color(hex: 0x78D8FF))
+                Image(systemName: officialCurrentStatusIcon)
+                    .foregroundStyle(officialCurrentStatusColor)
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("OpenAI Official / Codex Official")
@@ -523,7 +523,7 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(hex: 0x78D8FF).opacity(0.32)))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("OpenAI Official / Codex Official")
+        .accessibilityLabel("OpenAI Official / Codex Official, \(officialCurrentStatusTitle)")
         .accessibilityIdentifier("official-provider-row")
         .smokeSection("official-provider-row", recorder: smokeSectionRecorder)
     }
@@ -702,7 +702,7 @@ struct ContentView: View {
             .smokeSection(officialDetailsExpanded ? "official-state-details-expanded" : "official-state-details-collapsed", recorder: smokeSectionRecorder)
         }
         .padding(18)
-        .frame(width: 484)
+        .frame(width: 444)
         .background(sheetBackground, in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
         .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
@@ -930,7 +930,7 @@ struct ContentView: View {
 
                 usageKpis(analytics)
             }
-            .smokeSection("tab-usage", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("tab-usage", recorder: smokeSectionRecorder)
             .smokeSection("usage-kpis", recorder: smokeSectionRecorder)
             .smokeSection("usage-cost-unavailable", recorder: smokeSectionRecorder)
 
@@ -1172,7 +1172,7 @@ struct ContentView: View {
                         .buttonStyle(ControlButtonStyle())
                 }
             }
-            .smokeSection("tab-settings", recorder: smokeSectionRecorder)
+            .smokeRecordOnly("tab-settings", recorder: smokeSectionRecorder)
 
             SectionCard {
                 VStack(alignment: .leading, spacing: 12) {
@@ -1681,7 +1681,7 @@ private struct ProviderFormView: View {
             .padding(.top, 12)
         }
         .padding(18)
-        .frame(width: 484)
+        .frame(width: 444)
         .background(sheetBackground, in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
         .shadow(color: .black.opacity(0.45), radius: 22, y: 12)

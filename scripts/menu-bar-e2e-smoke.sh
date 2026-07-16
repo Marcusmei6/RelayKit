@@ -321,6 +321,7 @@ let args = CommandLine.arguments
 guard args.count == 3, let pid = pid_t(args[1]) else { exit(2) }
 let needle = args[2]
 let app = AXUIElementCreateApplication(pid)
+let attempts = 30
 
 func attr(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
     var value: CFTypeRef?
@@ -344,30 +345,42 @@ func exactIdentity(_ element: AXUIElement) -> Bool {
     ].contains(needle)
 }
 
-func pressDescendant(_ element: AXUIElement, depth: Int = 0) -> Bool {
-    if depth > 8 { return false }
+func pressDescendant(_ element: AXUIElement, depth: Int = 0) -> [AXUIElement] {
+    if depth > 8 { return [] }
     let role = text(element, kAXRoleAttribute)
     if role == kAXButtonRole as String || role == kAXRadioButtonRole as String {
-        return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+        return [element]
     }
-    for child in children(element) where pressDescendant(child, depth: depth + 1) {
-        return true
-    }
-    return false
-}
-
-func walk(_ element: AXUIElement, _ depth: Int = 0) -> Bool {
-    if depth > 12 { return false }
-    if exactIdentity(element), pressDescendant(element) {
-        return true
-    }
+    var matches: [AXUIElement] = []
     for child in children(element) {
-        if walk(child, depth + 1) { return true }
+        matches.append(contentsOf: pressDescendant(child, depth: depth + 1))
     }
-    return false
+    return matches
 }
 
-exit(walk(app) ? 0 : 1)
+func exactElements(_ element: AXUIElement, _ depth: Int = 0) -> [AXUIElement] {
+    if depth > 12 { return [] }
+    var matches: [AXUIElement] = exactIdentity(element) ? [element] : []
+    for child in children(element) {
+        matches.append(contentsOf: exactElements(child, depth + 1))
+    }
+    return matches
+}
+
+for attempt in 0..<attempts {
+    let exactMatches = exactElements(app)
+    if exactMatches.count > 1 { exit(3) }
+    if let exactMatch = exactMatches.first {
+        let actionable = pressDescendant(exactMatch)
+        if actionable.count > 1 { exit(3) }
+        if let target = actionable.first {
+            exit(AXUIElementPerformAction(target, kAXPressAction as CFString) == .success ? 0 : 4)
+        }
+    }
+    if attempt + 1 < attempts { usleep(200_000) }
+}
+
+exit(1)
 SWIFT
 }
 

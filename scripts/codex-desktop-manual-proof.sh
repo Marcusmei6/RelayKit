@@ -94,6 +94,10 @@ SOURCE_GUARD_ARMED=false
 HUMAN_INTERVENTION_COUNT=0
 AUTO_ERROR_CODE="automated_proof_failed"
 AUTOMATED_PROFILE="not_automated"
+RC1_ISOLATED_AUTH_HOME=""
+RC1_ISOLATED_AUTH_SOURCE=""
+RC1_ISOLATED_AUTH_HASH_BEFORE=""
+RC1_AUTH_LINK_CREATED=false
 
 usage() {
   cat >&2 <<'EOF'
@@ -362,6 +366,44 @@ kill_pid_file() {
   rm -f "${path}" >/dev/null 2>&1 || true
 }
 
+cleanup_stale_isolated_desktop_locks() {
+  local proof_root="$1" profile_dir="$2"
+  local lock_entry="${profile_dir}/SingletonLock"
+  local socket_entry="${profile_dir}/SingletonSocket"
+  local cookie_entry="${profile_dir}/SingletonCookie"
+  local lock_target lock_pid socket_target singleton_entry process_line
+
+  [[ "${proof_root}" == /* && "${profile_dir}" == "${proof_root}/"* ]] || return 1
+  [[ -d "${proof_root}" && ! -L "${proof_root}" && -d "${profile_dir}" && ! -L "${profile_dir}" ]] || return 1
+  if [[ ! -e "${lock_entry}" && ! -L "${lock_entry}" &&
+        ! -e "${socket_entry}" && ! -L "${socket_entry}" &&
+        ! -e "${cookie_entry}" && ! -L "${cookie_entry}" ]]; then
+    return 0
+  fi
+
+  for singleton_entry in "${lock_entry}" "${socket_entry}" "${cookie_entry}"; do
+    [[ -L "${singleton_entry}" ]] || return 1
+  done
+  while IFS= read -r process_line; do
+    [[ "${process_line}" == *"--user-data-dir=${profile_dir}"* ]] && return 1
+  done < <(/bin/ps -axo command=)
+
+  lock_target="$(/usr/bin/stat -f '%Y' "${lock_entry}" 2>/dev/null || true)"
+  lock_pid="${lock_target##*-}"
+  [[ "${lock_pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if kill -0 "${lock_pid}" 2>/dev/null; then
+    return 1
+  fi
+
+  socket_target="$(/usr/bin/stat -f '%Y' "${socket_entry}" 2>/dev/null || true)"
+  [[ "${socket_target}" == /* ]] || return 1
+  if [[ -e "${socket_target}" ]] && /usr/sbin/lsof "${socket_target}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  rm -f "${lock_entry}" "${socket_entry}" "${cookie_entry}"
+}
+
 cleanup_processes() {
   kill_pid_file "${DESKTOP_PID_FILE}"
   kill_pid_file "${APP_PID_FILE}"
@@ -451,6 +493,77 @@ write_desktop_sandbox_profile() {
 (deny file-write* (subpath "${REAL_HOME}/Library/LaunchAgents"))
 (deny file-write* (subpath "${REAL_HOME}/.config/agent-local-gateway"))
 EOF
+  if [[ "${RC1_AUTH_LINK_CREATED}" == "true" ]]; then
+    cat >>"${output_path}" <<EOF
+(deny file-write* (literal "${CODEX_HOME_DIR}/auth.json"))
+(deny file-write* (literal "${RC1_ISOLATED_AUTH_SOURCE}"))
+EOF
+  fi
+}
+
+resolve_rc1_isolated_auth_home() {
+  local candidate="${1:-}" resolved auth_path auth_mode
+  [[ "${candidate}" == /* && -d "${candidate}" && ! -L "${candidate}" ]] || return 1
+  resolved="$(cd "${candidate}" && pwd -P)" || return 1
+  case "${resolved}" in
+    "${REAL_HOME}/Library/Application Support/RelayKit/DesktopProof/official-proof/codex-home"|"${REAL_HOME}/Library/Application Support/RelayKit/OfficialProof/codex-home") ;;
+    *) return 1 ;;
+  esac
+  auth_path="${resolved}/auth.json"
+  [[ -f "${auth_path}" && ! -L "${auth_path}" ]] || return 1
+  auth_mode="$(stat -f %Lp "${auth_path}" 2>/dev/null || true)"
+  [[ "${auth_mode}" == "600" ]] || return 1
+  printf '%s\n' "${resolved}"
+}
+
+rc1_isolated_auth_status() {
+  local auth_home="$1" cli_binary="$2" resolved auth_path auth_hash_before auth_status
+  resolved="$(resolve_rc1_isolated_auth_home "${auth_home}")" || return 1
+  [[ "${cli_binary}" == /* && -f "${cli_binary}" && ! -L "${cli_binary}" && -x "${cli_binary}" ]] || return 1
+  auth_path="${resolved}/auth.json"
+  auth_hash_before="$(file_hash "${auth_path}")"
+  [[ "${auth_hash_before}" != "missing" ]] || return 1
+  auth_status="$(CODEX_HOME="${resolved}" "${cli_binary}" login status 2>&1)" || return 1
+  [[ "${auth_status}" == "Logged in using ChatGPT" ]] || return 1
+  [[ "$(file_hash "${auth_path}")" == "${auth_hash_before}" ]]
+}
+
+create_rc1_isolated_auth_link() {
+  local source_home="$1" destination_home="$2" resolved source_path destination_path source_hash
+  resolved="$(resolve_rc1_isolated_auth_home "${source_home}")" || return 1
+  source_path="${resolved}/auth.json"
+  destination_path="${destination_home}/auth.json"
+  mkdir -p "${destination_home}"
+  [[ ! -e "${destination_path}" && ! -L "${destination_path}" ]] || return 1
+  source_hash="$(file_hash "${source_path}")"
+  [[ "${source_hash}" != "missing" ]] || return 1
+  ln -s "${source_path}" "${destination_path}" || return 1
+  if [[ ! -L "${destination_path}" || "$(readlink "${destination_path}")" != "${source_path}" ||
+        "$(file_hash "${source_path}")" != "${source_hash}" ]]; then
+    rm -f "${destination_path}"
+    return 1
+  fi
+  RC1_ISOLATED_AUTH_HOME="${resolved}"
+  RC1_ISOLATED_AUTH_SOURCE="${source_path}"
+  RC1_ISOLATED_AUTH_HASH_BEFORE="${source_hash}"
+  RC1_AUTH_LINK_CREATED=true
+}
+
+remove_rc1_isolated_auth_link() {
+  [[ "${RC1_AUTH_LINK_CREATED}" == "true" ]] || return 0
+  local destination_path="${CODEX_HOME_DIR}/auth.json"
+  if [[ ! -L "${destination_path}" || "$(readlink "${destination_path}")" != "${RC1_ISOLATED_AUTH_SOURCE}" ]]; then
+    echo "RC1 isolated auth link changed unexpectedly" >&2
+    return 1
+  fi
+  if [[ "$(file_hash "${RC1_ISOLATED_AUTH_SOURCE}")" != "${RC1_ISOLATED_AUTH_HASH_BEFORE}" ]]; then
+    echo "RC1 isolated auth source changed during proof" >&2
+    return 1
+  fi
+  rm -f "${destination_path}" || return 1
+  RC1_AUTH_LINK_CREATED=false
+  RC1_ISOLATED_AUTH_SOURCE=""
+  RC1_ISOLATED_AUTH_HASH_BEFORE=""
 }
 
 capture_global_state() {
@@ -1267,10 +1380,14 @@ write_catalog() {
 
 write_codex_config() {
   local gateway_port="$1"
+  local sandbox_line='sandbox_mode = "read-only"'
+  if [[ "${PROOF_SCOPE}" == "rc1_native_responses" ]]; then
+    sandbox_line='sandbox_mode = "danger-full-access"'
+  fi
 cat >"${CODEX_CONFIG}" <<TOML
 model = "gpt-5.5"
 model_provider = "openai"
-sandbox_mode = "read-only"
+${sandbox_line}
 openai_base_url = "http://127.0.0.1:${gateway_port}/v1"
 model_catalog_json = "${CATALOG_PATH}"
 
@@ -2355,7 +2472,7 @@ write_evidence() {
   port_is_free 18787 && port18787=true
   port_is_free 19777 && port19777=true
   [[ -n "${gateway_port}" ]] && port_is_free "${gateway_port}" && gateway_released=true
-  jq -n \
+	  jq -n \
     --arg proof_root "${PROOF_ROOT}" \
     --arg manual_status "${manual_status}" \
     --arg route_status "${route_status}" \
@@ -3060,6 +3177,10 @@ wait_for_desktop_ui_ready() {
          jq -e '.status == "ok" and .window_verified == true and .model_picker_count == 1 and .composer_count == 1 and .action_count == 0' "${ready_report}" >/dev/null; then
         return 0
       fi
+      if jq -e '.status == "error" and .code == "desktop_login_required"' "${ready_report}" >/dev/null 2>&1; then
+        echo "Codex Desktop login is required in the isolated Desktop window" >&2
+        return 1
+      fi
       sleep 0.25
     done
     echo "Codex Desktop catalog picker and composer did not become ready before the proof timeout" >&2
@@ -3071,6 +3192,30 @@ wait_for_desktop_ui_ready() {
   done
   echo "Codex Desktop window did not become interactive before the proof timeout" >&2
   return 1
+}
+
+dismiss_known_model_nux() {
+  local desktop_pid report action_total action_count
+  [[ "${PROOF_INPUT_MODE}" == "automated_ax" ]] || return 0
+  desktop_pid="$(cat "${DESKTOP_PID_FILE}" 2>/dev/null || true)"
+  [[ -n "${desktop_pid}" && -x "${AX_DRIVER_BINARY}" ]] || return 1
+  report="${RUN_DIR}/ax-dismiss-model-nux.json"
+  action_total=0
+  for _ in {1..20}; do
+    if ! "${AX_DRIVER_BINARY}" dismiss-model-nux \
+        --pid "${desktop_pid}" \
+        --window-identity "${DESKTOP_WINDOW_IDENTITY}" >"${report}" 2>/dev/null; then
+      return 1
+    fi
+    jq -e '.status == "ok" and .window_verified == true and .candidate_count <= 1 and .action_count <= 1' \
+      "${report}" >/dev/null || return 1
+    action_count="$(jq -r '.action_count' "${report}")"
+    action_total=$((action_total + action_count))
+    (( action_total <= 1 )) || return 1
+    (( action_count == 1 )) && return 0
+    sleep 0.25
+  done
+  return 0
 }
 
 launch_desktop() {
@@ -3085,11 +3230,16 @@ launch_desktop() {
     "--no-sandbox"
     "--force-renderer-accessibility"
   )
+  cleanup_stale_isolated_desktop_locks "${PROOF_ROOT}" "${DESKTOP_USER_DATA_DIR}" || {
+    echo "isolated Codex Desktop profile has a live or ambiguous Singleton lock" >&2
+    return 1
+  }
   write_desktop_sandbox_profile
   printf 'enabled\n' >"${DESKTOP_SANDBOX_STATUS_FILE}"
   CFFIXED_USER_HOME="${ISO_HOME}" HOME="${ISO_HOME}" CODEX_HOME="${CODEX_HOME_DIR}" /usr/bin/sandbox-exec -f "${DESKTOP_SANDBOX_PROFILE}" "${CODEX_APP_BINARY}" "${desktop_args[@]}" >"${DESKTOP_LOG}" 2>&1 &
   echo "$!" >"${DESKTOP_PID_FILE}"
   wait_for_desktop_window
+  dismiss_known_model_nux
   wait_for_desktop_ui_ready
 }
 
@@ -3316,8 +3466,11 @@ print_rc1_native_responses_contract() {
 }
 
 cleanup_rc1_native_responses_desktop() {
+  local cleanup_status=0
   kill_pid_file "${DESKTOP_PID_FILE}"
   rm -f "${RUN_DIR}"/automated-query-*.txt >/dev/null 2>&1 || true
+  remove_rc1_isolated_auth_link || cleanup_status=1
+  return "${cleanup_status}"
 }
 
 configure_rc1_native_responses_paths() {
@@ -3389,6 +3542,7 @@ configure_rc1_native_responses_paths() {
   SCREENSHOT_EVIDENCE="${OUT}/screenshots.json"
   TOOL_MARKER_FILE="${RUN_DIR}/tool-marker"
   TOOL_SINCE_FILE="${RUN_DIR}/tool-since-epoch"
+  RC1_ISOLATED_AUTH_HOME="${RELAYKIT_RC1_ISOLATED_AUTH_HOME:-${REAL_HOME}/Library/Application Support/RelayKit/DesktopProof/official-proof/codex-home}"
   PROOF_SCOPE="rc1_native_responses"
 }
 
@@ -3445,6 +3599,19 @@ setup_rc1_native_responses_attached_preflight() {
 
   CODEX_CLI_BINARY="$(resolve_codex_cli_binary || true)"
   [[ -n "${CODEX_CLI_BINARY}" && -x "${CODEX_CLI_BINARY}" ]] || return 1
+  local resolved_auth_home
+  resolved_auth_home="$(resolve_rc1_isolated_auth_home "${RC1_ISOLATED_AUTH_HOME}")" || {
+    echo "RC1 isolated Codex Desktop login is unavailable" >&2
+    return 1
+  }
+  rc1_isolated_auth_status "${resolved_auth_home}" "${CODEX_CLI_BINARY}" || {
+    echo "RC1 isolated Codex Desktop login is not connected or changed during status check" >&2
+    return 1
+  }
+  create_rc1_isolated_auth_link "${resolved_auth_home}" "${CODEX_HOME_DIR}" || {
+    echo "RC1 isolated Codex Desktop auth link could not be prepared" >&2
+    return 1
+  }
   bundled_models="${RUN_DIR}/codex-bundled-models.json"
   "${CODEX_CLI_BINARY}" debug models --bundled >"${bundled_models}"
   merge_model_catalog "${bundled_models}" "${PROVIDER_CONFIG}" "${PROOF_SCOPE}" "${CATALOG_PATH}"
@@ -3528,9 +3695,12 @@ write_rc1_native_responses_evidence() {
     --arg scenario_sha "${scenario_sha}" --arg config_sha "${config_sha}" \
     --arg stages_sha "${stages_sha}" --arg app_pid "$(cat "${APP_PID_FILE}")" \
     --arg usage_path "${OUT}/usage-events.json" --arg provider_events_path "${PROVIDER_EVENTS}" \
-    --slurpfile stages "${AUTOMATED_STAGE_EVIDENCE}" '{
-      status:"complete",
-      run_id:$run_id,
+	    --slurpfile stages "${AUTOMATED_STAGE_EVIDENCE}" '{
+	      status:"complete",
+	      manual_status:"route_complete",
+	      route_proof_status:"complete",
+	      harness_exit_code:0,
+	      run_id:$run_id,
       profile:"rc1_native_responses_three_stage",
       app_owned_gateway_attached:true,
       ui_saved_provider_config:true,
@@ -3573,7 +3743,7 @@ run_automated_proof() {
   local scenario_path="$1"
   local driver_source="${ROOT}/scripts/codex-desktop-ax-driver.swift"
   local catalog_labels="${AUTOMATED_CATALOG_LABELS_FILE}"
-  local overall_since stage_timeout desktop_pid workspace_name expected_stage_count standard_route_status gpt55_marker gpt56_marker
+  local overall_since stage_timeout desktop_pid expected_stage_count standard_route_status gpt55_marker gpt56_marker
   local stage index=0 stage_id model_id model_label query_source query_copy response_marker evidence_role expectation
   local usage_baseline since_epoch submission_state="not_submitted" wait_status driver_code query_sha256
 
@@ -3658,7 +3828,6 @@ run_automated_proof() {
     AUTO_ERROR_CODE="desktop_pid_invalid"
     return 1
   }
-  workspace_name="$(basename "${ROOT}")"
   overall_since="$(date +%s)"
   printf '[]\n' >"${AUTOMATED_STAGE_EVIDENCE}" || {
     AUTO_ERROR_CODE="stage_evidence_init_failed"
@@ -3694,14 +3863,14 @@ run_automated_proof() {
     AUTO_ERROR_CODE="prepare_desktop_activation_failed"
     activate_isolated_desktop
     verify_desktop_window_identity
-    if ! "${AX_DRIVER_BINARY}" prepare --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --workspace "${workspace_name}" >"${RUN_DIR}/ax-prepare-${index}.json"; then
+    if ! "${AX_DRIVER_BINARY}" prepare --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --workspace "${ROOT}" >"${RUN_DIR}/ax-prepare-${index}.json"; then
       driver_code="$(driver_failure_code "${RUN_DIR}/ax-prepare-${index}.json" "unknown")"
       rm -f "${query_copy}"
       write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "prepare_${driver_code}" || true
       AUTO_ERROR_CODE="prepare_${driver_code}"
       return 1
     fi
-    if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and .action_count == 1' "${RUN_DIR}/ax-prepare-${index}.json" >/dev/null; then
+    if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and (.action_count >= 1 and .action_count <= 37)' "${RUN_DIR}/ax-prepare-${index}.json" >/dev/null; then
       rm -f "${query_copy}"
       AUTO_ERROR_CODE="prepare_report_invalid"
       return 1
@@ -3798,7 +3967,7 @@ run_automated_proof() {
       --arg evidence "${OUT}/rc1-native-responses-evidence.json" \
       --arg profile "${AUTOMATED_PROFILE}" \
       --slurpfile stages "${AUTOMATED_STAGE_EVIDENCE}" \
-      '{status:"complete",profile:$profile,evidence:$evidence,human_intervention_count:0,stages:$stages[0]}'
+	      '{status:"complete",manual_status:"route_complete",route_proof_status:"complete",harness_exit_code:0,profile:$profile,evidence:$evidence,human_intervention_count:0,stages:$stages[0]}'
     return 0
   fi
   cleanup_processes
@@ -4035,6 +4204,10 @@ EOF
     [[ -n "${2:-}" ]] || exit 2
     kill_pid_file "$2"
     ;;
+  --test-stale-desktop-lock-cleanup)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    cleanup_stale_isolated_desktop_locks "$2" "$3"
+    ;;
   --test-global-state-guard)
     [[ -n "${6:-}" ]] || exit 2
     CONFIG_BEFORE="$2"
@@ -4140,6 +4313,10 @@ EOF
     ;;
   --test-write-codex-config)
     [[ -n "${2:-}" ]] || exit 2
+    if [[ -n "${3:-}" ]]; then
+      [[ "${3}" == "fixture_plumbing_preflight" || "${3}" == "rc1_native_responses" ]] || exit 2
+      PROOF_SCOPE="${3}"
+    fi
     ensure_dirs
     write_codex_config "$2"
     ;;
@@ -4172,6 +4349,20 @@ EOF
   --test-reset-run-markers)
     reset_run_markers
     cat "${DESKTOP_SANDBOX_STATUS_FILE}"
+    ;;
+  --test-rc1-isolated-auth-home)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    resolve_rc1_isolated_auth_home "$2"
+    ;;
+  --test-rc1-auth-status)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    rc1_isolated_auth_status "$2" "$3"
+    ;;
+  --test-rc1-auth-link-lifecycle)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    CODEX_HOME_DIR="$3"
+    create_rc1_isolated_auth_link "$2" "${CODEX_HOME_DIR}"
+    remove_rc1_isolated_auth_link
     ;;
   --test-tool-evidence)
     [[ -n "${6:-}" ]] || exit 2

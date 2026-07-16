@@ -290,14 +290,16 @@ Status: implementation complete; the fresh final matrix passed in `relaykit_test
 
 ## Phase 7.10: RC1 Native Responses Chain Wave 2
 
-Status: Wave 1 focused contracts passed; Wave 2 harness contracts are implemented and remain implementation/focused-validation only. No package, App, Codex Desktop, live proof, or final phase-B E2E was run in the implementation lane.
+Status: complete for the local ad-hoc RC1 product chain. One fresh App-first plus isolated Codex Desktop A/B/C E2E passed against the frozen artifact; this does not imply Developer ID signing, notarization, public beta readiness, or updater support.
 
 - The top-level proof begins with an empty isolated provider destination and uses exact RelayKit PID/window-bound AX to save provider name, loopback URL, synthetic key, model, and `openai_responses`. It rejects completed provider injection, `key_file`, and curl-only proof.
 - Saved config must contain `api_format=openai_responses` and a Keychain reference only. The same extracted App must relaunch and expose the restored protocol, URL, model, and saved-key state before its bundled Gateway is started through the UI.
 - The dedicated `rc1_native_responses_three_stage` Desktop profile attaches to the App-owned Gateway and UI-saved config. Stages A/B/C each have exactly one submission and require, respectively, a text marker, native Markdown structure, and the exact shell command plus `pwd` with a verified `function_call_output` roundtrip.
 - Current evidence is run-bound and hash-bound. A PASS manifest requires every named predicate, empty `failed_events`, all three stages in `evidence_verified/submitted` state, Desktop WebSocket ingress, Gateway SSE egress, tool roundtrip, matching run ids, and current harness/scenario/App zip/screenshot/usage/provider-event/provider-config hashes.
 - Historical `observation_failed_*` evidence remains failed and untouched. It cannot be relabeled, copied, or used to derive phase-B PASS.
-- Final fresh App-first plus isolated Codex Desktop native Responses E2E, package/artifact binding, screenshot review, and phase-B PASS production are deferred to `relaykit_test`, followed by independent `relaykit_cr`.
+- Final run `rc1-native-20260716T111701Z-external-sandbox` is bound to App zip SHA-256 `abf74744aedbe699e20b37064802d8753e40424d8886e68d2c32954eadec776a`. Its native-App evidence proves UI save, Keychain-reference-only storage, relaunch persistence, and UI-owned Gateway startup. Its Desktop stage ledger proves one submitted and verified plain response, native Markdown response, and real shell-tool roundtrip with matching `function_call_output` and process exit zero.
+- The RC1 stage ledger, process-bound screenshots, rollout binding, usage, provider events, and tool evidence are authoritative for A/B/C. The generic manual-proof render summary is a separate schema and must not override or substitute for the RC1 stage result.
+- Final Go race/test/vet/gofmt, Swift build/validation, focused proof contracts, current-artifact menu smoke, diagnostics redaction, Desktop acceptance, public-boundary, shell syntax, and diff checks passed. Global Codex config/auth hashes were unchanged, temporary listeners were released, and port `18787` remained untouched.
 
 ## Release Gate
 

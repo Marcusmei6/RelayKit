@@ -29,6 +29,66 @@ fail() {
 [[ -x "${MANIFEST}" ]] || fail "phase-b manifest builder is missing"
 bash -n "${SCRIPT}"
 
+ax_ready_identity="${TMP}/ax-ready-identity.json"
+ax_ready_diagnostic="${TMP}/ax-ready-diagnostic.json"
+ax_ready_driver="${TMP}/ax-ready-driver"
+ax_ready_counter="${TMP}/ax-ready-counter"
+jq -n '{pid:4242,window_id:101}' >"${ax_ready_identity}"
+chmod 600 "${ax_ready_identity}"
+cat >"${ax_ready_driver}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+count="$(cat "${AX_READY_COUNTER}" 2>/dev/null || printf 0)"
+count=$((count + 1))
+printf '%s\n' "${count}" >"${AX_READY_COUNTER}"
+diagnostic=''
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == '--diagnostic-output' ]]; then diagnostic="$2"; break; fi
+  shift
+done
+if [[ "${count}" -eq 1 ]]; then
+  printf '%s\n' '{"status":"error","code":"window_selector_not_unique","command":"relaykit-ax-inspect"}'
+  exit 5
+fi
+printf '%s\n' '{"ax_windows_count":0,"window_server_surface_count":1,"ax_popover_count":1,"semantic_identifier_count":2}' >"${diagnostic}"
+chmod 600 "${diagnostic}"
+printf '%s\n' '{"status":"ok","code":"ok","command":"relaykit-ax-inspect","window_verified":true,"action_count":0,"ax_windows_count":0,"window_server_surface_count":1,"ax_popover_count":1,"semantic_identifier_count":2}'
+SH
+chmod 700 "${ax_ready_driver}"
+AX_READY_COUNTER="${ax_ready_counter}" "${SCRIPT}" --test-wait-relaykit-ax-surface \
+  "${ax_ready_driver}" "${ax_ready_identity}" "${ax_ready_diagnostic}" 4242
+[[ "$(cat "${ax_ready_counter}")" == 2 ]] || fail "RelayKit AX readiness did not stop after the first exact semantic surface"
+jq -e '.window_server_surface_count == 1 and .ax_popover_count == 1 and .semantic_identifier_count == 2' "${ax_ready_diagnostic}" >/dev/null ||
+  fail "RelayKit AX readiness did not retain exact diagnostic evidence"
+
+ax_ready_body="$(sed -n '/^wait_for_relaykit_ax_surface()/,/^}/p' "${SCRIPT}")"
+for required_ready_text in RELAYKIT_AX_DRIVER_DIAGNOSTIC relaykit-ax-inspect window_server_surface_count ax_popover_count semantic_identifier_count action_count; do
+  rg -Fq "${required_ready_text}" <<<"${ax_ready_body}" ||
+    fail "RelayKit AX readiness is missing ${required_ready_text}"
+done
+for forbidden_ready_text in relaykit-provider-configure provider-form-save CGEvent OCR kAXPositionAttribute kAXSizeAttribute; do
+  if rg -Fq "${forbidden_ready_text}" <<<"${ax_ready_body}"; then
+    fail "RelayKit AX readiness crossed into product actions: ${forbidden_ready_text}"
+  fi
+done
+launch_ordinary_body="$(sed -n '/^launch_ordinary_app()/,/^}/p' "${SCRIPT}")"
+rg -Uq 'write_exact_app_window_identity(.|\n)*wait_for_relaykit_ax_surface(.|\n)*return 0' <<<"${launch_ordinary_body}" ||
+  fail "ordinary App launch does not wait for the exact semantic AX surface"
+if grep -Fq 'activate_exact_app' <<<"${launch_ordinary_body}"; then
+  fail "ordinary native Popover launch must not activate RelayKit after exact binding"
+fi
+grep -Fq 'RELAYKIT_OFFICIAL_PROOF_ROOT=${RC1_PERSISTENT_PROOF_ROOT}/official-proof' <<<"${launch_ordinary_body}" ||
+  fail "ordinary App launch does not use the persistent isolated official proof root"
+if grep -Fq 'RELAYKIT_OFFICIAL_PROOF_ROOT=${OUT}/app-official-proof' <<<"${launch_ordinary_body}"; then
+  fail "ordinary App launch still uses an App-rejected dist proof root"
+fi
+
+desktop_launch_body="$(sed -n '/^RELAYKIT_DESKTOP_PROOF_INPUT_MODE=automated_ax/,/manual-proof-result.json/p' "${SCRIPT}")"
+grep -Fq 'RELAYKIT_RC1_DESKTOP_ROOT="${RC1_PERSISTENT_PROOF_ROOT}"' <<<"${desktop_launch_body}" ||
+  fail "RC1 Desktop launch does not reuse the persistent isolated Desktop profile"
+grep -Fq 'RELAYKIT_RC1_OUTPUT="${OUT}/desktop-evidence"' <<<"${desktop_launch_body}" ||
+  fail "RC1 Desktop current-run evidence is no longer isolated under the fresh output"
+
 ax_repro_failure="${TMP}/ax-repro-failure.txt"
 ax_repro_status=0
 env -u RELAYKIT_RC1_APP_BUNDLE -u RELAYKIT_RC1_AX_INSPECT_OUT \
@@ -44,7 +104,7 @@ ax_repro_body="$(sed -n '/run_window_ax_inspect_repro()/,/^}/p' "${SCRIPT}")"
 for required_repro_text in \
   'RELAYKIT_RC1_APP_BUNDLE' \
   'RELAYKIT_RC1_AX_INSPECT_OUT' \
-  'open_exact_nonactivating_menu_bar_panel' \
+  'open_exact_menu_bar_popover' \
   'write_exact_app_window_identity' \
   'RELAYKIT_AX_DRIVER_DIAGNOSTIC=1' \
   'relaykit-ax-inspect' \
@@ -145,11 +205,11 @@ run_launch_case launch-open-failed "${fake_bundle}" 23 'private fake open detail
 run_launch_case launch-pid-absent "${fake_bundle}" 0 '' 0 1 1 none 0 0 1 exact_pid_absent
 run_launch_case launch-exact-pid "${fake_bundle}" 0 'private fake open warning' 1 1 1 open_succeeded_with_stderr 1 1 0 repro_failed
 
-status_item_body="$(sed -n '/^read_exact_status_item_state()/,/^}/p;/^open_exact_nonactivating_menu_bar_panel()/,/^}/p' "${SCRIPT}")"
+status_item_body="$(sed -n '/^read_exact_status_item_state()/,/^}/p;/^open_exact_menu_bar_popover()/,/^}/p' "${SCRIPT}")"
 grep -Fq 'read_exact_status_item_state' <<<"${status_item_body}" ||
   fail "proof is missing exact-PID status item readiness"
-grep -Fq 'canonical nonactivating NSPanel menu-bar panel' <<<"${status_item_body}" ||
-  fail "proof does not use the canonical panel terminology"
+grep -Fq 'native menu-bar popover' <<<"${status_item_body}" ||
+  fail "proof does not use native popover terminology"
 status_item_contract="${TMP}/status-item-contract"
 cat >"${status_item_contract}" <<SH
 #!/usr/bin/env bash
@@ -159,7 +219,7 @@ STATUS_ITEM_READINESS_INTERVAL=0.1
 APP_PID=4242
 fail() { printf '%s\n' "\$*" >&2; exit 1; }
 ${status_item_body}
-open_exact_nonactivating_menu_bar_panel
+open_exact_menu_bar_popover
 SH
 chmod 700 "${status_item_contract}"
 status_item_bin="${TMP}/status-item-bin"
@@ -249,14 +309,15 @@ run_status_item_case readiness-final-unavailable 'counts:1:1:1 error:-1719' \
   1 status_item_click_unavailable 1 1 0
 [[ "$(rg -c 'click item 1 of statusItems' <<<"${status_item_body}")" -eq 1 ]] ||
   fail "status item helper must contain exactly one click"
-grep -Fq 'set frontmost of targetProcess to true' <<<"${status_item_body}" ||
-  fail "status item helper no longer preserves frontmost behavior"
+if grep -Fq 'set frontmost of targetProcess to true' <<<"${status_item_body}"; then
+  fail "status item helper must not activate the nonactivating RelayKit panel"
+fi
 
 fake_failure_driver="${TMP}/fake-ax-driver-failure"
 cat >"${fake_failure_driver}" <<'SH'
 #!/usr/bin/env bash
 [[ -z "${OWNED_FAULT_PARENT:-}" ]] || chmod 500 "${OWNED_FAULT_PARENT}"
-printf '%s\n' '{"candidate_count":0,"code":"window_selector_not_unique","command":"relaykit-ax-inspect","status":"error"}'
+printf '%s\n' '{"ax_windows_count":1,"candidate_count":0,"code":"window_selector_not_unique","command":"relaykit-ax-inspect","ax_popover_count":0,"semantic_identifier_count":0,"status":"error","window_server_surface_count":1}'
 exit 4
 SH
 chmod 700 "${fake_failure_driver}"
@@ -268,27 +329,33 @@ set -euo pipefail
 [[ -z "${OWNED_FAULT_PARENT:-}" ]] || chmod 500 "${OWNED_FAULT_PARENT}"
 diagnostic_output=""
 while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "--diagnostic-output" ]]; then
-    diagnostic_output="$2"
-    break
-  fi
-  shift
+  case "$1" in
+    --diagnostic-output) diagnostic_output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
 done
 [[ -n "${diagnostic_output}" ]]
 jq -n '{
-  status:"ok",ax_windows_available:true,ax_windows_count:1,
-  numbered_window_count:1,matching_window_count:1,semantic_identifier_count:1,truncated:false,
-  nodes:[{ordinal:0,parent:null,depth:0,role:"AXWindow",subrole:"AXStandardWindow",
-    child_count:1,window_number_present:true,matches_expected_window:true},
+  status:"ok",ax_windows_available:true,ax_windows_count:0,
+  window_server_surface_count:1,ax_popover_count:1,semantic_identifier_count:1,truncated:false,
+  nodes:[{ordinal:0,parent:null,depth:0,role:"AXPopover",subrole:null,
+    child_count:1,bound_surface_root:true},
     {ordinal:1,parent:0,depth:1,role:"AXButton",subrole:null,
-    child_count:0,window_number_present:false,matches_expected_window:false}],
-  role_counts:[{role:"AXButton",count:1},{role:"AXWindow",count:1}],
+    child_count:0,bound_surface_root:false}],
+  role_counts:[{role:"AXButton",count:1},{role:"AXPopover",count:1}],
   depth_counts:[{depth:0,count:1},{depth:1,count:1}]
 }' >"${diagnostic_output}"
 chmod 600 "${diagnostic_output}"
-printf '%s\n' '{"action_count":0,"code":"ok","command":"relaykit-ax-inspect","status":"ok","window_verified":true}'
+printf '%s\n' '{"action_count":0,"ax_popover_count":1,"ax_windows_count":0,"code":"ok","command":"relaykit-ax-inspect","semantic_identifier_count":1,"status":"ok","window_server_surface_count":1,"window_verified":true}'
 SH
 chmod 700 "${fake_success_driver}"
+
+fake_popover_success_driver="${TMP}/fake-ax-driver-popover-success"
+cp "${fake_success_driver}" "${fake_popover_success_driver}"
+chmod 700 "${fake_popover_success_driver}"
+fake_popover_proxy_driver="${TMP}/fake-ax-driver-popover-proxy"
+cp "${fake_popover_success_driver}" "${fake_popover_proxy_driver}"
+chmod 700 "${fake_popover_proxy_driver}"
 
 fake_no_semantic_driver="${TMP}/fake-ax-driver-no-semantic"
 cp "${fake_success_driver}" "${fake_no_semantic_driver}"
@@ -297,7 +364,7 @@ chmod 700 "${fake_no_semantic_driver}"
 
 fake_nonunique_ax_driver="${TMP}/fake-ax-driver-nonunique-window"
 cp "${fake_success_driver}" "${fake_nonunique_ax_driver}"
-sed -i '' 's/matching_window_count:1/matching_window_count:2/' "${fake_nonunique_ax_driver}"
+sed -i '' 's/ax_popover_count:1/ax_popover_count:2/' "${fake_nonunique_ax_driver}"
 chmod 700 "${fake_nonunique_ax_driver}"
 
 fake_duplicate_windowserver_driver="${TMP}/fake-ax-driver-duplicate-windowserver"
@@ -335,6 +402,11 @@ chmod 700 "${fake_drift_driver}"
 run_ax_contract="${TMP}/run-ax-contract"
 printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' >"${run_ax_contract}"
 sed -n '/^run_ax()/,/^}/p;/^atomic_copy_private()/,/^}/p' "${SCRIPT}" >>"${run_ax_contract}"
+run_ax_body="$(sed -n '/^run_ax()/,/^}/p' "${SCRIPT}")"
+! rg -Fq 'activate_exact_app' <<<"${run_ax_body}" ||
+  fail "exact AX actions must not reactivate the transient Popover between steps"
+rg -Fq 'sleep 0.25' <<<"${run_ax_body}" ||
+  fail "exact AX actions do not wait for the Popover tree to settle"
 printf '%s\n' 'activate_exact_app() { :; }' 'OUT="$1"' 'report="$2"' 'shift 2' 'if run_ax "${report}" "$@"; then exit 0; else exit "$?"; fi' >>"${run_ax_contract}"
 chmod 700 "${run_ax_contract}"
 run_ax_success_root="${TMP}/run-ax-success"; run_ax_failure_root="${TMP}/run-ax-failure"
@@ -519,13 +591,23 @@ run_public_full_proof_setup_case() {
   local name="$1"
   local mutate_config="$2"
   local expected_exit="$3"
+  local use_rebaseline="${4:-false}"
   local exact_out="${TMP}/${name}-output"
   local stdout="${TMP}/${name}.stdout"
   local stderr="${TMP}/${name}.stderr"
   local status=0
+  local env_args=(
+    -u RELAYKIT_RC1_CONFIG_REBASELINE_EVIDENCE
+    -u RELAYKIT_RC1_CONFIG_REBASELINE_EVIDENCE_SHA256
+  )
+  if [[ "${use_rebaseline}" == "true" ]]; then
+    env_args+=(
+      "RELAYKIT_RC1_CONFIG_REBASELINE_EVIDENCE=${test_rebaseline_evidence}"
+      "RELAYKIT_RC1_CONFIG_REBASELINE_EVIDENCE_SHA256=${test_rebaseline_sha}"
+    )
+  fi
 
-  env -u RELAYKIT_RC1_CONFIG_REBASELINE_EVIDENCE \
-    -u RELAYKIT_RC1_CONFIG_REBASELINE_EVIDENCE_SHA256 \
+  env "${env_args[@]}" \
     HOME="${test_home}" \
     RELAYKIT_RC1_APP_BUNDLE="${fake_bundle}" \
     RELAYKIT_RC1_NATIVE_RESPONSES_OUT="${exact_out}" \
@@ -547,7 +629,7 @@ run_public_full_proof_setup_case() {
 
   [[ "${status}" -eq "${expected_exit}" ]] ||
     fail "${name} public full proof exit mismatch: expected ${expected_exit}, got ${status}"
-  [[ -d "${exact_out}/run" && -d "${exact_out}/desktop-root" ]] ||
+  [[ -d "${exact_out}/run" && -d "${test_home}/Library/Application Support/RelayKit/DesktopProof" ]] ||
     fail "${name} public full proof did not create fresh private setup"
   for forbidden_setup_artifact in \
     providers.json app-usage.jsonl provider-events.jsonl scenario.json manifest.json \
@@ -620,7 +702,7 @@ run_ax_finalizer_case() {
   [[ "${owned}" == "false" || -e "${owned_root}-unrelated" ]] || fail "${name} removed unrelated content"
 
   for artifact in \
-    run-metadata.json window-identity.json window-diagnostic.json ax-driver-report.json \
+    run-metadata.json window-identity.json pre-click-window-diagnostic.json window-diagnostic.json ax-driver-report.json \
     cleanup.json result.json evidence-manifest.json; do
     assert_private_json "${exact_root}/${artifact}"
   done
@@ -634,6 +716,12 @@ run_ax_finalizer_case() {
     .status == "selected" and (.pid | type == "number") and .pid > 0 and .selected_window_id == 101 and
     (.candidates | all(.[]; (keys | sort) == ["area","eligible","height","layer","width","window_id"]))
   ' "${exact_root}/window-diagnostic.json" >/dev/null || fail "${name} stable window diagnostic schema is invalid"
+  jq -e '
+    (keys | sort) == ["candidates","captured_at","eligible_count","largest_candidate_count",
+      "owner_window_count","pid","status"] and
+    .status == "no_eligible_window" and .eligible_count == 0 and .captured_at == "2026-07-16T00:00:00.000Z"
+  ' "${exact_root}/pre-click-window-diagnostic.json" >/dev/null ||
+    fail "${name} pre-click lifecycle diagnostic is invalid"
   if [[ "${expected_tree}" == "created" ]]; then
     assert_private_json "${exact_root}/ax-tree.json"
   else
@@ -677,19 +765,24 @@ run_ax_finalizer_case() {
     .owned_temp_app_removed == $owned_removed and .probe_binary_removed == true
   ' "${exact_root}/cleanup.json" >/dev/null || fail "${name} cleanup schema is invalid"
   jq -e --arg status "${expected_status}" --arg tree "${expected_tree}" --argjson exit_code "${expected_exit}" '
-    (keys | sort) == ["app_launch_count","ax_tree","driver_candidate_count","driver_code","driver_command","driver_status",
-      "exact_pid_count","exit_code","failure","full_e2e_invocation_count","open_exit_status","open_invocation_count",
-      "open_stderr_category","open_success_count","package_invocation_count","schema_version","status"] and
+    (keys | sort) == ["app_launch_count","ax_tree","driver_ax_popover_count","driver_ax_windows_count",
+      "driver_candidate_count","driver_code","driver_command","driver_semantic_identifier_count",
+      "driver_status","driver_window_server_surface_count","exact_pid_count","exit_code","failure","full_e2e_invocation_count",
+      "open_exit_status","open_invocation_count","open_stderr_category","open_success_count",
+      "package_invocation_count","same_run_lifecycle_verified","schema_version","status",
+      "surface_absent_before_click","surface_appeared_after_click"] and
     .schema_version == 1 and .status == $status and .exit_code == $exit_code and .ax_tree == $tree and
     .driver_command == "relaykit-ax-inspect" and .open_invocation_count == 0 and .open_success_count == 0 and
     .open_exit_status == 0 and .open_stderr_category == "not_invoked" and .exact_pid_count == 1 and
-    .app_launch_count == 0 and .package_invocation_count == 0 and .full_e2e_invocation_count == 0
+    .app_launch_count == 0 and .package_invocation_count == 0 and .full_e2e_invocation_count == 0 and
+    .surface_absent_before_click == true and .surface_appeared_after_click == true and
+    .same_run_lifecycle_verified == true
   ' "${exact_root}/result.json" >/dev/null || fail "${name} result schema is invalid"
   jq -e --arg root "${exact_root}" --arg status "${expected_status}" '
     (keys | sort) == ["artifacts","failure","inspect_out","schema_version","status"] and
     .schema_version == 1 and .inspect_out == $root and .status == $status and
     (if $status == "passed" then .failure == "none" else .failure != "none" end) and
-    ([.artifacts[].name] == ["run_metadata","window_identity","window_diagnostic","driver_report","ax_tree","cleanup","result"]) and
+    ([.artifacts[].name] == ["run_metadata","window_identity","pre_click_window_diagnostic","window_diagnostic","driver_report","ax_tree","cleanup","result"]) and
     (.artifacts | all(.[];
       (keys | sort) == ["name","path","sha256","status"] and
       (.status == "created" or .status == "not_created")))
@@ -708,22 +801,56 @@ run_ax_finalizer_case() {
 run_ax_finalizer_case failure-finalizer "${fake_failure_driver}" 4 failed not_created
 jq -e '
   .status == "error" and .command == "relaykit-ax-inspect" and
-  .code == "window_selector_not_unique" and .candidate_count == 0
+  .code == "window_selector_not_unique" and .candidate_count == 0 and
+  .ax_windows_count == 1 and .window_server_surface_count == 1 and
+  .ax_popover_count == 0 and .semantic_identifier_count == 0
 ' "${last_finalizer_root}/ax-driver-report.json" >/dev/null || fail "failure driver report was not preserved exactly"
 jq -e '
   .failure == "driver_failed" and .driver_status == "error" and
-  .driver_code == "window_selector_not_unique" and .driver_candidate_count == 0
+  .driver_code == "window_selector_not_unique" and .driver_candidate_count == 0 and
+  .driver_ax_windows_count == 1 and .driver_window_server_surface_count == 1 and
+  .driver_ax_popover_count == 0 and .driver_semantic_identifier_count == 0
 ' "${last_finalizer_root}/result.json" >/dev/null || fail "failure result lost the driver error"
 jq -e '.artifacts[] | select(.name == "ax_tree") | .status == "not_created" and .sha256 == null' \
   "${last_finalizer_root}/evidence-manifest.json" >/dev/null || fail "absent failure tree was not recorded as not_created"
 
 run_ax_finalizer_case success-finalizer "${fake_success_driver}" 0 passed created
-jq -e '.status == "ok" and .code == "ok" and .command == "relaykit-ax-inspect"' \
+jq -e '
+  .status == "ok" and .code == "ok" and .command == "relaykit-ax-inspect" and
+  .ax_windows_count == 0 and .window_server_surface_count == 1 and
+  .ax_popover_count == 1 and .semantic_identifier_count == 1
+' \
   "${last_finalizer_root}/ax-driver-report.json" >/dev/null || fail "success driver report was not preserved exactly"
 jq -e '
   .failure == "none" and .driver_status == "ok" and .driver_code == "ok" and
-  .driver_candidate_count == null
+  .driver_candidate_count == null and .driver_ax_windows_count == 0 and
+  .driver_window_server_surface_count == 1 and .driver_ax_popover_count == 1 and
+  .driver_semantic_identifier_count == 1
 ' "${last_finalizer_root}/result.json" >/dev/null || fail "success result is invalid"
+
+run_ax_finalizer_case popover-success-finalizer "${fake_popover_success_driver}" 0 passed created
+jq -e '
+  .status == "ok" and .code == "ok" and .command == "relaykit-ax-inspect" and
+	  .ax_windows_count == 0 and .window_server_surface_count == 1 and
+  .ax_popover_count == 1 and .semantic_identifier_count == 1
+' "${last_finalizer_root}/ax-driver-report.json" >/dev/null || fail "popover success driver report is invalid"
+jq -e '
+	  .status == "ok" and .ax_windows_count == 0 and .window_server_surface_count == 1 and
+  .ax_popover_count == 1 and .semantic_identifier_count == 1 and
+  .nodes[0].role == "AXPopover"
+' "${last_finalizer_root}/ax-tree.json" >/dev/null || fail "popover success tree is invalid"
+jq -e '
+	  .status == "passed" and .failure == "none" and .driver_ax_windows_count == 0 and
+  .driver_window_server_surface_count == 1 and .driver_ax_popover_count == 1 and
+  .driver_semantic_identifier_count == 1
+	' "${last_finalizer_root}/result.json" >/dev/null || fail "popover success result is invalid"
+
+	run_ax_finalizer_case popover-proxy-finalizer "${fake_popover_proxy_driver}" 0 passed created
+	jq -e '
+	  .status == "passed" and .failure == "none" and .driver_ax_windows_count == 0 and
+	  .driver_window_server_surface_count == 1 and .driver_ax_popover_count == 1 and
+	  .driver_semantic_identifier_count == 1
+	' "${last_finalizer_root}/result.json" >/dev/null || fail "popover proxy result is invalid"
 
 run_ax_finalizer_case no-semantic-finalizer "${fake_no_semantic_driver}" 4 failed not_created
 jq -e '
@@ -862,9 +989,9 @@ cat >"${signal_driver}" <<'SH'
 while [[ "$1" != "--diagnostic-output" ]]; do shift; done
 diagnostic="$2"; : >"${diagnostic%/*}/codex-desktop-ax-driver"; : >"${SIGNAL_READY}"
 while [[ ! -e "${SIGNAL_CONTINUE}" ]]; do sleep 0.01; done
-jq -n '{status:"ok",ax_windows_available:true,ax_windows_count:1,numbered_window_count:1,
-  matching_window_count:0,truncated:false,nodes:[],role_counts:[],depth_counts:[]}' >"${diagnostic}"
-printf '%s\n' '{"code":"ok","command":"relaykit-ax-inspect","status":"ok","window_verified":true}'
+jq -n '{status:"ok",ax_windows_available:true,ax_windows_count:1,window_server_surface_count:1,
+  ax_popover_count:0,truncated:false,nodes:[],role_counts:[],depth_counts:[]}' >"${diagnostic}"
+printf '%s\n' '{"ax_windows_count":1,"code":"ok","command":"relaykit-ax-inspect","ax_popover_count":0,"semantic_identifier_count":0,"status":"ok","window_server_surface_count":1,"window_verified":true}'
 SH
 chmod 700 "${signal_driver}"
 run_owned_signal_case() {
@@ -894,6 +1021,7 @@ run_owned_signal_case owned-signal false
 run_owned_signal_case owned-signal-drift true
 
 run_public_full_proof_setup_case public-full-proof-same false 0
+run_public_full_proof_setup_case public-full-proof-rebaseline false 0 true
 run_public_full_proof_setup_case public-full-proof-drift true 1
 for rejected_mode in "PROVIDER_CONFIGURE""_ONLY" "provider_configure""_only" "provider-configure""-only"; do
   if grep -Fq "${rejected_mode}" "${SCRIPT}"; then
@@ -902,6 +1030,22 @@ for rejected_mode in "PROVIDER_CONFIGURE""_ONLY" "provider_configure""_only" "pr
 done
 grep -Fq 'RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY' "${SCRIPT}" ||
   fail "proof is missing the explicit provider protocol probe mode"
+grep -Fq 'PROVIDER_FORM_MODEL="dogfood-native-responses"' "${SCRIPT}" ||
+  fail "proof does not bind the provider form model id"
+grep -Fq 'PROVIDER_PUBLIC_MODEL="custom/${PROVIDER_FORM_MODEL}"' "${SCRIPT}" ||
+  fail "proof does not bind the saved public model id"
+grep -Fq 'PROVIDER_UPSTREAM_MODEL="native-upstream"' "${SCRIPT}" ||
+  fail "proof does not bind the upstream model id separately"
+proof_upstream_model="$(sed -n 's/^PROVIDER_UPSTREAM_MODEL="\([^"]*\)"$/\1/p' "${SCRIPT}")"
+fixture_upstream_model="$(sed -n 's/^UPSTREAM_MODEL = "\([^"]*\)"$/\1/p' "${FIXTURE}")"
+[[ -n "${proof_upstream_model}" && -n "${fixture_upstream_model}" ]] ||
+  fail "proof or fixture upstream model contract is missing"
+[[ "${proof_upstream_model}" == "${fixture_upstream_model}" ]] ||
+  fail "proof provider upstream model must match the fixture catalog model"
+[[ "$(rg -c -- '--upstream-model-id "\$\{PROVIDER_UPSTREAM_MODEL\}"' "${SCRIPT}")" -eq 3 ]] ||
+  fail "configure, protocol probe, and relaunch verify must bind the upstream model independently"
+grep -Fq '.models[0].upstream_model == $upstream_model' "${SCRIPT}" ||
+  fail "saved provider assertion does not verify the upstream model mapping"
 probe_stop_body="$(sed -n '/if \[\[ "${RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY/,/^fi$/p' "${SCRIPT}" | tail -n +2)"
 [[ "$(rg -c 'relaykit-provider-protocol-probe --pid' <<<"${probe_stop_body}")" -eq 1 ]] ||
   fail "protocol probe boundary must invoke the new command exactly once"
@@ -1023,7 +1167,7 @@ jq -e '
   .candidates == [{"window_id":101,"layer":7,"width":640,"height":480,"area":307200,"eligible":true}]
 ' "${TMP}/nonzero-layer-diagnostic.json" >/dev/null || fail "nonzero-layer diagnostic is incorrect"
 
-run_selected_case unique-largest 4102 <<'JSON'
+run_failed_case unique-largest 4102 eligible_window_not_unique <<'JSON'
 {
   "app_valid": true,
   "windows": [
@@ -1033,14 +1177,10 @@ run_selected_case unique-largest 4102 <<'JSON'
 }
 JSON
 jq -e '
-  .window_id == 202 and .width == 800 and .height == 500
-' "${TMP}/unique-largest-identity.json" >/dev/null || fail "unique largest window was not selected"
-jq -e '
   .owner_window_count == 2 and .eligible_count == 2 and .largest_candidate_count == 1 and
-  .selected_window_id == 202 and
   ([.candidates[] | [.window_id,.width,.height,.area,.eligible]] ==
     [[201,400,400,160000,true],[202,800,500,400000,true]])
-' "${TMP}/unique-largest-diagnostic.json" >/dev/null || fail "unique-largest diagnostic counts or dimensions are incorrect"
+' "${TMP}/unique-largest-diagnostic.json" >/dev/null || fail "multiple eligible windows did not fail closed"
 
 run_selected_case foreign-larger 4103 <<'JSON'
 {
@@ -1072,7 +1212,7 @@ jq -e '
     [[401,399,900,false],[402,800,399,false]])
 ' "${TMP}/none-eligible-diagnostic.json" >/dev/null || fail "no-eligible diagnostic counts or dimensions are incorrect"
 
-run_failed_case tied-largest 4105 ambiguous_largest_window <<'JSON'
+run_failed_case tied-largest 4105 eligible_window_not_unique <<'JSON'
 {
   "app_valid": true,
   "windows": [
@@ -1104,6 +1244,11 @@ if rg -n 'kCGWindowLayer[^\n]*==[[:space:]]*0|candidates\.count[[:space:]]*==[[:
   fail "legacy layer-zero or single-candidate selector remains"
 fi
 
+for counter in ax_windows_count window_server_surface_count ax_popover_count semantic_identifier_count; do
+  count="$(rg -Foc ".${counter} | nonnegative_integer" "${SCRIPT}" || true)"
+  [[ "${count}" -ge 2 ]] || fail "${counter} is not type-checked in report and tree evidence"
+done
+
 contract="$(${SCRIPT} --print-contract)"
 jq -e '
   .proof == "rc1_native_responses_chain" and
@@ -1134,7 +1279,10 @@ grep -Fq 'rc1-native-responses-three-stage' "${SCRIPT}" || fail "proof must dele
 grep -Fq 'rc1-native-responses-proof-fixture.py' "${SCRIPT}" || fail "proof must use the standalone fixture"
 grep -Fq 'rc1-native-responses-manifest.sh' "${SCRIPT}" || fail "proof must derive phase-b from the dedicated manifest"
 grep -Fq 'predicate_ledger' "${SCRIPT}" || fail "proof evidence must expose named predicates"
-grep -Fq 'failed_events' "${SCRIPT}" || fail "proof evidence must expose failed events"
+	grep -Fq 'failed_events' "${SCRIPT}" || fail "proof evidence must expose failed events"
+	grep -Fq 'manual_status == "route_complete"' "${SCRIPT}" || fail "proof must require a successful manual status"
+	grep -Fq 'route_proof_status == "complete"' "${SCRIPT}" || fail "proof must require a complete route status"
+	grep -Fq 'harness_exit_code == 0' "${SCRIPT}" || fail "proof must require a zero harness exit"
 
 if rg -n 'credential_ref[^\n]*key_file|kind[^\n]*key_file|credential_file=' "${SCRIPT}" >/dev/null; then
   fail "proof must not inject a key-file credential"

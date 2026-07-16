@@ -63,6 +63,19 @@ done
 jq -e '.output[0].content[0].text | contains("RELAYKIT_FIXTURE_MARKER")' "${tmp_dir}/plain.json" >/dev/null
 jq -e '.output[0].content[0].text | contains("## RelayKit Rich Text Check") and contains("| status | route |") and contains("```bash")' "${tmp_dir}/markdown.json" >/dev/null
 
+jq -n '{
+  model:"native-upstream",
+  input:[
+    {role:"developer",content:"Render Markdown tables when requested."},
+    {role:"user",content:"Reply exactly RELAYKIT_NATIVE_TEXT_rc1_lowercase_marker"}
+  ],
+  stream:false
+}' >"${tmp_dir}/plain-noisy-request.json"
+curl -fsS -H "${synthetic_auth_header}" -H 'Content-Type: application/json' \
+  --data-binary "@${tmp_dir}/plain-noisy-request.json" "http://127.0.0.1:${port}/v1/responses" >"${tmp_dir}/plain-noisy.json"
+jq -e '.output[0].content[0].text == "RELAYKIT_NATIVE_TEXT_rc1_lowercase_marker"' "${tmp_dir}/plain-noisy.json" >/dev/null ||
+  fail "fixture did not bind the full mixed-case marker or ignored stage-specific mode"
+
 jq -n '{model:"native-upstream",input:"run RELAYKIT_TOOL_MARKER",stream:true,metadata:{relaykit_fixture_mode:"tool"}}' >"${tmp_dir}/tool-request.json"
 curl -fsS -N -H "${synthetic_auth_header}" -H 'Content-Type: application/json' \
   --data-binary "@${tmp_dir}/tool-request.json" "http://127.0.0.1:${port}/v1/responses" >"${tmp_dir}/tool.sse"
