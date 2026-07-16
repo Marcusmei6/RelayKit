@@ -58,6 +58,12 @@ Also run the scans listed in `docs/public-boundary-checklist.md`.
 
 Current status is `needs work`. The evidence below describes the previously accepted local artifact and must not be reused as final-candidate proof. The next closeout must bind one newly frozen package to compact UI screenshots, two fresh ordinary-popover preflights, App UI provider/Keychain persistence, and one isolated Desktop A/B/C run, then derive its manifest only after cleanup and global/runtime guards pass.
 
+The latest current-package attempt is blocked before route proof. Candidate commit `d51f249` produced local ad-hoc zip SHA-256 `d5dd4501c53accf20d710ecceaf600a82156e27c97863d89baa7351d4a01b05e`. Its first fresh ordinary preflight is preserved at `dist/rc1-remediated-preflight-1-20260716T181059Z/`: WindowServer observed one same-run surface after the exact status-item click, but the remote AX driver reported `ax_popover_count=0` and `semantic_identifier_count=0`, so `result.json` and `evidence-manifest.json` are failed. No Desktop A/B/C request was sent and no manifest PASS was generated.
+
+The bounded `popoverDidShow` reattachment and exact Official-scroll-area selector remain implemented and pass focused Swift/AX/proof tests, but they did not close the remote NSPopover AX projection failure. Do not add a titled window, panel, proxy, OCR, coordinates, title matching, or a loose fallback. Resume from this failed preflight evidence and either establish the native NSPopover AX root under the existing product behavior or report the exact platform limitation.
+
+Cleanup for the failed current-package attempt passed: the App exited, transient files were removed, ports `18787` and `19777` have no RelayKit listener, global config SHA-256 remains `d3a698e75426ee93901879c79cab7ee4144762d6bcbbb40812e20a3d68d8903a`, and global auth SHA-256 remains `e39d2073d5fee94ab016df8e70341b064569981fd61be486135690113683f043`.
+
 The final local ad-hoc RC1 candidate completed one fresh App-first plus isolated Codex Desktop native Responses run. Run `rc1-native-20260716T111701Z-external-sandbox` is bound to `dist/RelayKitApp-local.zip` SHA-256 `abf74744aedbe699e20b37064802d8753e40424d8886e68d2c32954eadec776a` and the byte-identical extracted App under `dist/verify-release-10c63cd5/RelayKitApp.app`.
 
 Authoritative current-run evidence is split by layer:

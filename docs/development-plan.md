@@ -292,6 +292,8 @@ Status: implementation complete for its bound artifact; the fresh final matrix p
 
 Status: needs work for the final RC1 candidate. The prior local ad-hoc App-first plus isolated Desktop A/B/C run remains valid evidence for its bound artifact only; it cannot close the new candidate until the compact UI, typed Official state, redirect/SSE limits, provider/Keychain transaction, derived manifest, and one-package final matrix all pass fresh.
 
+- Candidate `d51f249` and zip SHA-256 `d5dd4501c53accf20d710ecceaf600a82156e27c97863d89baa7351d4a01b05e` are the latest current setup. `dist/rc1-remediated-preflight-1-20260716T181059Z/` failed because the same-run unique WindowServer surface had no remotely visible AXPopover or semantic identifiers. The final Desktop A/B/C route stage was therefore not run and the phase remains `needs work`.
+
 - The top-level proof begins with an empty isolated provider destination and uses exact RelayKit PID/window-bound AX to save provider name, loopback URL, synthetic key, model, and `openai_responses`. It rejects completed provider injection, `key_file`, and curl-only proof.
 - Saved config must contain `api_format=openai_responses` and a Keychain reference only. The same extracted App must relaunch and expose the restored protocol, URL, model, and saved-key state before its bundled Gateway is started through the UI.
 - The dedicated `rc1_native_responses_three_stage` Desktop profile attaches to the App-owned Gateway and UI-saved config. Stages A/B/C each have exactly one submission and require, respectively, a text marker, native Markdown structure, and the exact shell command plus `pwd` with a verified `function_call_output` roundtrip.
