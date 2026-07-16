@@ -3335,6 +3335,30 @@ private func scrollRelayKitContainer(
         }
         return false
     }
+    func ancestorScrollArea(of element: AXUIElement) -> AXUIElement? {
+        var current = element
+        for _ in 0..<8 {
+            if copyAXString(current, kAXRoleAttribute as CFString) == kAXScrollAreaRole as String {
+                return current
+            }
+            guard let parent = copyAXAttribute(current, kAXParentAttribute as CFString) as! AXUIElement? else {
+                return nil
+            }
+            current = parent
+        }
+        return nil
+    }
+    func hasAncestor(_ element: AXUIElement, equalTo target: AXUIElement) -> Bool {
+        var current = element
+        for _ in 0..<8 {
+            if CFEqual(current, target) { return true }
+            guard let parent = copyAXAttribute(current, kAXParentAttribute as CFString) as! AXUIElement? else {
+                return false
+            }
+            current = parent
+        }
+        return false
+    }
     let nodes = try currentNodes(context)
     let verticalScrollBars = nodes.filter { node in
         guard node.semantic.role == kAXScrollBarRole as String,
@@ -3345,10 +3369,12 @@ private func scrollRelayKitContainer(
     }
     let scrollBars: [AXNode]
     if identifier == "official-details-scroll-container" {
-        guard nodes.contains(where: { $0.semantic.identifier == identifier }) else {
-            throw DriverFailure("selector_state_not_observed", exitStatus: 5, candidateCount: 0)
+        let expandedMarkers = nodes.filter { $0.semantic.identifier == "official-state-details-expanded" }
+        guard expandedMarkers.count == 1,
+              let officialScrollArea = ancestorScrollArea(of: expandedMarkers[0].element) else {
+            throw DriverFailure("selector_state_not_observed", exitStatus: 5, candidateCount: expandedMarkers.count)
         }
-        scrollBars = verticalScrollBars.filter { hasAncestorIdentifier($0.element) }
+        scrollBars = verticalScrollBars.filter { hasAncestor($0.element, equalTo: officialScrollArea) }
     } else {
         scrollBars = verticalScrollBars.filter { hasAncestorIdentifier($0.element) }
     }

@@ -1275,6 +1275,7 @@ func expectStatusPopoverContract() throws {
           source.contains("private static let popoverAccessibilityIdentifier = \"relaykit-popover-root\""),
           source.contains("private let popover = NSPopover()"),
           source.contains("private weak var popoverAccessibilityWindow: NSWindow?"),
+          source.contains("private var popoverAccessibilityGeneration = 0"),
           source.contains("app.setActivationPolicy(.accessory)") else {
         fatalError("single reusable accessory status popover contract is missing")
     }
@@ -1299,7 +1300,7 @@ func expectStatusPopoverContract() throws {
     for required in ["#selector(togglePopover(_:))", "sendAction(on: [.leftMouseUp, .rightMouseUp])", "popover.behavior = smokeKeepsPopoverOpen ? .applicationDefined : .transient", "popover.contentSize = NSSize(width: 480, height: 760)", "popover.contentViewController = NSHostingController(", "popover.delegate = self", "NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown])", "DispatchQueue.main.async", "self?.popover.close()", "self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)"] {
         if !launch.contains(required) { fatalError("status popover launch setup is missing \(required)") }
     }
-    for required in ["attachPopoverAccessibilityRoot()", "detachPopoverAccessibilityRoot()", "popover.contentViewController?.view.window", "window.setAccessibilityRole(.popover)", "window.setAccessibilityIdentifier(Self.popoverAccessibilityIdentifier)", "window.setAccessibilityParent(button)", "button.setAccessibilityChildren([window])", "window.setAccessibilityIdentifier(nil)", "window.setAccessibilityParent(nil)"] {
+    for required in ["schedulePopoverAccessibilityAttachment(generation: popoverAccessibilityGeneration, remainingAttempts: 20)", "generation == popoverAccessibilityGeneration, popover.isShown", "remainingAttempts: remainingAttempts - 1", "attachPopoverAccessibilityRoot()", "detachPopoverAccessibilityRoot()", "popover.contentViewController?.view.window", "window.setAccessibilityRole(.popover)", "window.setAccessibilityIdentifier(Self.popoverAccessibilityIdentifier)", "window.setAccessibilityParent(button)", "button.setAccessibilityChildren([window])", "window.setAccessibilityIdentifier(nil)", "window.setAccessibilityParent(nil)"] {
         if !delegates.contains(required) { fatalError("status popover accessibility lifecycle is missing \(required)") }
     }
     for forbidden in ["button.setAccessibilityChildren([popover])", "application.setAccessibilityWindows", "_AXUIElementGetWindow", "window.windowNumber", "relaykit-popover-root-window-"] {

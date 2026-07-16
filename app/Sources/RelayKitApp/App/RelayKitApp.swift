@@ -11,6 +11,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
     private weak var popoverAccessibilityWindow: NSWindow?
+    private var popoverAccessibilityGeneration = 0
     private var smokeSections = Set<String>()
     private let smokeTab = Tab(rawValue: value(after: "--ui-smoke-tab") ?? "") ?? .connect
     private let smokeShowsProvider = CommandLine.arguments.contains("--ui-smoke-provider")
@@ -114,11 +115,25 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func popoverDidShow(_ notification: Notification) {
-        attachPopoverAccessibilityRoot()
+        popoverAccessibilityGeneration += 1
+        schedulePopoverAccessibilityAttachment(generation: popoverAccessibilityGeneration, remainingAttempts: 20)
     }
 
     func popoverDidClose(_ notification: Notification) {
+        popoverAccessibilityGeneration += 1
         detachPopoverAccessibilityRoot()
+    }
+
+    private func schedulePopoverAccessibilityAttachment(generation: Int, remainingAttempts: Int) {
+        guard generation == popoverAccessibilityGeneration, popover.isShown else { return }
+        attachPopoverAccessibilityRoot()
+        guard remainingAttempts > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.schedulePopoverAccessibilityAttachment(
+                generation: generation,
+                remainingAttempts: remainingAttempts - 1
+            )
+        }
     }
 
     private func attachPopoverAccessibilityRoot() {

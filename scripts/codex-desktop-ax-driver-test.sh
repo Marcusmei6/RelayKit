@@ -1428,8 +1428,12 @@ rg -Fq 'gateway-start' "${SOURCE}" || fail "gateway start must use the exact App
 rg -Fq 'official-details-scroll-container' "${SOURCE}" ||
   fail "Official internal scroll must use its exact container identifier"
 official_scroll_body="$(sed -n '/private func scrollRelayKitContainer/,/^}/p' "${SOURCE}")"
-rg -Fq 'scrollBars = verticalScrollBars.filter { hasAncestorIdentifier($0.element) }' <<<"${official_scroll_body}" ||
-  fail "Official internal scroll must reject unrelated popover scrollbars"
+rg -Fq 'official-state-details-expanded' <<<"${official_scroll_body}" ||
+  fail "Official internal scroll must require the exact expanded-state marker"
+rg -Fq 'ancestorScrollArea(of: expandedMarkers[0].element)' <<<"${official_scroll_body}" ||
+  fail "Official internal scroll must resolve the marker's exact AXScrollArea ancestor"
+rg -Fq 'hasAncestor($0.element, equalTo: officialScrollArea)' <<<"${official_scroll_body}" ||
+  fail "Official internal scroll must reject scrollbars outside the exact Official scroll area"
 
 for required_source_text in \
   'performVerifiedPress' \
