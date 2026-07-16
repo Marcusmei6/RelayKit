@@ -91,6 +91,8 @@ run_failure invalid_arguments "${binary}" relaykit-provider-configure --pid 1 --
 run_failure invalid_arguments "${binary}" relaykit-provider-protocol-probe --pid 1 --window-identity "${tmp_dir}/window.json"
 run_failure invalid_arguments "${binary}" relaykit-provider-verify --pid 1 --window-identity "${tmp_dir}/window.json"
 run_failure invalid_arguments "${binary}" relaykit-gateway-start --pid 1
+run_failure invalid_arguments "${binary}" relaykit-ui-evidence --pid 1 --window-identity "${tmp_dir}/window.json"
+run_failure invalid_arguments "${binary}" relaykit-ui-evidence --pid 1 --window-identity "${tmp_dir}/window.json" --stage unknown
 run_failure invalid_command \
   "${binary}" relaykit-ax-inspect --pid 1 --window-identity "${tmp_dir}/window.json" \
   --diagnostic-output "${tmp_dir}/ax-inspect.json"
@@ -102,6 +104,10 @@ self_test=(env RELAYKIT_AX_DRIVER_SELF_TEST=1 "${binary}" self-test)
 run_success "${self_test[@]}" --scenario workspace-path-exact
 jq -e '.candidate_count == 1 and .action_count == 0' "${last_stdout}" >/dev/null ||
   fail "absolute workspace path did not resolve to one exact project label"
+
+run_success "${self_test[@]}" --scenario relaykit-identifier-exact
+jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
+  fail "RelayKit selector matched a title/value collision instead of the exact AXIdentifier"
 
 run_success "${self_test[@]}" --scenario workspace-url-exact
 jq -e '.candidate_count == 1 and .action_count == 0' "${last_stdout}" >/dev/null ||
@@ -175,6 +181,23 @@ relaykit_verify_options=(
   --model-id "dogfood/dynamic-window"
   --upstream-model-id "native-upstream"
 )
+
+run_bound_window_success relaykit-ui-evidence-context relaykit-ui-evidence 4810 310 --stage connect <<'JSON'
+{
+  "current_identity":{"pid":4810,"window_id":310},"process_running":true,
+  "bundle_identifier":"dev.relaykit.app","frontmost_pid":null,"accessibility_trusted":true,
+  "windows":[{"owner_pid":4810,"window_id":310,"layer":25}],
+  "ax_windows_status":"success","ax_windows_value_present":true,
+  "ax_window_numbers":[],"ax_window_node_ids":[],"root_id":0,
+  "nodes":[
+    {"id":0,"role":"AXApplication","children":[1]},
+    {"id":1,"role":"AXPopover","identifier":"relaykit-popover-root","children":[2,3]},
+    {"id":2,"role":"AXButton","identifier":"official-provider-row","children":[]},
+    {"id":3,"role":"AXButton","identifier":"provider-add-entry","children":[]}
+  ],
+  "expected_action_root_id":1
+}
+JSON
 
 run_bound_window_failure window_selector_not_unique \
   relaykit-application-only-empty-ax-windows relaykit-gateway-start 4805 305 <<'JSON'
@@ -1402,6 +1425,11 @@ rg -Uq 'provider-upstream-protocol-selector(.|\n)*provider-upstream-model-overri
 rg -Uq 'provider-upstream-protocol-selector(.|\n)*provider-form-cancel(.|\n)*official-provider-row' <<<"${verify_body}" ||
   fail "relaunch verification must close the provider form and restore the configured row"
 rg -Fq 'gateway-start' "${SOURCE}" || fail "gateway start must use the exact App control"
+rg -Fq 'official-details-scroll-container' "${SOURCE}" ||
+  fail "Official internal scroll must use its exact container identifier"
+official_scroll_body="$(sed -n '/private func scrollRelayKitContainer/,/^}/p' "${SOURCE}")"
+rg -Fq 'scrollBars = verticalScrollBars.filter { hasAncestorIdentifier($0.element) }' <<<"${official_scroll_body}" ||
+  fail "Official internal scroll must reject unrelated popover scrollbars"
 
 for required_source_text in \
   'performVerifiedPress' \

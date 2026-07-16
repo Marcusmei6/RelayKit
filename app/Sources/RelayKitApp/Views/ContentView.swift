@@ -30,17 +30,17 @@ struct ContentView: View {
         self.smokeSectionRecorder = smokeSectionRecorder
     }
 
-    private var officialCurrentStatusTitle: String {
-        ProviderFormLabels.officialStatusTitle(status: model.officialAuthStatus)
-    }
+    private var officialSnapshot: OfficialChannelSnapshot { model.officialSnapshot }
+
+    private var officialCurrentStatusTitle: String { ProviderFormLabels.officialStatusTitle(status: officialSnapshot.status.rawValue) }
 
     private var officialCurrentStatusIcon: String {
-        switch model.officialAuthStatus {
-        case "device login pending":
+        switch officialSnapshot.status {
+        case .deviceLoginPending:
             return "person.badge.key"
-        case "login available":
+        case .loginAvailable:
             return "checkmark.seal"
-        case "route verified":
+        case .routeVerified:
             return "checkmark.shield"
         default:
             return "xmark.seal"
@@ -48,10 +48,10 @@ struct ContentView: View {
     }
 
     private var officialCurrentStatusColor: Color {
-        switch model.officialAuthStatus {
-        case "login available", "route verified":
+        switch officialSnapshot.status {
+        case .loginAvailable, .routeVerified:
             return Color(hex: 0x8BE0A4)
-        case "device login pending":
+        case .deviceLoginPending:
             return Color(hex: 0xFFD685)
         default:
             return Color(hex: 0xFF9B9B)
@@ -59,24 +59,24 @@ struct ContentView: View {
     }
 
     private var officialCurrentStatusSmokeSection: String {
-        "official-current-status-" + model.officialAuthStatus.replacingOccurrences(of: " ", with: "-")
+        "official-current-status-" + officialSnapshot.status.rawValue.replacingOccurrences(of: " ", with: "-")
     }
 
     private var officialIsConnected: Bool {
-        ProviderFormLabels.officialIsConnected(status: model.officialAuthStatus)
+        officialSnapshot.isConnected
     }
 
     private var officialShowsDeviceLogin: Bool {
-        model.officialAuthStatus == "device login pending"
+        officialSnapshot.status == .deviceLoginPending
             && (!model.officialAuthURL.isEmpty || !model.officialDeviceCode.isEmpty)
     }
 
     private var officialPrimaryActionTitle: String {
-        ProviderFormLabels.officialPrimaryActionLabel(status: model.officialAuthStatus)
+        officialSnapshot.primaryActionLabel
     }
 
     private var officialPrimaryActionIcon: String {
-        model.officialAuthStatus == "route verified" ? "checkmark.shield" : "person.badge.key"
+        officialSnapshot.status == .routeVerified ? "checkmark.shield" : "person.badge.key"
     }
 
     var body: some View {
@@ -91,20 +91,7 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 header
                 tabRail
-                ScrollView {
-                    Group {
-                        switch tab {
-                        case .connect:
-                            connectTab
-                        case .usage:
-                            usageTab
-                        case .settings:
-                            settingsTab
-                        }
-                    }
-                    .padding(18)
-                    .padding(.bottom, 30)
-                }
+                tabContent
                 footer
             }
 
@@ -169,6 +156,22 @@ struct ContentView: View {
         }
         .task(id: tab) {
             await runUsageAutoRefreshIfNeeded()
+        }
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch tab {
+        case .connect:
+            ScrollView {
+                connectTab
+                    .padding(18)
+                    .padding(.bottom, 18)
+            }
+        case .usage:
+            ScrollView { usageTab.padding(18).padding(.bottom, 30) }
+        case .settings:
+            ScrollView { settingsTab.padding(18).padding(.bottom, 30) }
         }
     }
 
@@ -503,7 +506,7 @@ struct ContentView: View {
                     Text("OpenAI Official / Codex Official")
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
-                    Text(ProviderFormLabels.officialRowSubtitle(status: model.officialAuthStatus))
+                    Text(ProviderFormLabels.officialRowSubtitle(status: officialSnapshot.status.rawValue))
                         .font(.caption)
                         .foregroundStyle(secondaryText)
                         .lineLimit(1)
@@ -549,55 +552,76 @@ struct ContentView: View {
                 .buttonStyle(ControlButtonStyle())
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 10) {
-                    officialStatusRow(
-                        icon: officialCurrentStatusIcon,
-                        title: officialCurrentStatusTitle,
-                        detail: model.officialAuthDetail,
-                        color: officialCurrentStatusColor
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .smokeSection(officialCurrentStatusSmokeSection, recorder: smokeSectionRecorder)
+            officialActionSection
 
-                    Button {
-                        smokeSectionRecorder?("official-auth-cta-clicked")
-                        model.connectOfficial()
-                    } label: {
-                        Label(officialPrimaryActionTitle, systemImage: officialPrimaryActionIcon)
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(ControlButtonStyle(prominent: true))
-                    .disabled(ProviderFormLabels.officialPrimaryActionDisabled(status: model.officialAuthStatus, inProgress: model.officialAuthInProgress))
-                    .smokeSection("official-auth-cta-action", recorder: smokeSectionRecorder)
-                    .smokeSection(officialIsConnected ? "official-connected-cta-disabled" : "", recorder: smokeSectionRecorder)
-                }
-
-                HStack(spacing: 8) {
-                    Button {
-                        smokeSectionRecorder?("official-status-refresh-clicked")
-                        model.refreshOfficialAuthStatus()
-                    } label: {
-                        Label(ProviderFormLabels.officialChannelActionLabels[1], systemImage: "arrow.clockwise")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(OfficialSecondaryButtonStyle())
-                    .smokeSection("official-status-refresh-action", recorder: smokeSectionRecorder)
-
-                    Button {
-                        model.disconnectOfficial()
-                    } label: {
-                        Label(ProviderFormLabels.officialChannelActionLabels[2], systemImage: "trash")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(OfficialSecondaryButtonStyle())
-                    .smokeSection("official-disconnect-action", recorder: smokeSectionRecorder)
-                }
+            ScrollView {
+                officialSheetDetails
             }
-            .padding(12)
-            .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
-            .smokeSection("official-product-auth-actions", recorder: smokeSectionRecorder)
+            .frame(maxHeight: officialDetailsExpanded ? 340 : 210)
+            .accessibilityIdentifier("official-details-scroll-container")
+        }
+        .padding(18)
+        .frame(width: 444)
+        .background(sheetBackground, in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
+        .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
+        .smokeSection("official-channel-sheet", recorder: smokeSectionRecorder)
+    }
 
+    private var officialActionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                officialStatusRow(
+                    icon: officialCurrentStatusIcon,
+                    title: officialCurrentStatusTitle,
+                    detail: officialSnapshot.detail,
+                    color: officialCurrentStatusColor
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .smokeSection(officialCurrentStatusSmokeSection, recorder: smokeSectionRecorder)
+
+                Button {
+                    smokeSectionRecorder?("official-auth-cta-clicked")
+                    model.connectOfficial()
+                } label: {
+                    Label(officialPrimaryActionTitle, systemImage: officialPrimaryActionIcon)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(ControlButtonStyle(prominent: true))
+                .disabled(officialSnapshot.primaryActionDisabled)
+                .smokeSection("official-auth-cta-action", recorder: smokeSectionRecorder)
+                .smokeSection(officialIsConnected ? "official-connected-cta-disabled" : "", recorder: smokeSectionRecorder)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    smokeSectionRecorder?("official-status-refresh-clicked")
+                    model.refreshOfficialAuthStatus()
+                } label: {
+                    Label(ProviderFormLabels.officialChannelActionLabels[1], systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(OfficialSecondaryButtonStyle())
+                .smokeSection("official-status-refresh-action", recorder: smokeSectionRecorder)
+
+                Button {
+                    model.disconnectOfficial()
+                } label: {
+                    Label(ProviderFormLabels.officialChannelActionLabels[2], systemImage: "trash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(OfficialSecondaryButtonStyle())
+                .smokeSection("official-disconnect-action", recorder: smokeSectionRecorder)
+            }
+        }
+        .padding(12)
+        .background(surfaceSubtle, in: RoundedRectangle(cornerRadius: 12))
+        .smokeSection("official-product-auth-actions", recorder: smokeSectionRecorder)
+    }
+
+    @ViewBuilder
+    private var officialSheetDetails: some View {
+        VStack(alignment: .leading, spacing: 14) {
             if officialShowsDeviceLogin {
                 VStack(alignment: .leading, spacing: 5) {
                     if !model.officialAuthURL.isEmpty {
@@ -701,12 +725,6 @@ struct ContentView: View {
             .background(surfaceChrome, in: RoundedRectangle(cornerRadius: 12))
             .smokeSection(officialDetailsExpanded ? "official-state-details-expanded" : "official-state-details-collapsed", recorder: smokeSectionRecorder)
         }
-        .padding(18)
-        .frame(width: 444)
-        .background(sheetBackground, in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(borderColor))
-        .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
-        .smokeSection("official-channel-sheet", recorder: smokeSectionRecorder)
     }
 
     private func officialStatusRow(icon: String, title: String, detail: String, color: Color) -> some View {

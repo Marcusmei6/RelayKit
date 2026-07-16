@@ -11,6 +11,7 @@ AX_SOURCE="${ROOT}/scripts/codex-desktop-ax-driver.swift"
 MANUAL_PROOF="${ROOT}/scripts/codex-desktop-manual-proof.sh"
 MANIFEST="${ROOT}/scripts/rc1-native-responses-manifest.sh"
 OUT="${RELAYKIT_RC1_NATIVE_RESPONSES_OUT:-${ROOT}/dist/rc1-native-responses-proof}"
+PROTOCOL_EVIDENCE="${OUT}/protocol-validation.json"
 RUN_ID="${RELAYKIT_RC1_RUN_ID:-rc1-native-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 RC1_PERSISTENT_PROOF_ROOT="${HOME}/Library/Application Support/RelayKit/DesktopProof"
 PROVIDER_NAME="Dogfood RC1 Native Responses"
@@ -20,10 +21,15 @@ PROVIDER_PUBLIC_MODEL="custom/${PROVIDER_FORM_MODEL}"
 PROVIDER_UPSTREAM_MODEL="native-upstream"
 KEYCHAIN_SERVICE="relaykit.provider.${PROVIDER_ID}"
 SYNTHETIC_KEY="RELAYKIT_FAKE_RC1_NATIVE_RESPONSES_DO_NOT_USE"
+APP_BUNDLE_ID="dev.relaykit.app"
+APPEARANCE_KEY="appearanceMode"
 APP_PID=""
 FIXTURE_PID=""
+FIXTURE_PORT=""
 HELPER_PID=""
 KEYCHAIN_CREATED=false
+ORIGINAL_APPEARANCE_PRESENT=false
+ORIGINAL_APPEARANCE=""
 AX_INSPECT_TEMP=""
 AX_INSPECT_OUT=""
 AX_INSPECT_FINALIZED=false
@@ -94,6 +100,80 @@ sha256() {
   fi
 }
 
+bundle_sha256() {
+  bundle_tree_sha256 "$1"
+}
+
+bundle_tree_sha256() {
+  (
+    cd "$1"
+    while IFS= read -r -d '' item; do
+      local_path="${item#./}"
+      mode="$(stat -f '%Lp' "${item}")"
+      if [[ -L "${item}" ]]; then
+        printf 'symlink\0%s\0%s\0%s\0' "${local_path}" "${mode}" "$(readlink "${item}")"
+      elif [[ -f "${item}" ]]; then
+        printf 'file\0%s\0%s\0%s\0' "${local_path}" "${mode}" "$(sha256 "${item}")"
+      elif [[ -d "${item}" ]]; then
+        printf 'directory\0%s\0%s\0' "${local_path}" "${mode}"
+      else
+        printf 'other\0%s\0%s\0' "${local_path}" "${mode}"
+      fi
+    done < <(find . -mindepth 1 -print0 | LC_ALL=C sort -z)
+  ) | /usr/bin/shasum -a 256 | awk '{print $1}'
+}
+
+string_sha256() {
+  printf '%s' "$1" | /usr/bin/shasum -a 256 | awk '{print $1}'
+}
+
+run_protocol_validation() {
+  local log_path="${OUT}/run/protocol-validation.log"
+  local test_pattern='^(TestNativeOpenAIResponsesNonStreamingPreservesProtocol|TestNativeOpenAIResponsesStreamsEventsAndReportsTruncation|TestResponsesRejectsEveryDuplicateTopLevelNativeRequest|TestNativeResponsesNonStreamingRejectsDuplicateTopLevelUpstreamResponse)$'
+  local command="go test ./internal/server -run ${test_pattern} -count=1"
+
+  if ! (cd "${ROOT}/gateway" && go test ./internal/server -run "${test_pattern}" -count=1) >"${log_path}" 2>&1; then
+    chmod 600 "${log_path}"
+    fail "fresh protocol validation failed; see ${log_path}"
+  fi
+  chmod 600 "${log_path}"
+
+  jq -n \
+    --arg run_id "${RUN_ID}" --arg command "${command}" \
+    --arg log_path "${log_path}" --arg log_sha256 "$(sha256 "${log_path}")" \
+    --arg server_sha256 "$(sha256 "${ROOT}/gateway/internal/server/server.go")" \
+    --arg responses_sha256 "$(sha256 "${ROOT}/gateway/internal/server/openai_responses.go")" \
+    --arg server_test_sha256 "$(sha256 "${ROOT}/gateway/internal/server/server_test.go")" \
+    --arg provider_test_sha256 "$(sha256 "${ROOT}/gateway/internal/server/provider_test.go")" \
+    --arg git_head "$(git -C "${ROOT}" rev-parse HEAD)" \
+    --arg git_diff_sha256 "$(git -C "${ROOT}" diff HEAD --binary | /usr/bin/shasum -a 256 | awk '{print $1}')" '
+    {
+      schema_version:1,
+      run_id:$run_id,
+      producer:"rc1-native-responses-proof",
+      command:$command,
+      exit_code:0,
+      git_head:$git_head,
+      git_diff_sha256:$git_diff_sha256,
+      log:{path:$log_path,sha256:$log_sha256},
+      source_sha256:{
+        "gateway/internal/server/server.go":$server_sha256,
+        "gateway/internal/server/openai_responses.go":$responses_sha256,
+        "gateway/internal/server/server_test.go":$server_test_sha256,
+        "gateway/internal/server/provider_test.go":$provider_test_sha256
+      },
+      checks:[
+        {name:"gateway_native_http",status:"passed"},
+        {name:"gateway_native_sse",status:"passed"},
+        {name:"request_duplicate_fields_rejected",status:"passed"},
+        {name:"response_duplicate_fields_rejected",status:"passed"}
+      ],
+      failed_events:[]
+    }
+  ' >"${PROTOCOL_EVIDENCE}"
+  chmod 600 "${PROTOCOL_EVIDENCE}"
+}
+
 validate_config_rebaseline() {
   [[ "${CONFIG_REBASELINE_EVIDENCE}" == /* && -f "${CONFIG_REBASELINE_EVIDENCE}" &&
      ! -L "${CONFIG_REBASELINE_EVIDENCE}" ]] ||
@@ -145,8 +225,17 @@ stop_app() {
   APP_PID=""
 }
 
+restore_appearance_defaults() {
+  if [[ "${ORIGINAL_APPEARANCE_PRESENT}" == "true" ]]; then
+    /usr/bin/defaults write "${APP_BUNDLE_ID}" "${APPEARANCE_KEY}" "${ORIGINAL_APPEARANCE}" >/dev/null 2>&1 || true
+  else
+    /usr/bin/defaults delete "${APP_BUNDLE_ID}" "${APPEARANCE_KEY}" >/dev/null 2>&1 || true
+  fi
+}
+
 cleanup() {
   stop_app
+  restore_appearance_defaults
   if [[ -n "${HELPER_PID}" ]] && kill -0 "${HELPER_PID}" 2>/dev/null; then
     kill -TERM "${HELPER_PID}" >/dev/null 2>&1 || true
   fi
@@ -159,6 +248,111 @@ cleanup() {
         -x "${APP_REAL}" ]]; then
     "${APP_REAL}" --delete-dogfood-keychain "${KEYCHAIN_SERVICE}" >/dev/null 2>&1 || true
   fi
+}
+
+write_cleanup_runtime_guard() {
+  local global_config_before="$1" global_auth_before="$2" shared_18787_before="$3"
+  local app_pid="${APP_PID}" helper_pid="${HELPER_PID}" fixture_pid="${FIXTURE_PID}"
+  local app_status="failed" helper_status="failed" fixture_status="failed" keychain_status="failed"
+  local app_exit=1 helper_exit=1 fixture_exit=1 keychain_exit=1
+  local tracked_status tracked_count tracked_sha config_after auth_after shared_18787_after
+  local gateway_listener_count=1 fixture_listener_count=1
+
+  stop_app
+  if [[ -n "${app_pid}" ]] && ! kill -0 "${app_pid}" 2>/dev/null; then
+    app_status="completed"
+    app_exit=0
+  fi
+
+  if [[ -n "${helper_pid}" ]] && kill -0 "${helper_pid}" 2>/dev/null; then
+    kill -TERM "${helper_pid}" >/dev/null 2>&1 || true
+    for _ in {1..100}; do
+      kill -0 "${helper_pid}" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  if [[ -n "${helper_pid}" ]] && ! kill -0 "${helper_pid}" 2>/dev/null; then
+    helper_status="completed"
+    helper_exit=0
+  fi
+  HELPER_PID=""
+
+  if [[ -n "${fixture_pid}" ]] && kill -0 "${fixture_pid}" 2>/dev/null; then
+    kill -TERM "${fixture_pid}" >/dev/null 2>&1 || true
+    wait "${fixture_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${fixture_pid}" ]] && ! kill -0 "${fixture_pid}" 2>/dev/null; then
+    fixture_status="completed"
+    fixture_exit=0
+  fi
+  FIXTURE_PID=""
+
+  if [[ "${KEYCHAIN_CREATED}" == "true" && -x "${APP_REAL}" ]]; then
+    keychain_exit=0
+    "${APP_REAL}" --delete-dogfood-keychain "${KEYCHAIN_SERVICE}" >/dev/null 2>&1 || keychain_exit=$?
+    if [[ "${keychain_exit}" -eq 0 ]]; then
+      keychain_status="completed"
+      KEYCHAIN_CREATED=false
+    fi
+  fi
+
+  config_after="$(sha256 "${HOME}/.codex/config.toml")"
+  auth_after="$(sha256 "${HOME}/.codex/auth.json")"
+  shared_18787_after="$(listener_snapshot 18787)"
+  [[ -z "$(listener_snapshot 19777)" ]] && gateway_listener_count=0
+  if [[ "${FIXTURE_PORT}" =~ ^[0-9]+$ && -z "$(listener_snapshot "${FIXTURE_PORT}")" ]]; then
+    fixture_listener_count=0
+  fi
+  tracked_status="$(git -C "${ROOT}" status --porcelain=v1 --untracked-files=no)"
+  tracked_count="$(if [[ -n "${tracked_status}" ]]; then printf '%s\n' "${tracked_status}" | wc -l | tr -d ' '; else printf 0; fi)"
+  tracked_sha="$(string_sha256 "${tracked_status}")"
+
+  jq -n \
+    --arg run_id "${RUN_ID}" \
+    --arg config_before "${global_config_before}" --arg config_after "${config_after}" \
+    --arg auth_before "${global_auth_before}" --arg auth_after "${auth_after}" \
+    --arg shared_before "$(string_sha256 "${shared_18787_before}")" \
+    --arg shared_after "$(string_sha256 "${shared_18787_after}")" \
+    --arg app_status "${app_status}" --argjson app_exit "${app_exit}" --arg app_pid "${app_pid}" \
+    --arg helper_status "${helper_status}" --argjson helper_exit "${helper_exit}" --arg helper_pid "${helper_pid}" \
+    --arg fixture_status "${fixture_status}" --argjson fixture_exit "${fixture_exit}" --arg fixture_pid "${fixture_pid}" \
+    --arg keychain_status "${keychain_status}" --argjson keychain_exit "${keychain_exit}" \
+    --argjson gateway_listener_count "${gateway_listener_count}" \
+    --argjson fixture_listener_count "${fixture_listener_count}" --argjson fixture_port "${FIXTURE_PORT}" \
+    --argjson tracked_count "${tracked_count}" --arg tracked_sha "${tracked_sha}" '
+    {
+      schema_version:1,
+      run_id:$run_id,
+      global_config:{before_sha256:$config_before,after_sha256:$config_after},
+      global_auth:{before_sha256:$auth_before,after_sha256:$auth_after},
+      shared_18787:{before_snapshot_sha256:$shared_before,after_snapshot_sha256:$shared_after},
+      cleanup:[
+        {name:"app",status:$app_status,exit_code:$app_exit},
+        {name:"helper",status:$helper_status,exit_code:$helper_exit},
+        {name:"fixture",status:$fixture_status,exit_code:$fixture_exit},
+        {name:"keychain",status:$keychain_status,exit_code:$keychain_exit}
+      ],
+      processes:[
+        {name:"app",pid:($app_pid | tonumber),status:(if $app_status == "completed" then "exited" else "running_or_unknown" end)},
+        {name:"helper",pid:($helper_pid | tonumber),status:(if $helper_status == "completed" then "exited" else "running_or_unknown" end)},
+        {name:"fixture",pid:($fixture_pid | tonumber),status:(if $fixture_status == "completed" then "exited" else "running_or_unknown" end)}
+      ],
+      ports:[
+        {kind:"gateway",port:19777,after_listener_count:$gateway_listener_count},
+        {kind:"fixture_temp",port:$fixture_port,after_listener_count:$fixture_listener_count}
+      ],
+      tracked_worktree:{status_line_count:$tracked_count,porcelain_sha256:$tracked_sha}
+    } |
+    .failed_events = [
+      (.cleanup[] | select(.status != "completed" or .exit_code != 0) | "cleanup_" + .name),
+      (.ports[] | select(.after_listener_count != 0) | "port_not_released_" + (.port | tostring)),
+      (select(.global_config.before_sha256 != .global_config.after_sha256) | "global_config_changed"),
+      (select(.global_auth.before_sha256 != .global_auth.after_sha256) | "global_auth_changed"),
+      (select(.shared_18787.before_snapshot_sha256 != .shared_18787.after_snapshot_sha256) | "shared_18787_changed"),
+      (select(.tracked_worktree.status_line_count != 0) | "tracked_worktree_not_clean")
+    ]
+  ' >"${OUT}/cleanup-runtime-guard.json"
+  chmod 600 "${OUT}/cleanup-runtime-guard.json"
 }
 
 wait_for_file() {
@@ -537,6 +731,71 @@ run_ax() {
     .status == "ok" and .code == "ok" and .window_verified == true and
     ((keys - ["action_count","candidate_count","code","command","composer_count","model_picker_count","send_count","status","window_verified"]) | length == 0)
   ' "${report}" >/dev/null
+}
+
+capture_bound_popover() {
+  local identity_path="$1" output_path="$2" window_id pid role appearance state
+  window_id="$(jq -er '.window_id | select(type == "number" and . > 0)' "${identity_path}")"
+  pid="$(jq -er '.pid | select(type == "number" and . > 0)' "${identity_path}")"
+  /usr/sbin/screencapture -x -l "${window_id}" "${output_path}"
+  [[ -s "${output_path}" ]] || fail "ordinary App screenshot is empty"
+  chmod 600 "${output_path}"
+  role="$(basename "${output_path}" .png)"
+  appearance="${role##*-}"
+  state="${role%-${appearance}}"
+  jq -n --arg role "ordinary-${role}" --arg path "${output_path}" --arg sha256 "$(sha256 "${output_path}")" \
+    --arg appearance "${appearance}" --arg state "${state}" --argjson pid "${pid}" --argjson window_id "${window_id}" \
+    --arg identity_path "${identity_path}" --arg identity_sha256 "$(sha256 "${identity_path}")" \
+    '{role:$role,path:$path,sha256:$sha256,captured:true,target_identity_verified:true,
+      appearance:$appearance,state:$state,pid:$pid,window_id:$window_id,
+      identity_path:$identity_path,identity_sha256:$identity_sha256}' >>"${OUT}/run/ui-screenshot-captures.jsonl"
+}
+
+run_ui_evidence_stage() {
+  local identity_path="$1" appearance="$2" stage="$3"
+  run_ax "${OUT}/run/ui-${appearance}-${stage}.json" \
+    relaykit-ui-evidence --pid "${APP_PID}" --window-identity "${identity_path}" --stage "${stage}" ||
+    fail "ordinary App UI evidence stage failed: ${appearance}/${stage}"
+}
+
+capture_ordinary_ui_appearance() {
+  local appearance="$1" identity official_identity provider_identity
+  /usr/bin/defaults write "${APP_BUNDLE_ID}" "${APPEARANCE_KEY}" "${appearance}"
+
+  official_identity="${OUT}/run/ui-${appearance}-official-window.json"
+  launch_ordinary_app "${official_identity}" "${OUT}/run/ui-${appearance}-official-diagnostic.json" ||
+    fail "ordinary App ${appearance} Official surface did not bind"
+  run_ui_evidence_stage "${official_identity}" "${appearance}" connect
+  capture_bound_popover "${official_identity}" "${OUT}/ui-screenshots/connect-${appearance}.png"
+  run_ui_evidence_stage "${official_identity}" "${appearance}" official-open
+  capture_bound_popover "${official_identity}" "${OUT}/ui-screenshots/official-collapsed-${appearance}.png"
+  run_ui_evidence_stage "${official_identity}" "${appearance}" official-expand
+  capture_bound_popover "${official_identity}" "${OUT}/ui-screenshots/official-expanded-${appearance}.png"
+  run_ui_evidence_stage "${official_identity}" "${appearance}" official-scroll
+  capture_bound_popover "${official_identity}" "${OUT}/ui-screenshots/official-scrolled-${appearance}.png"
+  stop_app
+
+  provider_identity="${OUT}/run/ui-${appearance}-provider-window.json"
+  launch_ordinary_app "${provider_identity}" "${OUT}/run/ui-${appearance}-provider-diagnostic.json" ||
+    fail "ordinary App ${appearance} Provider surface did not bind"
+  run_ui_evidence_stage "${provider_identity}" "${appearance}" provider-open
+  capture_bound_popover "${provider_identity}" "${OUT}/ui-screenshots/provider-collapsed-${appearance}.png"
+  run_ui_evidence_stage "${provider_identity}" "${appearance}" provider-expand
+  capture_bound_popover "${provider_identity}" "${OUT}/ui-screenshots/provider-expanded-${appearance}.png"
+  run_ui_evidence_stage "${provider_identity}" "${appearance}" provider-scroll
+  capture_bound_popover "${provider_identity}" "${OUT}/ui-screenshots/provider-scrolled-${appearance}.png"
+  stop_app
+}
+
+write_ordinary_ui_screenshot_ledger() {
+  local ledger="${OUT}/ordinary-ui-screenshots.json"
+  jq -s '.' "${OUT}/run/ui-screenshot-captures.jsonl" >"${ledger}"
+  chmod 600 "${ledger}"
+  jq -e 'length == 14 and all(.[]; .captured == true and .target_identity_verified == true and
+    (.pid | type) == "number" and .pid > 0 and (.window_id | type) == "number" and .window_id > 0 and
+    (.identity_path | type) == "string" and (.identity_sha256 | test("^[0-9a-f]{64}$")) and
+    (.sha256 | test("^[0-9a-f]{64}$")))' "${ledger}" >/dev/null ||
+    fail "ordinary App UI screenshot ledger is incomplete"
 }
 
 wait_for_gateway() {
@@ -1299,19 +1558,32 @@ fi
 [[ -x "${FIXTURE}" && -f "${AX_SOURCE}" ]] || fail "proof harness inputs are incomplete"
 [[ "${RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY:-0}" == "1" || ( -x "${MANUAL_PROOF}" && -x "${MANIFEST}" ) ]] || fail "proof harness inputs are incomplete"
 /usr/bin/codesign --verify --deep --strict "${APP_BUNDLE}" || fail "extracted App failed code-sign verification"
-zip_app_sha="$(/usr/bin/unzip -p "${APP_ZIP}" 'RelayKitApp.app/Contents/MacOS/RelayKitApp.bin' | /usr/bin/shasum -a 256 | awk '{print $1}')"
-[[ "${zip_app_sha}" == "$(sha256 "${APP_REAL}")" ]] || fail "extracted App does not match the bound App zip"
 port_is_free 19777 || fail "127.0.0.1:19777 is already in use"
 [[ -z "$(pgrep -x RelayKitApp.bin 2>/dev/null || true)" ]] || fail "RelayKit App is already running"
 
 shared_18787_before="$(listener_snapshot 18787)"
+if ORIGINAL_APPEARANCE="$(/usr/bin/defaults read "${APP_BUNDLE_ID}" "${APPEARANCE_KEY}" 2>/dev/null)"; then
+  ORIGINAL_APPEARANCE_PRESENT=true
+fi
 mkdir -p "${OUT}/run"
+mkdir -p "${OUT}/ui-screenshots"
 chmod 700 "${OUT}" "${OUT}/run"
 trap cleanup EXIT INT TERM HUP
 
+mkdir -p "${OUT}/run/package-binding"
+/usr/bin/unzip -q "${APP_ZIP}" -d "${OUT}/run/package-binding"
+[[ -d "${OUT}/run/package-binding/RelayKitApp.app" ]] || fail "bound App zip does not contain RelayKitApp.app"
+[[ "$(bundle_tree_sha256 "${OUT}/run/package-binding/RelayKitApp.app")" == "$(bundle_tree_sha256 "${APP_BUNDLE}")" ]] ||
+  fail "extracted App tree does not match the bound App zip"
+
+if [[ "${RELAYKIT_RC1_PROVIDER_PROTOCOL_PROBE_ONLY:-0}" != "1" ]]; then
+  run_protocol_validation
+fi
+
 printf '{\n  "providers": []\n}\n' >"${OUT}/providers.json"
+cp "${OUT}/providers.json" "${OUT}/provider-config-initial.json"
 printf '' >"${OUT}/app-usage.jsonl"
-chmod 600 "${OUT}/providers.json" "${OUT}/app-usage.jsonl"
+chmod 600 "${OUT}/providers.json" "${OUT}/provider-config-initial.json" "${OUT}/app-usage.jsonl"
 python3 "${FIXTURE}" serve \
   --port-file "${OUT}/run/fixture-port" \
   --events "${OUT}/provider-events.jsonl" \
@@ -1319,10 +1591,14 @@ python3 "${FIXTURE}" serve \
   --synthetic-key "${SYNTHETIC_KEY}" >"${OUT}/run/fixture.stdout" 2>"${OUT}/run/fixture.stderr" &
 FIXTURE_PID="$!"
 wait_for_file "${OUT}/run/fixture-port" || fail "loopback fixture did not start"
-fixture_port="$(cat "${OUT}/run/fixture-port")"
-base_url="http://127.0.0.1:${fixture_port}/v1"
+FIXTURE_PORT="$(cat "${OUT}/run/fixture-port")"
+base_url="http://127.0.0.1:${FIXTURE_PORT}/v1"
 
 /usr/bin/xcrun swiftc "${AX_SOURCE}" -o "${OUT}/run/codex-desktop-ax-driver"
+capture_ordinary_ui_appearance light
+capture_ordinary_ui_appearance dark
+write_ordinary_ui_screenshot_ledger
+restore_appearance_defaults
 first_identity="${OUT}/run/app-window-first.json"
 first_window_diagnostic="${OUT}/run/app-window-first-diagnostic.json"
 launch_ordinary_app "${first_identity}" "${first_window_diagnostic}" ||
@@ -1450,44 +1726,68 @@ jq -e --arg run_id "${RUN_ID}" '
 ' "${desktop_evidence}" >/dev/null || fail "three-stage evidence is incomplete"
 
 native_evidence="${OUT}/native-app-evidence.json"
-jq -n --arg run_id "${RUN_ID}" --arg app_zip_sha256 "$(sha256 "${APP_ZIP}")" '{
-  status:"passed",
-  run_id:$run_id,
-  predicate_ledger:{
-    ordinary_app_started:true,
-    empty_provider_destination:true,
-    provider_created_via_exact_ax:true,
-    provider_json_openai_responses:true,
-    credential_keychain_ref_only:true,
-    app_relaunched:true,
-    restored_protocol:true,
-    restored_url:true,
-    restored_model:true,
-    restored_saved_key_state:true,
-    gateway_started_via_ui:true
-  },
-  failed_events:[],
-  app_zip_sha256:$app_zip_sha256
-}' >"${native_evidence}"
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg app_zip_sha256 "$(sha256 "${APP_ZIP}")" \
+  --arg extracted_app_sha256 "$(bundle_sha256 "${APP_BUNDLE}")" \
+  --arg provider_config_sha256 "$(sha256 "${OUT}/providers.json")" \
+  --slurpfile initial "${OUT}/provider-config-initial.json" \
+  --slurpfile first_identity "${first_identity}" \
+  --slurpfile configure "${OUT}/run/ax-provider-configure.json" \
+  --slurpfile second_identity "${second_identity}" \
+  --slurpfile verify "${OUT}/run/ax-provider-verify.json" \
+  --slurpfile gateway "${OUT}/run/ax-gateway-start.json" '
+  {
+    schema_version:2,
+    run_id:$run_id,
+    observations:{
+      initial_provider_config:$initial[0],
+      first_window_identity:$first_identity[0],
+      provider_configure:$configure[0],
+      second_window_identity:$second_identity[0],
+      provider_verify:$verify[0],
+      gateway_start:$gateway[0]
+    },
+    app_zip_sha256:$app_zip_sha256,
+    extracted_app_sha256:$extracted_app_sha256,
+    provider_config_sha256:$provider_config_sha256
+  } |
+  .failed_events = [
+    (.observations | to_entries[] |
+      select(.key != "initial_provider_config" and .key != "first_window_identity" and .key != "second_window_identity") |
+      select(.value.status != "ok" or .value.code != "ok") | .key)
+  ]
+' >"${native_evidence}"
 chmod 600 "${native_evidence}"
 
-screenshot="$(jq -er '.screenshot_path' "${desktop_evidence}")"
 usage_evidence="$(jq -er '.usage_path' "${desktop_evidence}")"
+stage_ledger="${OUT}/desktop-evidence/automated-stages.json"
+tool_evidence="${OUT}/desktop-evidence/desktop-tool-evidence.json"
+screenshot_ledger="${OUT}/desktop-evidence/screenshots.json"
+all_screenshot_ledger="${OUT}/all-screenshots.json"
+jq -s '.[0] + .[1]' "${screenshot_ledger}" "${OUT}/ordinary-ui-screenshots.json" >"${all_screenshot_ledger}"
+chmod 600 "${all_screenshot_ledger}"
+
+write_cleanup_runtime_guard "${global_config_before}" "${global_auth_before}" "${shared_18787_before}"
+
 "${MANIFEST}" \
   --native-evidence "${native_evidence}" \
   --desktop-evidence "${desktop_evidence}" \
+  --stage-ledger "${stage_ledger}" \
+  --tool-evidence "${tool_evidence}" \
+  --screenshot-ledger "${all_screenshot_ledger}" \
   --provider-config "${OUT}/providers.json" \
+  --protocol-evidence "${PROTOCOL_EVIDENCE}" \
+  --guard-evidence "${OUT}/cleanup-runtime-guard.json" \
   --app-zip "${APP_ZIP}" \
-  --screenshot "${screenshot}" \
+  --extracted-app "${APP_BUNDLE}" \
   --usage "${usage_evidence}" \
   --provider-events "${OUT}/provider-events.jsonl" \
   --harness "${MANUAL_PROOF}" \
   --scenario "${OUT}/scenario.json" \
   --output "${OUT}/manifest.json" >/dev/null
-jq -e '.phase_b == "PASS" and .failed_events == [] and (.predicate_ledger | all(.[]; . == true))' \
+jq -e '.phase_b == "PASS" and .failed_events == [] and
+  (.predicate_ledger | to_entries | all(.[]; if .key == "post_retry_count" then .value == 0 else .value == true end))' \
   "${OUT}/manifest.json" >/dev/null || fail "phase-b manifest did not derive PASS"
 
-[[ "$(sha256 "${HOME}/.codex/config.toml")" == "${global_config_before}" ]] || fail "global Codex config changed"
-[[ "$(sha256 "${HOME}/.codex/auth.json")" == "${global_auth_before}" ]] || fail "global Codex auth changed"
-[[ "$(listener_snapshot 18787)" == "${shared_18787_before}" ]] || fail "shared 18787 listener changed"
 printf 'RelayKit RC1 native Responses chain passed: %s\n' "${OUT}/manifest.json"

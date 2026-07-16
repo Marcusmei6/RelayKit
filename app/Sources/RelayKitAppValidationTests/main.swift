@@ -946,7 +946,7 @@ func expectOfficialChannelPresentationLabels() throws {
     for required in [
         "Image(systemName: officialCurrentStatusIcon)",
         ".foregroundStyle(officialCurrentStatusColor)",
-        "officialCurrentStatusTitle",
+        "officialSnapshot.status.rawValue",
     ] {
         if !row.contains(required) {
             fatalError("Official provider row does not expose current auth state: \(required)")
@@ -958,6 +958,231 @@ func expectOfficialChannelPresentationLabels() throws {
     if source.components(separatedBy: ".frame(width: 444)").count - 1 != 2 ||
         source.contains(".frame(width: 484)") {
         fatalError("Popover overlays must fit the 480-point compact width")
+    }
+    for required in [
+        "private var tabContent: some View",
+        "case .connect:\n            ScrollView",
+        "connectTab\n                    .padding(18)",
+        "case .usage:\n            ScrollView",
+        "case .settings:\n            ScrollView",
+        "private var officialActionSection: some View",
+        "private var officialSheetDetails: some View",
+        ".frame(maxHeight: officialDetailsExpanded ? 340 : 210)",
+        ".accessibilityIdentifier(\"official-details-scroll-container\")",
+    ] where !source.contains(required) {
+        fatalError("compact overflow contract is missing: \(required)")
+    }
+}
+
+func expectOfficialChannelSnapshots() {
+    let noEvidence = OfficialRouteEvidence(
+        gatewayRunning: false,
+        currentRun: false,
+        loginStatusMatches: false,
+        currentOfficialEventFound: false,
+        currentProviderEventFound: false,
+        appExecutableHashMatches: false,
+        providerConfigHashMatches: false,
+        appProcessMatches: false,
+        gatewayProcessMatches: false
+    )
+    let notConnected = OfficialChannelSnapshot.resolve(loggedIn: false, authInProgress: false, routeEvidence: noEvidence, detail: "fixture")
+    if notConnected.status != .notConnected || notConnected.primaryActionDisabled {
+        fatalError("not connected snapshot regressed")
+    }
+    let pending = OfficialChannelSnapshot.resolve(loggedIn: false, authInProgress: true, routeEvidence: noEvidence, detail: "fixture")
+    if pending.status != .deviceLoginPending || !pending.primaryActionDisabled {
+        fatalError("pending snapshot regressed")
+    }
+    let loginAvailable = OfficialChannelSnapshot.resolve(loggedIn: true, authInProgress: false, routeEvidence: noEvidence, detail: "fixture")
+    if loginAvailable.status != .loginAvailable || !loginAvailable.isConnected || !loginAvailable.primaryActionDisabled {
+        fatalError("login available snapshot regressed")
+    }
+    let currentEvidence = OfficialRouteEvidence(
+        gatewayRunning: true,
+        currentRun: true,
+        loginStatusMatches: true,
+        currentOfficialEventFound: true,
+        currentProviderEventFound: true,
+        appExecutableHashMatches: true,
+        providerConfigHashMatches: true,
+        appProcessMatches: true,
+        gatewayProcessMatches: true
+    )
+    let verified = OfficialChannelSnapshot.resolve(loggedIn: true, authInProgress: false, routeEvidence: currentEvidence, detail: "fixture")
+    if verified.status != .routeVerified || !verified.isConnected || !verified.primaryActionDisabled {
+        fatalError("verified snapshot regressed")
+    }
+    let staleGateway = OfficialRouteEvidence(
+        gatewayRunning: false,
+        currentRun: true,
+        loginStatusMatches: true,
+        currentOfficialEventFound: true,
+        currentProviderEventFound: true,
+        appExecutableHashMatches: true,
+        providerConfigHashMatches: true,
+        appProcessMatches: true,
+        gatewayProcessMatches: true
+    )
+    if OfficialChannelSnapshot.resolve(loggedIn: true, authInProgress: false, routeEvidence: staleGateway, detail: "fixture").status != .loginAvailable {
+        fatalError("stale or stopped gateway must remain login available")
+    }
+    let staleProcess = OfficialRouteEvidence(
+        gatewayRunning: true,
+        currentRun: true,
+        loginStatusMatches: true,
+        currentOfficialEventFound: true,
+        currentProviderEventFound: true,
+        appExecutableHashMatches: true,
+        providerConfigHashMatches: true,
+        appProcessMatches: false,
+        gatewayProcessMatches: true
+    )
+    if OfficialChannelSnapshot.resolve(loggedIn: true, authInProgress: false, routeEvidence: staleProcess, detail: "fixture").status != .loginAvailable {
+        fatalError("process-mismatched route evidence must remain login available")
+    }
+    let staleTimestamp = OfficialRouteEvidence(
+        gatewayRunning: true, currentRun: true, loginStatusMatches: true,
+        currentOfficialEventFound: true, currentProviderEventFound: true,
+        appExecutableHashMatches: true, providerConfigHashMatches: true,
+        appProcessMatches: true, gatewayProcessMatches: true,
+        evidenceFreshForProcesses: false
+    )
+    if OfficialChannelSnapshot.resolve(loggedIn: true, authInProgress: false, routeEvidence: staleTimestamp, detail: "fixture").status != .loginAvailable {
+        fatalError("pre-launch route evidence must remain login available")
+    }
+}
+
+func expectProviderSaveTransactions() throws {
+    enum FixtureError: Error { case injected }
+    var config = Data("original".utf8)
+    var credential: String? = "old-key"
+    let keychainFailure = ProviderSaveTransaction.Dependencies(
+        loadCredential: { _ in
+            guard let credential else { throw FixtureError.injected }
+            return credential
+        },
+        saveCredential: { _, _ in throw FixtureError.injected },
+        deleteCredential: { _ in credential = nil },
+        writeConfig: { config = $0 },
+        readConfig: { config },
+        restoreConfig: { config = $0 ?? Data() },
+        reloadConfig: {}
+    )
+    do {
+        try ProviderSaveTransaction.commit(
+            proposedConfig: Data("new".utf8), originalConfig: config,
+            credential: .init(service: "fixture", value: "new-key"), dependencies: keychainFailure
+        )
+        fatalError("injected Keychain failure unexpectedly committed")
+    } catch {
+        if config != Data("original".utf8) || credential != "old-key" {
+            fatalError("Keychain failure changed config or credential")
+        }
+    }
+
+    config = Data("original".utf8)
+    credential = nil
+    let addWriteFailure = ProviderSaveTransaction.Dependencies(
+        loadCredential: { _ in nil },
+        saveCredential: { _, value in credential = value },
+        deleteCredential: { _ in credential = nil },
+        writeConfig: { _ in throw FixtureError.injected },
+        readConfig: { config },
+        restoreConfig: { config = $0 ?? Data() },
+        reloadConfig: {}
+    )
+    do {
+        try ProviderSaveTransaction.commit(
+            proposedConfig: Data("new".utf8), originalConfig: config,
+            credential: .init(service: "fixture", value: "new-key"), dependencies: addWriteFailure
+        )
+        fatalError("injected add write failure unexpectedly committed")
+    } catch {
+        if config != Data("original".utf8) || credential != nil {
+            fatalError("add write failure did not roll back config and new credential")
+        }
+    }
+
+    config = Data("original".utf8)
+    credential = "old-key"
+    let updateReadbackFailure = ProviderSaveTransaction.Dependencies(
+        loadCredential: { _ in
+            guard let credential else { throw FixtureError.injected }
+            return credential
+        },
+        saveCredential: { _, value in credential = value },
+        deleteCredential: { _ in credential = nil },
+        writeConfig: { config = $0 },
+        readConfig: { Data("mismatch".utf8) },
+        restoreConfig: { config = $0 ?? Data() },
+        reloadConfig: {}
+    )
+    do {
+        try ProviderSaveTransaction.commit(
+            proposedConfig: Data("new".utf8), originalConfig: config,
+            credential: .init(service: "fixture", value: "new-key"), dependencies: updateReadbackFailure
+        )
+        fatalError("injected update readback failure unexpectedly committed")
+    } catch {
+        if config != Data("original".utf8) || credential != "old-key" {
+            fatalError("update readback failure did not restore original config and key")
+        }
+    }
+
+    config = Data("original".utf8)
+    credential = "old-key"
+    var reloadCount = 0
+    let updateReloadFailure = ProviderSaveTransaction.Dependencies(
+        loadCredential: { _ in credential },
+        saveCredential: { _, value in credential = value },
+        deleteCredential: { _ in credential = nil },
+        writeConfig: { config = $0 },
+        readConfig: { config },
+        restoreConfig: { config = $0 ?? Data() },
+        reloadConfig: {
+            reloadCount += 1
+            if reloadCount == 1 { throw FixtureError.injected }
+        }
+    )
+    do {
+        try ProviderSaveTransaction.commit(
+            proposedConfig: Data("new".utf8), originalConfig: config,
+            credential: .init(service: "fixture", value: "new-key"), dependencies: updateReloadFailure
+        )
+        fatalError("injected update reload failure unexpectedly committed")
+    } catch {
+        if config != Data("original".utf8) || credential != "old-key" || reloadCount != 2 {
+            fatalError("update reload failure did not restore config, key, and runtime reload")
+        }
+    }
+
+    config = Data("original".utf8)
+    credential = "old-key"
+    var rollbackAttempts: [String] = []
+    let allRollbackFailures = ProviderSaveTransaction.Dependencies(
+        loadCredential: { _ in credential },
+        saveCredential: { _, value in
+            if value == "new-key" { credential = value; return }
+            rollbackAttempts.append("credential")
+            throw FixtureError.injected
+        },
+        deleteCredential: { _ in rollbackAttempts.append("delete") },
+        writeConfig: { _ in throw FixtureError.injected },
+        readConfig: { config },
+        restoreConfig: { _ in rollbackAttempts.append("config"); throw FixtureError.injected },
+        reloadConfig: { rollbackAttempts.append("reload"); throw FixtureError.injected }
+    )
+    do {
+        try ProviderSaveTransaction.commit(
+            proposedConfig: Data("new".utf8), originalConfig: config,
+            credential: .init(service: "fixture", value: "new-key"), dependencies: allRollbackFailures
+        )
+        fatalError("injected rollback failures unexpectedly committed")
+    } catch {
+        if rollbackAttempts != ["config", "credential", "reload"] {
+            fatalError("rollback did not attempt every independent compensation: \(rollbackAttempts)")
+        }
     }
 }
 
@@ -1157,6 +1382,8 @@ expectProviderFormPresentationLabels()
 expectExplicitUpstreamProtocolSelectionWins()
 expectRedactedProviderSaveAndGatewayGuidance()
 try expectOfficialChannelPresentationLabels()
+expectOfficialChannelSnapshots()
+try expectProviderSaveTransactions()
 expectOfficialAuthURLSanitizer()
 expectOfficialStatusFormatter()
 expectProviderConnectionLabels()

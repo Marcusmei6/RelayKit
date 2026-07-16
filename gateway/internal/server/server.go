@@ -192,11 +192,7 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) {
 		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "auth_failed")
 		return
 	}
-	client := *s.client
-	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	response, err := client.Do(upstreamRequest)
+	response, err := s.doNativeResponsesRequest(upstreamRequest)
 	if err != nil {
 		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "network_failed")
 		return

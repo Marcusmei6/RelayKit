@@ -213,7 +213,7 @@ Status: public-safe contract implemented for env, Keychain, and key-file referen
 
 ## Phase 7.6: Beta Dogfood Hardening
 
-Status: Gate 0 local Beta Dogfood Hardening is verified for the fixed product candidate. Signed beta remains blocked by Apple approval.
+Status: Gate 0 local Beta Dogfood Hardening is verified for its fixed product candidate. Apple Developer identity and notarization credentials are now prepared, but Signed Beta packaging, notarization, stapling, publishing, and updater work remain outside the current RC1 product-closeout goal.
 
 - Accept dogfood only from the current `dist/RelayKitApp-local.zip` extracted app and a normal LaunchServices lifecycle.
 - Public demo providers prove setup, Keychain, catalog, filtering, and actionable error plumbing only. Real route compatibility requires an ignored local provider input.
@@ -277,7 +277,7 @@ See `docs/agents/README.md` for the assignment header and dispatch rules.
 
 ## Phase 7.9: RC1 Public Proof Remediation
 
-Status: implementation complete; the fresh final matrix passed in `relaykit_test`, independent `relaykit_cr` passed, and `automated_classifier=false` was preserved for local ad-hoc RC1 acceptance; Planner completion awaits frozen-artifact inspection; Signed Beta remains pending real Apple distribution inputs.
+Status: implementation complete for its bound artifact; the fresh final matrix passed in `relaykit_test`, independent `relaykit_cr` passed, and `automated_classifier=false` was preserved for local ad-hoc RC1 acceptance. A newer final-candidate audit is now `needs work`; Signed Beta remains a separate, unexecuted distribution lane.
 
 - The tracked remote-Mac acceptance guide and resume helper are machine-neutral. Real host, account, address, and checkout paths are local environment inputs only; the pre-remediation originals remain in ignored `docs/private/` and `scripts/private/` archives.
 - `scripts/public-boundary-check.sh` scans tracked text for personal home paths, private network addresses, SSH targets, and machine identifiers in addition to existing provider, credential, and sensitive-path gates. Its contract proves ignored and untracked fixture content stays out of scope while forcibly tracked private/build paths fail.
@@ -290,7 +290,7 @@ Status: implementation complete; the fresh final matrix passed in `relaykit_test
 
 ## Phase 7.10: RC1 Native Responses Chain Wave 2
 
-Status: complete for the local ad-hoc RC1 product chain. One fresh App-first plus isolated Codex Desktop A/B/C E2E passed against the frozen artifact; this does not imply Developer ID signing, notarization, public beta readiness, or updater support.
+Status: needs work for the final RC1 candidate. The prior local ad-hoc App-first plus isolated Desktop A/B/C run remains valid evidence for its bound artifact only; it cannot close the new candidate until the compact UI, typed Official state, redirect/SSE limits, provider/Keychain transaction, derived manifest, and one-package final matrix all pass fresh.
 
 - The top-level proof begins with an empty isolated provider destination and uses exact RelayKit PID/window-bound AX to save provider name, loopback URL, synthetic key, model, and `openai_responses`. It rejects completed provider injection, `key_file`, and curl-only proof.
 - Saved config must contain `api_format=openai_responses` and a Keychain reference only. The same extracted App must relaunch and expose the restored protocol, URL, model, and saved-key state before its bundled Gateway is started through the UI.

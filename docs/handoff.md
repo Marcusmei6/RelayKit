@@ -54,7 +54,9 @@ Also run the scans listed in `docs/public-boundary-checklist.md`.
 
 ## RC1 Public Proof Handoff
 
-### Native Responses Chain Wave 2 closeout
+### Native Responses Chain Wave 2 final-candidate work
+
+Current status is `needs work`. The evidence below describes the previously accepted local artifact and must not be reused as final-candidate proof. The next closeout must bind one newly frozen package to compact UI screenshots, two fresh ordinary-popover preflights, App UI provider/Keychain persistence, and one isolated Desktop A/B/C run, then derive its manifest only after cleanup and global/runtime guards pass.
 
 The final local ad-hoc RC1 candidate completed one fresh App-first plus isolated Codex Desktop native Responses run. Run `rc1-native-20260716T111701Z-external-sandbox` is bound to `dist/RelayKitApp-local.zip` SHA-256 `abf74744aedbe699e20b37064802d8753e40424d8886e68d2c32954eadec776a` and the byte-identical extracted App under `dist/verify-release-10c63cd5/RelayKitApp.app`.
 
@@ -89,7 +91,7 @@ Both proofs fail if `19777` is already occupied, preserve the listener snapshot 
 
 The tracked remote-Mac acceptance material is now portable and requires explicit local `RELAYKIT_ACCEPTANCE_HOST`. The machine-specific originals remain ignored archives and must not be staged or regenerated.
 
-Signed Beta remains pending real Apple distribution inputs. Developer ID signing, notarization, stapling, updater runtime, and publishing are incomplete.
+Developer ID identity and the notarization credential profile are prepared, but this RC1 product-closeout goal does not create a signed artifact or perform notarization, stapling, publishing, or updater work.
 
 ## Proof Layers
 
@@ -118,22 +120,16 @@ Current release status:
 - open-source public-safe: ready.
 - local beta packaging pipeline: ready.
 - Desktop native Responses proof: complete for the current local artifact through the fresh A/B/C run above. The earlier four-stage standard route proof is a separate evidence layer; neither makes the artifact a signed beta.
-- signed beta scaffolding: present, blocked until real Apple distribution inputs exist.
-- signed beta: blocked by Apple Developer Program approval.
+- signed beta scaffolding and local Apple distribution inputs: present.
+- signed beta: not executed in the current RC1 product-closeout goal.
 - public release: not complete.
 - updater runtime: deferred until a signed and notarized artifact exists.
 
-Blocked signed beta reason: external Apple approval pending. Current evidence must be preserved:
-
-- Apple Developer Account still shows membership pending /待处理.
-- Certificates page shows Access Unavailable.
-- `security find-identity -p codesigning -v | grep "Developer ID Application"` has no output on this Mac.
-- `./script/package_signed_release.sh` exits 64 when `RELAYKIT_SIGNING_IDENTITY`, `RELAYKIT_NOTARYTOOL_PROFILE`, or `RELAYKIT_APPLE_TEAM_ID` is missing.
-- `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip`, its `.sha256`, and `dist/RelayKitApp-notary.zip` must not exist after that failure.
+Signed Beta boundary: Developer ID and notary-profile readiness no longer block future distribution work. This goal deliberately stops before `package_signed_release.sh`, notarization submission, stapling, Gatekeeper validation, GitHub Release creation, or updater metadata, so no Signed Beta completion claim or new signed artifact is allowed here.
 
 Do not describe the local ad-hoc package as a signed beta. Do not mock notarization success.
 
-The completed local hardening objective is `RelayKit Beta Dogfood Hardening`: make the local ad-hoc beta usable, diagnosable, and feedback-ready without Developer ID signing. While Apple approval is pending, do not implement updater runtime, Sparkle, Tauri updater, real signing, notarization, publishing, global Codex config/auth mutation, shared `18787` takeover, or legacy `agent-local-gateway` control in this lane.
+The completed local hardening objective is `RelayKit Beta Dogfood Hardening`: make the local ad-hoc beta usable, diagnosable, and feedback-ready independently of the distribution lane. During the current RC1 closeout, do not implement updater runtime, Sparkle, Tauri updater, signing, notarization, publishing, global Codex config/auth mutation, shared `18787` takeover, or legacy `agent-local-gateway` control.
 
 Current dogfood status:
 
@@ -208,7 +204,7 @@ Manual compatibility rerun contract:
 4. Return to the proof terminal and press Enter after each stage. GUI completion requires process-bound screenshots, fresh completed/200 usage for both lanes, a matched function call plus output, correct Markdown/tool rendering, and no raw XML/`function_calls`.
 5. The tool checkpoint regenerates current-run rollout evidence before evaluation and combines matching exit-zero evidence with the visible tool command/marker; localized Desktop success text is not treated as route success by itself.
 
-Apple approval resume checklist:
+Future Signed Beta checklist:
 
 1. Confirm `security find-identity -p codesigning -v | grep "Developer ID Application"` finds the Developer ID Application identity.
 2. Store notarization credentials with `xcrun notarytool store-credentials` outside git.

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3044,6 +3045,119 @@ func TestNativeOpenAIResponsesStreamsEventsAndReportsTruncation(t *testing.T) {
 		if !strings.Contains(terminalBody, "event: response."+terminal) || !strings.Contains(terminalBody, `"model":"public/native"`) || strings.Contains(terminalBody, "response.error") {
 			t.Fatalf("%s stream = %s", terminal, terminalBody)
 		}
+	}
+}
+
+func TestNativeResponsesRejectsRedirectWithoutFollowing(t *testing.T) {
+	for _, redirectStatus := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(fmt.Sprintf("status %d", redirectStatus), func(t *testing.T) {
+			var sourcePosts, targetHits atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetHits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"id":"resp_redirected","object":"response","status":"completed","output":[]}`)
+			}))
+			defer target.Close()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					sourcePosts.Add(1)
+				}
+				w.Header().Set("Location", target.URL+"/responses")
+				w.WriteHeader(redirectStatus)
+			}))
+			defer upstream.Close()
+
+			h, err := New(writeNativeResponsesConfig(t, upstream.URL, "public/native"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRejected := func(transport string, call func() string) {
+				t.Helper()
+				sourcePosts.Store(0)
+				targetHits.Store(0)
+				if body := call(); !strings.Contains(body, "upstream_error") {
+					t.Fatalf("%s redirect response = %s", transport, body)
+				}
+				if sourcePosts.Load() != 1 || targetHits.Load() != 0 {
+					t.Fatalf("%s source posts=%d target hits=%d", transport, sourcePosts.Load(), targetHits.Load())
+				}
+			}
+			assertRejected("http", func() string {
+				req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"public/native","input":"redirect"}`))
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusBadGateway {
+					t.Fatalf("http status = %d, body = %s", rec.Code, rec.Body.String())
+				}
+				return rec.Body.String()
+			})
+			assertRejected("sse", func() string {
+				req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"public/native","input":"redirect","stream":true}`))
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusBadGateway {
+					t.Fatalf("sse status = %d, body = %s", rec.Code, rec.Body.String())
+				}
+				return rec.Body.String()
+			})
+			assertRejected("websocket", func() string {
+				srv := httptest.NewServer(h)
+				defer srv.Close()
+				conn, reader := openTestWebSocket(t, srv.URL, "/v1/responses")
+				defer conn.Close()
+				writeTestWebSocketText(t, conn, `{"model":"public/native","input":"redirect"}`)
+				events := readNativeWebSocketAllEvents(t, reader)
+				body, err := json.Marshal(events)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(body)
+			})
+		})
+	}
+}
+
+func TestForwardNativeResponsesSSEByteBudget(t *testing.T) {
+	terminal := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_budget\",\"object\":\"response\",\"model\":\"native-upstream\",\"status\":\"completed\",\"output\":[]}}\n\n"
+	created := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_budget\",\"model\":\"native-upstream\",\"status\":\"in_progress\",\"output\":[]}}\n\n"
+	smallEvent := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"" + strings.Repeat("x", 4096) + "\"}\n\n"
+	if len(terminal) > maximumNativeResponsesSSEBytes {
+		t.Fatal("terminal fixture exceeds SSE budget")
+	}
+	exactBoundary := strings.Repeat("\n", maximumNativeResponsesSSEBytes-len(terminal)) + terminal
+	manySmallEventsOver := strings.Repeat(smallEvent, maximumNativeResponsesSSEBytes/len(smallEvent)+1)
+	singleEventOver := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"" + strings.Repeat("x", maximumNativeResponsesSSEBytes) + "\"}\n\n"
+
+	for _, tc := range []struct {
+		name          string
+		stream        string
+		wantTerminal  bool
+		wantErrorKind string
+	}{
+		{"many small events over total", manySmallEventsOver, false, "upstream_stream_error"},
+		{"single event over", singleEventOver, false, "upstream_stream_error"},
+		{"exact boundary", exactBoundary, true, ""},
+		{"normal terminal", terminal, true, ""},
+		{"truncated", created, false, "upstream_stream_truncated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sent []string
+			result := forwardNativeResponsesSSE(strings.NewReader(tc.stream), "public/native", func(event string, _ []byte) bool {
+				sent = append(sent, event)
+				return true
+			})
+			if result.Terminal != tc.wantTerminal || result.ErrorKind != tc.wantErrorKind {
+				t.Fatalf("result = %+v, want terminal=%t error=%q", result, tc.wantTerminal, tc.wantErrorKind)
+			}
+			if tc.wantTerminal && len(sent) == 0 {
+				t.Fatal("terminal event was not forwarded")
+			}
+			if tc.wantErrorKind != "" && (len(sent) == 0 || sent[len(sent)-1] != "response.error") {
+				t.Fatalf("error event not forwarded: %v", sent)
+			}
+		})
 	}
 }
 

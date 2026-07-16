@@ -27,8 +27,8 @@ Status summary:
 - open-source public-safe: ready.
 - local beta packaging pipeline: ready.
 - local ad-hoc RC1 public proof: accepted; the final matrix and fresh Test/independent CR gates passed.
-- signed beta scaffolding: present, blocked until real Apple distribution inputs exist.
-- signed beta: blocked by Apple Developer Program approval.
+- signed beta scaffolding and local Apple distribution inputs: present.
+- signed beta: not executed in the current RC1 product-closeout goal.
 - public release: not complete.
 - updater runtime: deferred until a signed and notarized artifact exists.
 
@@ -40,9 +40,9 @@ RC1 public-proof status is separate from the older local-beta result. The final 
 
 That profile builds one local package, then reuses its extracted `dist/verify-release/RelayKitApp.app` for the menu smoke, loopback-only native Responses proof, and abrupt-parent helper lifecycle proof. It does not use a real provider, send a paid Desktop request, run the four-stage Desktop scenario, sign with Developer ID, notarize, publish, or update shared Codex/LaunchAgent state.
 
-Signed Beta still requires real Apple distribution inputs. Developer ID signing, notarization, stapling, updater runtime, and publishing are incomplete.
+Developer ID identity and the notarization credential profile are prepared. Developer ID signing, notarization, stapling, publishing, and updater runtime are intentionally not executed by the current RC1 product-closeout goal.
 
-Current signed beta blocker: external Apple approval pending. Apple Developer Account still shows membership pending /待处理, the Certificates page shows Access Unavailable, this Mac has no Developer ID Application identity, and `./script/package_signed_release.sh` correctly exits 64 without Apple signing inputs. Do not delete or overwrite this evidence, do not describe `dist/RelayKitApp-local.zip` as a signed beta, and do not mock notarization success.
+Current Signed Beta boundary: Apple approval is no longer the blocker, but no new signed artifact, notarization submission, stapling result, Gatekeeper result, or GitHub Release is produced by this goal. Do not describe `dist/RelayKitApp-local.zip` as a signed beta and do not infer distribution completion from credential readiness.
 
 Headless build and release commands:
 
@@ -123,7 +123,7 @@ Expected signed beta output:
 
 If the credentials are missing, the script must print `missing Developer ID signing identity / notarization credentials` and must not create or reuse a signed zip.
 
-Apple approval resume checklist:
+Future Signed Beta checklist:
 
 1. Confirm a Developer ID Application identity:
 

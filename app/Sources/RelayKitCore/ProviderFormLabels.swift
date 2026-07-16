@@ -1,5 +1,102 @@
 import Foundation
 
+public struct OfficialRouteEvidence: Equatable, Sendable {
+    public let gatewayRunning: Bool
+    public let currentRun: Bool
+    public let loginStatusMatches: Bool
+    public let currentOfficialEventFound: Bool
+    public let currentProviderEventFound: Bool
+    public let appExecutableHashMatches: Bool
+    public let providerConfigHashMatches: Bool
+    public let appProcessMatches: Bool
+    public let gatewayProcessMatches: Bool
+    public let evidenceFreshForProcesses: Bool
+
+    public init(
+        gatewayRunning: Bool,
+        currentRun: Bool,
+        loginStatusMatches: Bool,
+        currentOfficialEventFound: Bool,
+        currentProviderEventFound: Bool,
+        appExecutableHashMatches: Bool,
+        providerConfigHashMatches: Bool,
+        appProcessMatches: Bool,
+        gatewayProcessMatches: Bool,
+        evidenceFreshForProcesses: Bool = true
+    ) {
+        self.gatewayRunning = gatewayRunning
+        self.currentRun = currentRun
+        self.loginStatusMatches = loginStatusMatches
+        self.currentOfficialEventFound = currentOfficialEventFound
+        self.currentProviderEventFound = currentProviderEventFound
+        self.appExecutableHashMatches = appExecutableHashMatches
+        self.providerConfigHashMatches = providerConfigHashMatches
+        self.appProcessMatches = appProcessMatches
+        self.gatewayProcessMatches = gatewayProcessMatches
+        self.evidenceFreshForProcesses = evidenceFreshForProcesses
+    }
+
+    public var isVerified: Bool {
+        gatewayRunning && currentRun && loginStatusMatches && currentOfficialEventFound &&
+            currentProviderEventFound && appExecutableHashMatches && providerConfigHashMatches &&
+            appProcessMatches && gatewayProcessMatches && evidenceFreshForProcesses
+    }
+}
+
+public struct OfficialChannelSnapshot: Equatable, Sendable {
+    public enum Status: String, Sendable {
+        case notConnected = "not connected"
+        case deviceLoginPending = "device login pending"
+        case loginAvailable = "login available"
+        case routeVerified = "route verified"
+    }
+
+    public let status: Status
+    public let detail: String
+    public let authInProgress: Bool
+
+    public init(status: Status, detail: String, authInProgress: Bool = false) {
+        self.status = status
+        self.detail = detail
+        self.authInProgress = authInProgress
+    }
+
+    public var isConnected: Bool {
+        status == .loginAvailable || status == .routeVerified
+    }
+
+    public var primaryActionDisabled: Bool {
+        authInProgress || isConnected
+    }
+
+    public var primaryActionLabel: String {
+        switch status {
+        case .routeVerified: "Route verified"
+        case .loginAvailable: "Logged in"
+        case .notConnected, .deviceLoginPending: ProviderFormLabels.officialChannelActionLabels[0]
+        }
+    }
+
+    public static func resolve(
+        loggedIn: Bool,
+        authInProgress: Bool,
+        routeEvidence: OfficialRouteEvidence,
+        detail: String
+    ) -> OfficialChannelSnapshot {
+        let status: Status
+        if authInProgress {
+            status = .deviceLoginPending
+        } else if !loggedIn {
+            status = .notConnected
+        } else if routeEvidence.isVerified {
+            status = .routeVerified
+        } else {
+            status = .loginAvailable
+        }
+        return OfficialChannelSnapshot(status: status, detail: detail, authInProgress: authInProgress)
+    }
+}
+
 public enum ProviderFormLabels {
     public struct UpstreamProtocolOption: Equatable, Sendable {
         public let id: String

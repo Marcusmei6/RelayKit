@@ -1,16 +1,10 @@
 import AppKit
+import CryptoKit
 import Foundation
 import RelayKitCore
 
 @MainActor
 final class AppModel: ObservableObject {
-    private enum OfficialAuthState {
-        static let notConnected = "not connected"
-        static let deviceLoginPending = "device login pending"
-        static let loginAvailable = "login available"
-        static let routeVerified = "route verified"
-    }
-
     @Published var providerConfigPath: String {
         didSet {
             if persistsProviderConfigPath {
@@ -57,8 +51,12 @@ final class AppModel: ObservableObject {
     }
     @Published var launchAtLoginStatus = "not registered"
     @Published var proofCheckInProgress = false
-    @Published var officialAuthStatus = OfficialAuthState.notConnected
+    @Published var officialAuthStatus = OfficialChannelSnapshot.Status.notConnected.rawValue
     @Published var officialAuthDetail = "No current isolated Codex login."
+    @Published private(set) var officialSnapshot = OfficialChannelSnapshot(
+        status: .notConnected,
+        detail: "No current isolated Codex login."
+    )
     @Published var officialAuthURL = ""
     @Published var officialDeviceCode = ""
     @Published var officialDeviceCodeCopied = false
@@ -76,6 +74,8 @@ final class AppModel: ObservableObject {
     private var persistsProviderConfigPath = true
     private let settingsStore = AppSettingsStore()
     private let loginItemService = LoginItemService()
+    private let appStartedAt = Date()
+    private var gatewayStartedAt: Date?
     private var officialAuthProcess: Process?
     private var usesSmokeModelHealthFixture = false
 
@@ -132,17 +132,22 @@ final class AppModel: ObservableObject {
                 parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
             )
             gatewayStatus = "running"
+            gatewayStartedAt = Date()
             message = "Gateway started on 127.0.0.1:19777"
+            refreshOfficialGatewayProjection()
         } catch {
             gatewayStatus = "error"
             message = error.localizedDescription
+            refreshOfficialGatewayProjection()
         }
     }
 
     func stopGateway() {
         gateway.stop()
+        gatewayStartedAt = nil
         gatewayStatus = "stopped"
         message = "Gateway stopped"
+        refreshOfficialGatewayProjection()
     }
 
     func restartGateway() {
@@ -263,16 +268,17 @@ final class AppModel: ObservableObject {
 
     func connectOfficial() {
         guard !officialAuthInProgress else { return }
-        guard officialAuthStatus != OfficialAuthState.loginAvailable,
-              officialAuthStatus != OfficialAuthState.routeVerified else {
+        guard !officialSnapshot.isConnected else {
             message = "Official login is already connected; disconnect first to sign in again."
             return
         }
         do {
             try ensureOfficialAuthDirs()
             officialAuthInProgress = true
-            officialAuthStatus = OfficialAuthState.deviceLoginPending
-            officialAuthDetail = "Waiting for Codex device authorization in RelayKit isolated storage."
+            updateOfficialSnapshot(
+                loggedIn: false,
+                detail: "Waiting for Codex device authorization in RelayKit isolated storage."
+            )
             officialAuthURL = ""
             officialDeviceCode = ""
             officialDeviceCodeCopied = false
@@ -298,8 +304,7 @@ final class AppModel: ObservableObject {
                     self?.officialAuthProcess = nil
                     self?.officialAuthInProgress = false
                     if process?.terminationStatus != 0 {
-                        self?.officialAuthStatus = OfficialAuthState.notConnected
-                        self?.officialAuthDetail = "Device authorization did not complete."
+                        self?.updateOfficialSnapshot(loggedIn: false, detail: "Device authorization did not complete.")
                     }
                     self?.refreshOfficialAuthStatus()
                 }
@@ -307,8 +312,7 @@ final class AppModel: ObservableObject {
             message = "Opened official device login"
         } catch {
             officialAuthInProgress = false
-            officialAuthStatus = OfficialAuthState.notConnected
-            officialAuthDetail = error.localizedDescription
+            updateOfficialSnapshot(loggedIn: false, detail: error.localizedDescription)
             message = error.localizedDescription
         }
     }
@@ -321,30 +325,31 @@ final class AppModel: ObservableObject {
                 switch result {
                 case .success(let output):
                     if Self.codexLoginStatusIsLoggedIn(output) {
-                        if Self.officialRouteProofVerified() {
-                            officialAuthStatus = OfficialAuthState.routeVerified
-                            officialAuthDetail = "Current proof verified official and provider routes."
-                        } else {
-                            officialAuthStatus = OfficialAuthState.loginAvailable
-                            officialAuthDetail = "Isolated Codex login is available; run official proof to verify routing."
-                        }
+                        let verified = officialRouteEvidence(
+                            gatewayRunning: gateway.isRunning,
+                            executableHash: Self.fileHash(Bundle.main.executableURL),
+                            providerConfigHash: Self.fileHash(URL(fileURLWithPath: providerConfigPath))
+                        ).isVerified
+                        updateOfficialSnapshot(
+                            loggedIn: true,
+                            detail: verified
+                                ? "Current proof verified official and provider routes."
+                                : "Isolated Codex login is available; current route proof is unavailable or stale."
+                        )
                         officialAuthURL = ""
                         officialDeviceCode = ""
                         officialDeviceCodeCopied = false
                     } else {
-                        officialAuthStatus = OfficialAuthState.notConnected
-                        officialAuthDetail = "Use Connect Official to sign in with Codex device authorization."
+                        updateOfficialSnapshot(loggedIn: false, detail: "Use Connect Official to sign in with Codex device authorization.")
                         officialAuthURL = ""
                         officialDeviceCode = ""
                         officialDeviceCodeCopied = false
                     }
                 case .failure(let error):
-                    officialAuthStatus = OfficialAuthState.notConnected
-                    officialAuthDetail = error.localizedDescription
+                    updateOfficialSnapshot(loggedIn: false, detail: error.localizedDescription)
                 }
             } catch {
-                officialAuthStatus = OfficialAuthState.notConnected
-                officialAuthDetail = error.localizedDescription
+                updateOfficialSnapshot(loggedIn: false, detail: error.localizedDescription)
             }
         }
     }
@@ -359,8 +364,7 @@ final class AppModel: ObservableObject {
                 try FileManager.default.removeItem(atPath: codexHome)
             }
             try ensureOfficialAuthDirs()
-            officialAuthStatus = OfficialAuthState.notConnected
-            officialAuthDetail = "RelayKit isolated official login was removed."
+            updateOfficialSnapshot(loggedIn: false, detail: "RelayKit isolated official login was removed.")
             officialAuthURL = ""
             officialDeviceCode = ""
             officialDeviceCodeCopied = false
@@ -443,23 +447,18 @@ final class AppModel: ObservableObject {
                 existing = Data(providerConfigText.utf8)
             }
             let pretty = try ProviderConfigDraftWriter.addProvider(draft, to: existing)
-            if draft.credentialKind == "keychain" && !keychainCredential.isEmpty {
-                try KeychainCredentialStore.save(value: keychainCredential, service: draft.credentialReference)
-            }
-            var backupCreated = false
-            if FileManager.default.fileExists(atPath: providerConfigPath) {
-                let backup = providerConfigPath + ".bak." + UUID().uuidString
-                try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
-                backupCreated = true
-            }
-            try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
+            let configURL = URL(fileURLWithPath: providerConfigPath)
+            let originalConfig = FileManager.default.fileExists(atPath: providerConfigPath) ? try Data(contentsOf: configURL) : nil
+            let backupCreated = try createProviderConfigBackupIfNeeded()
+            let gatewayWasRunning = gateway.isRunning
+            try saveProviderTransaction(pretty, originalConfig: originalConfig, draft: draft, keychainCredential: keychainCredential, reloadRunningGateway: gatewayWasRunning)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
             refreshConfiguredProviders(from: pretty)
             let confirmation = ProviderFormLabels.providerAddedMessage(
                 storedKey: draft.credentialKind == "keychain" && !keychainCredential.isEmpty,
                 backupCreated: backupCreated
             )
-            reloadGatewayAfterProviderSave(confirmation: confirmation)
+            message = gatewayWasRunning ? "\(confirmation); gateway reloaded" : confirmation
             return true
         } catch {
             message = error.localizedDescription
@@ -470,6 +469,9 @@ final class AppModel: ObservableObject {
     func updateProvider(_ originalProviderId: String, draft: ProviderConfigDraft, keychainCredential: String = "") -> Bool {
         do {
             let existing = try providerConfigData()
+            let originalConfig = FileManager.default.fileExists(atPath: providerConfigPath)
+                ? try Data(contentsOf: URL(fileURLWithPath: providerConfigPath))
+                : nil
             let json = try JSONSerialization.jsonObject(with: existing)
             guard var root = json as? [String: Any],
                   let providers = root["providers"] as? [[String: Any]] else {
@@ -478,20 +480,13 @@ final class AppModel: ObservableObject {
             root["providers"] = providers.filter { ($0["id"] as? String ?? "") != originalProviderId }
             let filtered = try JSONSerialization.data(withJSONObject: root)
             let pretty = try ProviderConfigDraftWriter.addProvider(draft, to: filtered)
-            if draft.credentialKind == "keychain" && !keychainCredential.isEmpty {
-                try KeychainCredentialStore.save(value: keychainCredential, service: draft.credentialReference)
-            }
-            var backupCreated = false
-            if FileManager.default.fileExists(atPath: providerConfigPath) {
-                let backup = providerConfigPath + ".bak." + UUID().uuidString
-                try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
-                backupCreated = true
-            }
-            try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
+            let backupCreated = try createProviderConfigBackupIfNeeded()
+            let gatewayWasRunning = gateway.isRunning
+            try saveProviderTransaction(pretty, originalConfig: originalConfig, draft: draft, keychainCredential: keychainCredential, reloadRunningGateway: gatewayWasRunning)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
             refreshConfiguredProviders(from: pretty)
             let confirmation = ProviderFormLabels.providerUpdatedMessage(backupCreated: backupCreated)
-            reloadGatewayAfterProviderSave(confirmation: confirmation)
+            message = gatewayWasRunning ? "\(confirmation); gateway reloaded" : confirmation
             return true
         } catch {
             message = error.localizedDescription
@@ -499,15 +494,49 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func reloadGatewayAfterProviderSave(confirmation: String) {
-        guard gateway.isRunning else {
-            message = confirmation
-            return
-        }
-        restartGateway()
-        message = gateway.isRunning
-            ? "\(confirmation); gateway reloaded"
-            : "\(confirmation); gateway reload failed: open Settings and restart gateway"
+    private func createProviderConfigBackupIfNeeded() throws -> Bool {
+        guard FileManager.default.fileExists(atPath: providerConfigPath) else { return false }
+        let backup = providerConfigPath + ".bak." + UUID().uuidString
+        try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
+        return true
+    }
+
+    private func saveProviderTransaction(_ pretty: Data, originalConfig: Data?, draft: ProviderConfigDraft, keychainCredential: String, reloadRunningGateway: Bool) throws {
+        let configURL = URL(fileURLWithPath: providerConfigPath)
+        let credential = draft.credentialKind == "keychain" && !keychainCredential.isEmpty
+            ? ProviderSaveTransaction.CredentialChange(service: draft.credentialReference, value: keychainCredential)
+            : nil
+        try ProviderSaveTransaction.commit(
+            proposedConfig: pretty,
+            originalConfig: originalConfig,
+            credential: credential,
+            dependencies: .init(
+                loadCredential: { try KeychainCredentialStore.loadIfPresent(service: $0) },
+                saveCredential: { service, value in try KeychainCredentialStore.save(value: value, service: service) },
+                deleteCredential: { try KeychainCredentialStore.delete(service: $0) },
+                writeConfig: { try $0.write(to: configURL, options: .atomic) },
+                readConfig: {
+                    let data = try Data(contentsOf: configURL)
+                    let json = try JSONSerialization.jsonObject(with: data)
+                    try ProviderConfigValidator.validate(json)
+                    return data
+                },
+                restoreConfig: { original in
+                    if let original {
+                        try original.write(to: configURL, options: .atomic)
+                    } else if FileManager.default.fileExists(atPath: configURL.path) {
+                        try FileManager.default.removeItem(at: configURL)
+                    }
+                },
+                reloadConfig: {
+                    guard reloadRunningGateway else { return }
+                    self.restartGateway()
+                    guard self.gateway.isRunning else {
+                        throw ProviderConfigError.invalid("Gateway reload failed.")
+                    }
+                }
+            )
+        )
     }
 
     func refreshUsageSummary() async {
@@ -680,18 +709,76 @@ final class AppModel: ObservableObject {
             !output.localizedCaseInsensitiveContains("not logged in")
     }
 
-    private static func officialRouteProofVerified() -> Bool {
+    private func updateOfficialSnapshot(loggedIn: Bool, detail: String) {
+        let evidence = officialRouteEvidence(
+            gatewayRunning: gateway.isRunning,
+            executableHash: Self.fileHash(Bundle.main.executableURL),
+            providerConfigHash: Self.fileHash(URL(fileURLWithPath: providerConfigPath))
+        )
+        officialSnapshot = OfficialChannelSnapshot.resolve(
+            loggedIn: loggedIn,
+            authInProgress: officialAuthInProgress,
+            routeEvidence: evidence,
+            detail: detail
+        )
+        officialAuthStatus = officialSnapshot.status.rawValue
+        officialAuthDetail = officialSnapshot.detail
+    }
+
+    private func refreshOfficialGatewayProjection() {
+        guard officialSnapshot.isConnected else { return }
+        updateOfficialSnapshot(
+            loggedIn: true,
+            detail: gateway.isRunning
+                ? "Isolated Codex login is available; current route proof is unavailable or stale."
+                : "Isolated Codex login is available; start the Gateway to verify the current route."
+        )
+    }
+
+    private func officialRouteEvidence(gatewayRunning: Bool, executableHash: String?, providerConfigHash: String?) -> OfficialRouteEvidence {
         let url = URL(fileURLWithPath: RelayKitPaths.officialRouteEvidencePath())
         guard let data = try? Data(contentsOf: url),
               let object = try? JSONSerialization.jsonObject(with: data),
               let evidence = object as? [String: Any] else {
-            return false
+            return OfficialRouteEvidence(
+                gatewayRunning: gatewayRunning,
+                currentRun: false,
+                loginStatusMatches: false,
+                currentOfficialEventFound: false,
+                currentProviderEventFound: false,
+                appExecutableHashMatches: false,
+                providerConfigHashMatches: false,
+                appProcessMatches: false,
+                gatewayProcessMatches: false,
+                evidenceFreshForProcesses: false
+            )
         }
-        return evidence["usage_scope"] as? String == "current_run" &&
-            evidence["login_status"] as? String == "logged_in" &&
-            evidence["current_official_event_found"] as? Bool == true &&
-            evidence["current_provider_event_found"] as? Bool == true &&
-            evidence["official_route_verified"] as? Bool == true
+        let evidenceModifiedAt = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
+        let evidenceAppHash = evidence["app_executable_sha256"] as? String
+        let evidenceProviderHash = evidence["provider_config_sha256"] as? String
+        let hashesArePresent = executableHash?.isEmpty == false && providerConfigHash?.isEmpty == false &&
+            evidenceAppHash?.isEmpty == false && evidenceProviderHash?.isEmpty == false
+        let freshForProcesses = evidenceModifiedAt.map { modifiedAt in
+            guard let gatewayStartedAt else { return false }
+            return modifiedAt >= appStartedAt && modifiedAt >= gatewayStartedAt
+        } ?? false
+        return OfficialRouteEvidence(
+            gatewayRunning: gatewayRunning,
+            currentRun: evidence["usage_scope"] as? String == "current_run",
+            loginStatusMatches: evidence["login_status"] as? String == "logged_in",
+            currentOfficialEventFound: evidence["current_official_event_found"] as? Bool == true,
+            currentProviderEventFound: evidence["current_provider_event_found"] as? Bool == true,
+            appExecutableHashMatches: hashesArePresent && evidenceAppHash == executableHash,
+            providerConfigHashMatches: hashesArePresent && evidenceProviderHash == providerConfigHash,
+            appProcessMatches: (evidence["app_pid"] as? NSNumber)?.int32Value == ProcessInfo.processInfo.processIdentifier,
+            gatewayProcessMatches: (evidence["gateway_pid"] as? NSNumber)?.int32Value == gateway.processIdentifier,
+            evidenceFreshForProcesses: freshForProcesses
+        )
+    }
+
+    private static func fileHash(_ url: URL?) -> String? {
+        guard let url, let data = try? Data(contentsOf: url) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func consumeOfficialAuthOutput(_ chunk: String) {

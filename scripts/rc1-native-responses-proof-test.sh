@@ -1279,10 +1279,70 @@ grep -Fq 'rc1-native-responses-three-stage' "${SCRIPT}" || fail "proof must dele
 grep -Fq 'rc1-native-responses-proof-fixture.py' "${SCRIPT}" || fail "proof must use the standalone fixture"
 grep -Fq 'rc1-native-responses-manifest.sh' "${SCRIPT}" || fail "proof must derive phase-b from the dedicated manifest"
 grep -Fq 'predicate_ledger' "${SCRIPT}" || fail "proof evidence must expose named predicates"
-	grep -Fq 'failed_events' "${SCRIPT}" || fail "proof evidence must expose failed events"
-	grep -Fq 'manual_status == "route_complete"' "${SCRIPT}" || fail "proof must require a successful manual status"
-	grep -Fq 'route_proof_status == "complete"' "${SCRIPT}" || fail "proof must require a complete route status"
-	grep -Fq 'harness_exit_code == 0' "${SCRIPT}" || fail "proof must require a zero harness exit"
+grep -Fq 'failed_events' "${SCRIPT}" || fail "proof evidence must expose failed events"
+grep -Fq 'manual_status == "route_complete"' "${SCRIPT}" || fail "proof must require a successful manual status"
+grep -Fq 'route_proof_status == "complete"' "${SCRIPT}" || fail "proof must require a complete route status"
+grep -Fq 'harness_exit_code == 0' "${SCRIPT}" || fail "proof must require a zero harness exit"
+
+native_manifest_body="$(sed -n '/native_evidence="${OUT}\/native-app-evidence.json"/,/phase-b manifest did not derive PASS/p' "${SCRIPT}")"
+if rg -q '[A-Za-z0-9_]+:[[:space:]]*true' <<<"${native_manifest_body}"; then
+  fail "native/manifest closeout still contains a hand-written true ledger"
+fi
+for required_input in \
+  '--stage-ledger "${stage_ledger}"' \
+  '--tool-evidence "${tool_evidence}"' \
+  '--screenshot-ledger "${all_screenshot_ledger}"' \
+  '--protocol-evidence "${PROTOCOL_EVIDENCE}"' \
+  '--guard-evidence "${OUT}/cleanup-runtime-guard.json"' \
+  '--extracted-app "${APP_BUNDLE}"'; do
+  grep -Fq -- "${required_input}" <<<"${native_manifest_body}" ||
+    fail "manifest invocation is missing ${required_input}"
+done
+grep -Fq 'run_protocol_validation' "${SCRIPT}" ||
+  fail "proof does not generate fresh protocol validation evidence"
+if grep -Fq 'RELAYKIT_RC1_PROTOCOL_VALIDATION_EVIDENCE' "${SCRIPT}"; then
+  fail "proof still accepts externally supplied protocol validation evidence"
+fi
+for protocol_contract_text in \
+  'producer:"rc1-native-responses-proof"' \
+  'gateway/internal/server/server.go' \
+  'gateway/internal/server/openai_responses.go' \
+  'gateway/internal/server/server_test.go' \
+  'gateway/internal/server/provider_test.go'; do
+  grep -Fq "${protocol_contract_text}" "${SCRIPT}" ||
+    fail "fresh protocol evidence is missing ${protocol_contract_text}"
+done
+
+cleanup_guard_line="$(rg -n '^write_cleanup_runtime_guard "\$\{global_config_before\}"' "${SCRIPT}" | tail -1 | cut -d: -f1)"
+manifest_call_line="$(rg -n '^"\$\{MANIFEST\}" \\' "${SCRIPT}" | tail -1 | cut -d: -f1)"
+[[ -n "${cleanup_guard_line}" && -n "${manifest_call_line}" && "${cleanup_guard_line}" -lt "${manifest_call_line}" ]] ||
+  fail "manifest command is not after cleanup/runtime/git guard generation"
+cleanup_guard_body="$(sed -n '/^write_cleanup_runtime_guard()/,/^}/p' "${SCRIPT}")"
+for cleanup_guard_text in \
+  'stop_app' 'kill -TERM "${helper_pid}"' 'kill -TERM "${fixture_pid}"' \
+  '--delete-dogfood-keychain "${KEYCHAIN_SERVICE}"' 'sha256 "${HOME}/.codex/config.toml"' \
+  'sha256 "${HOME}/.codex/auth.json"' 'listener_snapshot 18787' 'listener_snapshot 19777' \
+  'listener_snapshot "${FIXTURE_PORT}"' 'status --porcelain=v1 --untracked-files=no'; do
+  grep -Fq -- "${cleanup_guard_text}" <<<"${cleanup_guard_body}" ||
+    fail "cleanup guard is missing ${cleanup_guard_text}"
+done
+
+for ui_contract_text in \
+  'relaykit-ui-evidence --pid "${APP_PID}" --window-identity "${identity_path}" --stage "${stage}"' \
+  'capture_ordinary_ui_appearance light' \
+  'capture_ordinary_ui_appearance dark' \
+  'capture_bound_popover "${official_identity}"' \
+  'capture_bound_popover "${provider_identity}"' \
+  'jq -s '\''.[0] + .[1]'\'' "${screenshot_ledger}" "${OUT}/ordinary-ui-screenshots.json"' \
+  '--screenshot-ledger "${all_screenshot_ledger}"'; do
+  grep -Fq -- "${ui_contract_text}" "${SCRIPT}" ||
+    fail "ordinary transient UI evidence contract is missing ${ui_contract_text}"
+done
+ui_capture_body="$(sed -n '/^capture_bound_popover()/,/^}/p' "${SCRIPT}")"
+grep -Fq '/usr/sbin/screencapture -x -l "${window_id}"' <<<"${ui_capture_body}" ||
+  fail "ordinary UI screenshots are not cropped to the exact bound WindowServer surface"
+! grep -Eq 'screencapture.*(-R|OCR|title)' <<<"${ui_capture_body}" ||
+  fail "ordinary UI screenshots added a forbidden coordinate, OCR, or title fallback"
 
 if rg -n 'credential_ref[^\n]*key_file|kind[^\n]*key_file|credential_file=' "${SCRIPT}" >/dev/null; then
   fail "proof must not inject a key-file credential"

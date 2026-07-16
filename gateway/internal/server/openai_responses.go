@@ -25,7 +25,10 @@ type nativeResponsesStreamResult struct {
 	eventType string
 }
 
-const maximumNativeResponsesResponseBytes = 16 << 20
+const (
+	maximumNativeResponsesResponseBytes = 16 << 20
+	maximumNativeResponsesSSEBytes      = 16 << 20
+)
 
 func (s *Server) nativeOpenAIResponses(w http.ResponseWriter, r *http.Request, raw map[string]json.RawMessage, req responsesRequest, provider config.ProviderProfile, model config.Model, start time.Time) {
 	resp, status, failure := s.nativeResponsesUpstream(r.Context(), raw, provider, model, req.Stream)
@@ -133,7 +136,7 @@ func (s *Server) nativeResponsesUpstreamWithAuth(ctx context.Context, raw map[st
 	if err := applyAuth(req, provider); err != nil {
 		return nil, http.StatusBadGateway, &nativeResponsesFailure{kind: "upstream_auth_error", message: "provider credential unavailable"}
 	}
-	resp, err := s.client.Do(req)
+	resp, err := s.doNativeResponsesRequest(req)
 	if err != nil {
 		return nil, http.StatusBadGateway, &nativeResponsesFailure{kind: "upstream_error", message: "upstream request failed"}
 	}
@@ -143,6 +146,14 @@ func (s *Server) nativeResponsesUpstreamWithAuth(ctx context.Context, raw map[st
 		return nil, status, &nativeResponsesFailure{kind: kind, message: message}
 	}
 	return resp, http.StatusOK, nil
+}
+
+func (s *Server) doNativeResponsesRequest(req *http.Request) (*http.Response, error) {
+	client := *s.client
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client.Do(req)
 }
 
 func nativeResponsesRequestBody(raw map[string]json.RawMessage, model string, forceStream bool) ([]byte, error) {
@@ -265,6 +276,18 @@ func validateNativeResponseIdentity(response map[string]json.RawMessage, expecte
 func forwardNativeResponsesSSE(reader io.Reader, publicModel string, send func(event string, data []byte) bool) nativeResponsesStreamResult {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 16<<20)
+	bytesRead := 0
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		advance, token, err = bufio.ScanLines(data, atEOF)
+		if err != nil || advance == 0 {
+			return advance, token, err
+		}
+		bytesRead += advance
+		if bytesRead > maximumNativeResponsesSSEBytes {
+			return 0, nil, fmt.Errorf("native Responses SSE exceeds size limit")
+		}
+		return advance, token, nil
+	})
 	var event string
 	var data []string
 	result := nativeResponsesStreamResult{}

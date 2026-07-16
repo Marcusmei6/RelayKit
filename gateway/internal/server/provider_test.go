@@ -157,6 +157,37 @@ func TestProviderTestPostsNativeResponsesExactlyOnce(t *testing.T) {
 		})
 	}
 
+	for _, redirectStatus := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(fmt.Sprintf("redirect %d", redirectStatus), func(t *testing.T) {
+			var sourcePosts, targetHits atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetHits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"id":"resp_redirected","object":"response","status":"completed","output":[]}`)
+			}))
+			defer target.Close()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					sourcePosts.Add(1)
+				}
+				w.Header().Set("Location", target.URL+"/responses")
+				w.WriteHeader(redirectStatus)
+			}))
+			defer upstream.Close()
+
+			h, err := NewWithUsageLogAndCredentials(writeProviderTestNativeConfig(t, upstream.URL), "", map[string]string{"relaykit.test.snapshot": "snapshot-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/_relaykit/provider-test", strings.NewReader(`{"provider_id":"native","model_id":"public/native"}`))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadGateway || providerTestResultError(t, rec) != "responses_unavailable" || sourcePosts.Load() != 1 || targetHits.Load() != 0 {
+				t.Fatalf("response=%d %s source posts=%d target hits=%d", rec.Code, rec.Body.String(), sourcePosts.Load(), targetHits.Load())
+			}
+		})
+	}
+
 	t.Run("timeout", func(t *testing.T) {
 		started := make(chan struct{})
 		var posts atomic.Int32

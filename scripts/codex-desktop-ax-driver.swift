@@ -170,6 +170,7 @@ private enum DriverCommand: String {
     case relayKitProviderProtocolProbe = "relaykit-provider-protocol-probe"
     case relayKitProviderVerify = "relaykit-provider-verify"
     case relayKitGatewayStart = "relaykit-gateway-start"
+    case relayKitUIEvidence = "relaykit-ui-evidence"
     case relayKitAXInspect = "relaykit-ax-inspect"
     case selfTest = "self-test"
 }
@@ -191,7 +192,8 @@ private func applicationMode(for command: DriverCommand) -> DriverApplicationMod
     case .inspect, .reveal, .ready, .dismissModelNux, .prepare, .submit:
         return .desktop
     case .relayKitProviderConfigure, .relayKitProviderProtocolProbe,
-         .relayKitProviderVerify, .relayKitGatewayStart, .relayKitAXInspect:
+         .relayKitProviderVerify, .relayKitGatewayStart, .relayKitUIEvidence,
+         .relayKitAXInspect:
         return .relayKit
     case .selfTest:
         return nil
@@ -209,6 +211,7 @@ private func redactedCommandName(_ arguments: [String]) -> String {
         "inspect", "reveal", "ready", "dismiss-model-nux", "prepare", "submit", "self-test",
         "relaykit-provider-configure", "relaykit-provider-protocol-probe",
         "relaykit-provider-verify", "relaykit-gateway-start",
+        "relaykit-ui-evidence",
         "relaykit-ax-inspect",
     ])
     return known.contains(raw) ? raw : "unknown"
@@ -240,6 +243,8 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
         ]
     case .relayKitGatewayStart:
         return ["--pid", "--window-identity"]
+    case .relayKitUIEvidence:
+        return ["--pid", "--window-identity", "--stage"]
     case .relayKitAXInspect:
         return ["--pid", "--window-identity", "--diagnostic-output"]
     case .selfTest:
@@ -262,7 +267,7 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
              "protocol-traversal-truncated", "protocol-rerender-single-popup",
              "protocol-rerender-nonpopup", "protocol-rerender-multiple-popups",
              "protocol-rerender-multiple-then-single", "protocol-rerender-wrong-value",
-             "protocol-rerender-traversal-incomplete":
+             "protocol-rerender-traversal-incomplete", "relaykit-identifier-exact":
             return ["--scenario"]
         case "query-permissions":
             return ["--scenario", "--query-file"]
@@ -1068,6 +1073,7 @@ private func verifyBoundWindow(_ context: DriverContext) throws -> BoundWindow {
 
 private struct SemanticRecord {
     let role: String
+    let identifier: String?
     let semanticStrings: Set<String>
     let enabled: Bool
     let writable: Bool
@@ -1516,6 +1522,7 @@ private func semanticRecord(for element: AXUIElement) -> SemanticRecord {
     let pressable = actionNames.firstIndex(of: kAXPressAction as String) != nil
     return SemanticRecord(
         role: role,
+        identifier: copyAXString(element, axIdentifierAttribute),
         semanticStrings: semanticStrings,
         enabled: enabled,
         writable: writable,
@@ -1980,6 +1987,26 @@ private func waitForUniqueSelector(
         }
         if matches.count > 1 || Date() >= deadline {
             throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: matches.count)
+        }
+        Thread.sleep(forTimeInterval: selectorPollSeconds)
+    }
+}
+
+private func waitForSelectorPresence(
+    context: DriverContext,
+    present: SemanticSelector,
+    absent: SemanticSelector? = nil
+) throws {
+    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    while true {
+        let records = try currentNodes(context).map(\.semantic)
+        let presentCount = matchingIndices(in: records, selector: present).count
+        let absentCount = absent.map { matchingIndices(in: records, selector: $0).count } ?? 0
+        if presentCount > 0 && absentCount == 0 {
+            return
+        }
+        if Date() >= deadline {
+            throw DriverFailure("selector_state_not_observed", exitStatus: 5, candidateCount: presentCount)
         }
         Thread.sleep(forTimeInterval: selectorPollSeconds)
     }
@@ -2885,7 +2912,7 @@ private func relayKitIdentifierSelector(
             record.enabled &&
             (!writable || record.writable) &&
             (!pressable || record.pressable) &&
-            exactSemanticMatch(record, accepted: Set([identifier]))
+            record.identifier == identifier
     }
 }
 
@@ -3281,9 +3308,140 @@ private func executeRelayKitGatewayStart(options: [String: String]) throws -> Dr
     )
 }
 
+private let relayKitUIEvidenceStages = Set([
+    "connect",
+    "official-open",
+    "official-expand",
+    "official-scroll",
+    "provider-open",
+    "provider-expand",
+    "provider-scroll",
+])
+
+private func scrollRelayKitContainer(
+    context: DriverContext,
+    identifier: String
+) throws {
+    func hasAncestorIdentifier(_ element: AXUIElement) -> Bool {
+        var current = element
+        for _ in 0..<8 {
+            if copyAXString(current, axIdentifierAttribute) == identifier {
+                return true
+            }
+            guard let parent = copyAXAttribute(current, kAXParentAttribute as CFString) as! AXUIElement? else {
+                return false
+            }
+            current = parent
+        }
+        return false
+    }
+    let nodes = try currentNodes(context)
+    let verticalScrollBars = nodes.filter { node in
+        guard node.semantic.role == kAXScrollBarRole as String,
+              let orientation = copyAXAttribute(node.element, kAXOrientationAttribute as CFString) as? String else {
+            return false
+        }
+        return orientation == kAXVerticalOrientationValue as String
+    }
+    let scrollBars: [AXNode]
+    if identifier == "official-details-scroll-container" {
+        guard nodes.contains(where: { $0.semantic.identifier == identifier }) else {
+            throw DriverFailure("selector_state_not_observed", exitStatus: 5, candidateCount: 0)
+        }
+        scrollBars = verticalScrollBars.filter { hasAncestorIdentifier($0.element) }
+    } else {
+        scrollBars = verticalScrollBars.filter { hasAncestorIdentifier($0.element) }
+    }
+    guard scrollBars.count == 1 else {
+        throw DriverFailure("relaykit_scrollbar_not_unique", exitStatus: 5, candidateCount: scrollBars.count)
+    }
+    let result = setAXAttributeValue(
+        scrollBars[0].element,
+        attribute: kAXValueAttribute as CFString,
+        value: NSNumber(value: 1.0)
+    )
+    guard result == .success,
+          let value = copyAXAttribute(scrollBars[0].element, kAXValueAttribute as CFString) as? NSNumber,
+          value.doubleValue > 0.0 else {
+        throw DriverFailure("relaykit_scroll_failed", exitStatus: 6)
+    }
+    _ = try verifyBoundWindow(context)
+}
+
+private func executeRelayKitUIEvidence(options: [String: String]) throws -> DriverReport {
+    guard let stage = options["--stage"], relayKitUIEvidenceStages.contains(stage) else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let context = try makeContext(options: options, command: .relayKitUIEvidence)
+    let buttons = Set([kAXButtonRole as String])
+    var actionCount = 0
+
+    switch stage {
+    case "connect":
+        try performVerifiedPress(
+            context: context,
+            selector: relayKitIdentifierSelector("tab-connect", roles: buttons, pressable: true)
+        )
+        actionCount = 1
+        try waitForUniqueSelector(context: context, selector: relayKitIdentifierSelector("official-provider-row"))
+        try waitForUniqueSelector(context: context, selector: relayKitIdentifierSelector("provider-add-entry"))
+    case "official-open":
+        try performVerifiedPress(
+            context: context,
+            selector: relayKitIdentifierSelector("official-provider-row", roles: buttons, pressable: true)
+        )
+        actionCount = 1
+        try waitForUniqueSelector(
+            context: context,
+            selector: relayKitIdentifierSelector("official-state-details-collapsed", roles: buttons, pressable: true)
+        )
+    case "official-expand":
+        try performVerifiedPress(
+            context: context,
+            selector: relayKitIdentifierSelector("official-state-details-collapsed", roles: buttons, pressable: true)
+        )
+        actionCount = 1
+        try waitForSelectorPresence(
+            context: context,
+            present: relayKitIdentifierSelector("official-state-details-expanded"),
+            absent: relayKitIdentifierSelector("official-state-details-collapsed")
+        )
+    case "official-scroll":
+        try scrollRelayKitContainer(context: context, identifier: "official-details-scroll-container")
+        actionCount = 1
+    case "provider-open":
+        try performVerifiedPress(
+            context: context,
+            selector: relayKitIdentifierSelector("provider-add-entry", roles: buttons, pressable: true)
+        )
+        actionCount = 1
+        try waitForUniqueSelector(context: context, selector: relayKitIdentifierSelector("provider-advanced-toggle-row"))
+    case "provider-expand":
+        try performVerifiedPress(
+            context: context,
+            selector: relayKitIdentifierSelector("provider-advanced-toggle-row", roles: buttons, pressable: true)
+        )
+        actionCount = 1
+        try waitForUniqueSelector(context: context, selector: relayKitIdentifierSelector("provider-upstream-protocol-selector"))
+    case "provider-scroll":
+        try scrollRelayKitContainer(context: context, identifier: "provider-form-container")
+        actionCount = 1
+    default:
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+
+    return .success(
+        command: "relaykit-ui-evidence",
+        windowVerified: true,
+        candidateCount: 1,
+        actionCount: actionCount
+    )
+}
+
 private func syntheticRecord(_ value: String) -> SemanticRecord {
     SemanticRecord(
         role: kAXPopUpButtonRole as String,
+        identifier: nil,
         semanticStrings: Set([value]),
         enabled: true,
         writable: false,
@@ -3294,6 +3452,7 @@ private func syntheticRecord(_ value: String) -> SemanticRecord {
 private func syntheticButton(_ value: String?) -> SemanticRecord {
     SemanticRecord(
         role: kAXButtonRole as String,
+        identifier: nil,
         semanticStrings: value.map { Set([$0]) } ?? [],
         enabled: true,
         writable: false,
@@ -3304,6 +3463,7 @@ private func syntheticButton(_ value: String?) -> SemanticRecord {
 private func syntheticHeading(_ value: String) -> SemanticRecord {
     SemanticRecord(
         role: kAXHeadingRole as String,
+        identifier: nil,
         semanticStrings: Set([value]),
         enabled: true,
         writable: false,
@@ -3535,6 +3695,32 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
             targetPath: target
         )
         throw DriverFailure("internal_error", exitStatus: 70)
+    case "relaykit-identifier-exact":
+        let target = "official-provider-row"
+        let records = [
+            SemanticRecord(
+                role: kAXButtonRole as String,
+                identifier: target,
+                semanticStrings: Set(["OpenAI Official / Codex Official"]),
+                enabled: true,
+                writable: false,
+                pressable: true
+            ),
+            SemanticRecord(
+                role: kAXButtonRole as String,
+                identifier: "other-button",
+                semanticStrings: Set([target]),
+                enabled: true,
+                writable: false,
+                pressable: true
+            ),
+        ]
+        let matches = matchingIndices(
+            in: records,
+            selector: relayKitIdentifierSelector(target, roles: Set([kAXButtonRole as String]), pressable: true)
+        )
+        _ = try requireUniqueIndex(matches)
+        return .success(command: "self-test", candidateCount: matches.count, actionCount: 0)
     case "exact":
         let target = "Official GPT-5.5"
         let records = [syntheticRecord(target), syntheticRecord("Official GPT-5.5 Extended")]
@@ -3588,8 +3774,8 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
         let matches = matchingIndices(in: records, selector: modelPickerSelector(catalogLabels: labels))
         _ = try requireUniqueIndex(matches)
         let categoryRecords = [
-            SemanticRecord(role: kAXMenuItemRole as String, semanticStrings: Set(["模型 5.5"]), enabled: true, writable: false, pressable: true),
-            SemanticRecord(role: kAXMenuItemRole as String, semanticStrings: Set(["模型 15.5"]), enabled: true, writable: false, pressable: true),
+            SemanticRecord(role: kAXMenuItemRole as String, identifier: nil, semanticStrings: Set(["模型 5.5"]), enabled: true, writable: false, pressable: true),
+            SemanticRecord(role: kAXMenuItemRole as String, identifier: nil, semanticStrings: Set(["模型 15.5"]), enabled: true, writable: false, pressable: true),
         ]
         let categoryMatches = matchingIndices(in: categoryRecords, selector: modelCategorySelector(catalogLabels: labels))
         _ = try requireUniqueIndex(categoryMatches)
@@ -3599,6 +3785,7 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
             syntheticHeading("GPT-5.6 Sol 简介"),
             SemanticRecord(
                 role: kAXStaticTextRole as String,
+                identifier: nil,
                 semanticStrings: Set(["GPT-5.6 Sol 简介"]),
                 enabled: true,
                 writable: false,
@@ -3641,6 +3828,7 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
         let browserLoginRecords = [
             SemanticRecord(
                 role: kAXStaticTextRole as String,
+                identifier: nil,
                 semanticStrings: Set(["请继续在浏览器中登录"]),
                 enabled: true,
                 writable: false,
@@ -4121,6 +4309,8 @@ private func execute(_ parsed: ParsedArguments) throws -> DriverReport {
         return try executeRelayKitProviderVerify(options: parsed.options)
     case .relayKitGatewayStart:
         return try executeRelayKitGatewayStart(options: parsed.options)
+    case .relayKitUIEvidence:
+        return try executeRelayKitUIEvidence(options: parsed.options)
     case .relayKitAXInspect:
         return try executeRelayKitAXInspect(options: parsed.options)
     case .selfTest:
