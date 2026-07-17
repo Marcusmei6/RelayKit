@@ -141,6 +141,10 @@ popover_press_line="$(grep -n 'perform action "AXPress" of statusItem' <<<"${pop
 [[ -n "${popover_probe_line}" && -n "${popover_press_line}" && "${popover_probe_line}" -lt "${popover_press_line}" ]] ||
   fail "RelayKit launch must observe an auto-opened popover before toggling the status item"
 relaykit_launch_body="$(sed -n '/^launch_isolated_relaykit_app() {/,/^}/p' "${PROOF_SCRIPT}")"
+grep -Fq 'RELAYKIT_APP_LAUNCH_TIMEOUT_SECONDS:-30' <<<"${relaykit_launch_body}" ||
+  fail "signed App launch must allow a bounded cold-start wait"
+grep -Fq 'app_launch_timeout_seconds >= 15 && app_launch_timeout_seconds <= 60' <<<"${relaykit_launch_body}" ||
+  fail "signed App launch wait must remain bounded"
 if grep -Eq 'CFFIXED_USER_HOME|--env "HOME=|(^|[[:space:]])HOME=' <<<"${relaykit_launch_body}"; then
   fail "manual proof must preserve the real macOS home so Security.framework can use the login Keychain"
 fi

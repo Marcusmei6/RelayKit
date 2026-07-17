@@ -1726,8 +1726,14 @@ launch_isolated_relaykit_app() {
     --ui-smoke-provider-config "${PROVIDER_CONFIG}" \
     --ui-smoke-usage-log "${USAGE_PATH}"
 
-  local app_pid=""
-  for _ in {1..100}; do
+  local app_pid="" app_launch_timeout_seconds app_launch_attempts attempt
+  app_launch_timeout_seconds="${RELAYKIT_APP_LAUNCH_TIMEOUT_SECONDS:-30}"
+  case "${app_launch_timeout_seconds}" in
+    ''|*[!0-9]*) app_launch_timeout_seconds=30 ;;
+  esac
+  (( app_launch_timeout_seconds >= 15 && app_launch_timeout_seconds <= 60 )) || app_launch_timeout_seconds=30
+  app_launch_attempts=$((app_launch_timeout_seconds * 10))
+  for ((attempt = 1; attempt <= app_launch_attempts; attempt++)); do
     app_pid="$(find_relaykit_app_pid || true)"
     [[ -n "${app_pid}" ]] && break
     sleep 0.1

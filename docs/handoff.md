@@ -4,6 +4,20 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Signed Beta v0.1.0 Current Candidate
+
+Status: **incomplete**. The fixed Developer ID / notarized artifact is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `55a11eb435d4a0170942e34b28670755dfa164e6c1d74f5f6935eb96051b1587`. Its signed-package dogfood passed twice from fresh extracted Apps; those runs prove LaunchServices startup, provider persistence, Keychain masked state, gateway lifecycle, right-click Quit, and `19777` release.
+
+The current blocker is the final isolated Desktop route gate, not signing, notarization, or ordinary App dogfood. In the latest fresh signed-artifact attempts, Official plain text and Markdown each reached one submitted Desktop stage with fresh completed/200 usage and process-bound rendering evidence. The Official shell/tool stage also reached completed/200 transport, but did not produce a native `function_call`, matching `function_call_output`, or exit-zero tool output. It remains incomplete and is not route success. The stricter existing shell-tool wording reproduced the same result.
+
+The focused diagnostic is `dist/signed-beta-v0.1.0/official-tool-nondeterminism-diagnostic/evidence.json`. It proves that the failed Official GUI request used `responses_websocket`, contained the current marker, advertised 16 tools including `exec_command`, and still rendered assistant text that echoed the marker and workspace path without executing a tool. A fresh provider-only Desktop control on the same Codex Desktop `0.145.0-alpha.18` produced a native function call, matching output, and exit code 0. Replaying the exact captured Official input and complete tool definitions through the same signed gateway over both HTTP and WebSocket produced a native function call. The remaining defect is therefore the Official adapter's nondeterministic nested-model `message` versus `function_call` decision, not missing Desktop tools or a transport/adapter-format failure. A lucky retry is not deterministic release evidence.
+
+The current proof harness has one harness-only correction: signed App PID discovery now allows a bounded 15-60 second cold-start window (30 seconds by default) instead of incorrectly abandoning a slow first launch after 10 seconds. It does not change the packaged App or signed zip. Its focused self-test, shell syntax, `git diff --check`, and public-boundary check pass.
+
+The isolated harness guard reported unchanged global `~/.codex/config.toml` and `~/.codex/auth.json` signatures and hashes at the end of each recorded attempt; `18787` was untouched and `19777` was released. However, the final closeout audit at `2026-07-17T18:40:45Z` detected that global `auth.json` had changed from the run baseline SHA-256 `e39d2073d5fee94ab016df8e70341b064569981fd61be486135690113683f043` to `2efbbf0d93ba4fd4430039315fbf2bc979d7624dac7c786f2883eeb23d3bf832`, with filesystem mtime `2026-07-17T18:33:56Z`. The source of that concurrent change is not attributed. RelayKit did not read, restore, or rewrite the file. Global `config.toml` still matched its baseline and both protected ports were free, but the final zero-change safety gate is failed. Private route artifacts stay under ignored `dist/` and DesktopProof directories. The historical route claims below are ineligible for this candidate and must not be used to close the six-stage Signed Beta gate.
+
+Signed Beta v0.1.0 is therefore not complete. Public GitHub Release is not published, and the auto-updater is not implemented. The workflow's one allowed product remediation/sign cycle has already been consumed; making Official tool routing deterministic requires an explicit goal amendment before another product patch, signing, and notarization cycle.
+
 Current product scope:
 
 - `app/`: SwiftUI/AppKit menu-bar shell, provider form, Keychain references, usage view, settings, and bundled gateway lifecycle.
@@ -52,11 +66,11 @@ git diff --check
 
 Also run the scans listed in `docs/public-boundary-checklist.md`.
 
-## RC1 Public Proof Handoff
+## Historical RC1 Public Proof Handoff
 
 ### Native Responses Chain Wave 2 product closeout
 
-Current product status is `complete` for the local ad-hoc RC1 product gate. The fixed zip is `dist/RelayKitApp-local.zip`, SHA-256 `8a4050017c4ca21b85c3ef645c02d31cfbe0e901c38b5578f74ddf5cdb76d3dc`; the fresh zip extraction and exercised `dist/verify-release/RelayKitApp.app` both have tree SHA-256 `0e965ee792beb2a62c7494db3acb4b6e5c2c3bc03bc06c381323c14a740bca5c`, and the executable SHA-256 is `bf9c16b0c24569f5cc289a47b9ac619afede55d23032788ef9ea3b96c533f7ca`. `dist/rc1-final-current-run-20260717/final/product-evidence.json` derives the product result from the fixed artifact, current App/Provider/Desktop evidence, and cleanup guard. The earlier artifact ledger's tree digest is retained as stale metadata and is not a PASS input; a fresh extraction, current exercised tree, executable, bundle id, and code-signature verification are the authoritative package binding.
+Historical product status was `complete` for the local ad-hoc RC1 product gate. The fixed zip was `dist/RelayKitApp-local.zip`, SHA-256 `8a4050017c4ca21b85c3ef645c02d31cfbe0e901c38b5578f74ddf5cdb76d3dc`; the fresh zip extraction and exercised `dist/verify-release/RelayKitApp.app` both had tree SHA-256 `0e965ee792beb2a62c7494db3acb4b6e5c2c3bc03bc06c381323c14a740bca5c`, and the executable SHA-256 was `bf9c16b0c24569f5cc289a47b9ac619afede55d23032788ef9ea3b96c533f7ca`. `dist/rc1-final-current-run-20260717/final/product-evidence.json` is historical RC1 evidence only. It is not a PASS input for the Signed Beta candidate.
 
 The product keeps the native 480x760 `NSPopover`. The failed custom popover-window accessibility role, parent, and repeated attachment machinery has been removed. Its accurate historical conclusion remains `exact remote AXPopover proof blocked`; that remote projection is no longer treated as the sole product gate and must not be "fixed" by restoring a panel, titled/proxy window, private AX API, OCR, title matching, or loose fallback.
 
@@ -111,7 +125,7 @@ Private/local real-provider proof scripts are kept out of tracked public files u
 
 `./script/build_app_bundle.sh --verify` builds and verifies the app bundle without opening the GUI. `./script/package_release.sh --verify` produces `dist/RelayKitApp-local.zip` through that headless path. This is an ad-hoc signed local beta artifact for bundle integrity only, not a Developer ID signed or notarized public release.
 
-Current release status:
+Historical RC1 release status:
 
 - local beta: ready.
 - open-source public-safe: ready.
@@ -128,7 +142,7 @@ Do not describe the local ad-hoc package as a signed beta. Do not mock notarizat
 
 The completed local hardening objective is `RelayKit Beta Dogfood Hardening`: make the local ad-hoc beta usable, diagnosable, and feedback-ready independently of the distribution lane. During the current RC1 closeout, do not implement updater runtime, Sparkle, Tauri updater, signing, notarization, publishing, global Codex config/auth mutation, shared `18787` takeover, or legacy `agent-local-gateway` control.
 
-Current dogfood status:
+Historical dogfood status:
 
 - The current full zip dogfood evidence is bound to fixed artifact SHA-256 `f81b7ce1553131bb4fde3db3e6005df2e8478384e5f316828339101da093b848`, built at `2026-07-11T16:56:10Z`. Evidence records the extracted app path and normal `/usr/bin/open` LaunchServices lifecycle; `RelayKitApp.bin --ui-smoke` is not used for the dogfood claim. The dogfood harness reused the fixed zip and did not rebuild it.
 - The tracked dogfood harness now requires normal LaunchServices launch from the current extracted zip, exact AX actions, full fixture provider setup, reopen persistence, a fresh reachable-model re-probe, real right-click Quit, bounded `19777` release, and RelayKit-owned WindowServer screenshots.
@@ -140,7 +154,7 @@ Current dogfood status:
 - Fresh diagnostics were regenerated after the implementation diff. `dist/diagnostics/redaction-scan.json` reports `passed=true`; the sentinel self-test proves private URL, Keychain, provider, header, request/response, and contaminated error-label values are not exported.
 - Keep the older acceptance conclusion unchanged: P1a backend/data-source acceptance passed; P1b Desktop GUI picker/selection/route proof was blocked because there was no isolated authenticated Desktop entry. Do not keep forcing that old blocked goal or relabel it complete.
 
-Current Gate 0 closeout evidence:
+Historical Gate 0 closeout evidence:
 
 - The fixed candidate is zip SHA-256 `f81b7ce1553131bb4fde3db3e6005df2e8478384e5f316828339101da093b848` with product-source snapshot `19aa2c30ef9a44e7c400f9a2595e0fa4cb4527c9e68a04b5fdef55e978c71882`. Harness-only changes reused that zip and its byte-identical extracted App; they did not rebuild the product artifact.
 - The fresh full-standard route run records harness SHA-256 `97e685f050ef82d9d2e18d4661811d812c3b0ddbc0598a611fbd7b4833c4c7e0` and private scenario SHA-256 `334288ccf885c42f99366ff9694de34d0e78688f8e2e6082f366bfe5f1f8fa19`. Product, product-source, harness, AX driver, and scenario layers remained unchanged throughout the run.
@@ -168,7 +182,7 @@ Current Validation Fast Path work:
 - The accepted four-stage evidence files are preserved byte-for-byte. Their `desktop_gui_tool_ui_review=rollout_verified_gui_display_not_verified` value is a historical schema inconsistency: the same evidence already has current-run tool proof, a process-bound screenshot, and `tool_gui_verified=true`. Future `automated_ax` evidence uses `derived_from_current_run_rollout_and_process_bound_screenshot` without rewriting the accepted artifact.
 - The earlier pre-submit `provider_input_missing_or_invalid` attempt and the first targeted request's post-response `gateway_port_not_released` failure remain archived as root-cause evidence; neither is the latest result. After the owned-port fix, a fresh invocation entered through the Skill runner, launched the extracted RelayKit App before isolated Codex Desktop, selected GPT-5.5, pressed Send once, and exited `0` in 39 seconds. Current-run evidence records completed/200 official usage, one unique user/assistant marker binding, and a process-bound screenshot with the visible reply, no auth error, and no raw protocol text. Stderr is empty, the helper released `19777` itself, and global config/auth hashes remained unchanged. The redacted result is `dist/validation-fast-path/postfix-live-skill-result.json`; its evidence path is under `dist/codex-desktop-query/RELAYKIT_DESKTOP_QUERY_20260711T225926Z_66455/`.
 
-Current Desktop setup evidence:
+Historical Desktop setup evidence:
 
 - `dist/codex-desktop-acceptance/evidence.json` is current setup/plumbing evidence only. It proves a public-safe merged catalog, isolated app-server model listing, official/provider loopback routing contracts, unchanged global Codex signatures, and released `18787`/`19777`; its `acceptance_scope` is `public_safe_headless` and both Desktop GUI proof fields remain `not_attempted`.
 - The real App-first harness uses the current Desktop-bundled Codex executable and the isolated account model cache, keeps the generated default at `gpt-5.5`, preserves current official metadata, and merges all configured provider models. It no longer promotes the stale bundled GPT-5.2 entry into the product picker; the gateway's typed unsupported-model response remains defensive behavior only.
@@ -176,7 +190,7 @@ Current Desktop setup evidence:
 - This picker result corrects the stale mid-run requirement that treated GPT-5.2 as a GUI acceptance stage. The four request stages are GPT-5.5, GPT-5.6 Luna, provider Markdown, and provider shell/tool.
 - Current setup and route evidence remain separate: headless acceptance and zip dogfood prove setup/plumbing; the manual-proof evidence directories below prove the live request/render path. Fixture provider setup still does not prove real-provider compatibility.
 
-Last Desktop route evidence:
+Historical Desktop route evidence:
 
 - `dist/codex-desktop-manual-proof/evidence.json`, `dist/codex-desktop-manual-proof-last-route/evidence.json`, and `dist/codex-desktop-manual-proof-last-complete/evidence.json` preserve the same fresh full-standard result: `route_proof_status=complete`, `desktop_gui_route_proof=automated_gui_complete`, `human_intervention_count=0`, and `usage_event_count=12`.
 - One invocation submitted four uniquely bound GUI stages. GPT-5.5 and GPT-5.6 Luna each produced fresh completed/200 Official usage and a visible reply. The provider Markdown and provider tool stages produced only current-run completed/200 provider usage; multiple upstream events within a stage are accepted only because every matching event completed and one rollout thread has exactly one user marker and one assistant marker.

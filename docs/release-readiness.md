@@ -2,9 +2,21 @@
 
 RelayKit is preparing for public beta distribution, not a public release yet.
 
-## Current State
+## Signed Beta v0.1.0 Current Candidate
 
-RelayKit can build a local non-Developer-ID beta package:
+The current Developer ID / notarized candidate is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `55a11eb435d4a0170942e34b28670755dfa164e6c1d74f5f6935eb96051b1587`. Signing, notarization acceptance, stapling, Gatekeeper validation, and two fresh extracted-App dogfood runs are recorded for that artifact.
+
+Release readiness is **incomplete** because the final same-artifact isolated Desktop proof is incomplete: Official plain and Markdown have fresh submitted/completed/200 GUI evidence, but the Official tool request completed as text without a native function call/output and exit-zero tool block. Historical local/ad-hoc or prior Desktop route artifacts cannot substitute for this missing stage.
+
+The redacted diagnostic at `dist/signed-beta-v0.1.0/official-tool-nondeterminism-diagnostic/evidence.json` binds this failure to the signed zip. The GUI request advertised `exec_command` among 16 tools over WebSocket; a same-version provider control executed a real tool successfully; and exact captured Official input/tool replays through the signed gateway produced native function calls over both HTTP and WebSocket. The Official adapter currently delegates tool routing to a nested model and can nondeterministically return ordinary text for an explicit shell request. Retrying until it happens to emit a function call is not an acceptable release gate.
+
+The final closeout audit also failed the global-state gate: `~/.codex/auth.json` changed after the recorded isolated attempts, at filesystem mtime `2026-07-17T18:33:56Z`. The source is not attributed, and RelayKit did not read, repair, or rewrite that file. Global `config.toml` remained at its baseline hash and `18787`/`19777` were free, but no Signed Beta completion claim is allowed while the required final auth hash differs from the run baseline.
+
+Do not publish a GitHub Release or implement an updater from this state. The next product remediation requires an explicit decision because the current Signed Beta workflow has already consumed its one allowed code/sign cycle.
+
+## Historical Local/RC1 State
+
+RelayKit can still build the earlier local non-Developer-ID beta package:
 
 ```bash
 ./script/package_release.sh --verify
@@ -21,14 +33,14 @@ This is a local beta package only. It is not a signed, notarized, ordinary-user 
 
 The local beta uses macOS ad-hoc code signing (`codesign --sign -`) only. It is not iOS Ad Hoc distribution, does not use provisioning profiles, does not use UDIDs, and must not add `embedded.mobileprovision` or iOS-style Ad Hoc profile material. It also must not add unrelated entitlements, such as virtualization, to make local beta signing appear more official.
 
-Status summary:
+Historical local/RC1 summary:
 
 - local beta: ready.
 - open-source public-safe: ready.
 - local beta packaging pipeline: ready.
 - local ad-hoc RC1 public proof: accepted; the final matrix and fresh Test/independent CR gates passed.
-- signed beta scaffolding and local Apple distribution inputs: present.
-- signed beta: not executed in the current RC1 product-closeout goal.
+- signed beta scaffolding and local Apple distribution inputs: present at that stage.
+- signed beta: was not executed by the historical RC1 product-closeout goal; the current signed candidate is described above.
 - public release: not complete.
 - updater runtime: deferred until a signed and notarized artifact exists.
 
@@ -40,9 +52,9 @@ RC1 public-proof status is separate from the older local-beta result. The final 
 
 That profile builds one local package, then reuses its extracted `dist/verify-release/RelayKitApp.app` for the menu smoke, loopback-only native Responses proof, and abrupt-parent helper lifecycle proof. It does not use a real provider, send a paid Desktop request, run the four-stage Desktop scenario, sign with Developer ID, notarize, publish, or update shared Codex/LaunchAgent state.
 
-Developer ID identity and the notarization credential profile are prepared. Developer ID signing, notarization, stapling, publishing, and updater runtime are intentionally not executed by the current RC1 product-closeout goal.
+Developer ID identity and the notarization credential profile were prepared during that historical RC1 closeout. The current candidate above subsequently completed signing, notarization, and stapling, but has not passed its final Desktop route gate.
 
-Current Signed Beta boundary: Apple approval is no longer the blocker, but no new signed artifact, notarization submission, stapling result, Gatekeeper result, or GitHub Release is produced by this goal. Do not describe `dist/RelayKitApp-local.zip` as a signed beta and do not infer distribution completion from credential readiness.
+Historical RC1 boundary: that goal produced no signed artifact, notarization submission, stapling result, Gatekeeper result, or GitHub Release. `dist/RelayKitApp-local.zip` remains an ad-hoc artifact and must not be described as the current signed beta.
 
 Headless build and release commands:
 
