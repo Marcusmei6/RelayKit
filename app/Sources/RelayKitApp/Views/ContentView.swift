@@ -237,7 +237,7 @@ struct ContentView: View {
     }
 
     private var statusPill: some View {
-        Label(model.gatewayStatus, systemImage: model.gatewayStatus == "ok" || model.gatewayStatus == "running" ? "checkmark.circle.fill" : "circle")
+        Label(model.gatewayDisplayState.rawValue, systemImage: model.gatewayDisplayState == .running ? "checkmark.circle.fill" : "circle")
             .font(.caption.weight(.semibold))
             .lineLimit(1)
             .padding(.horizontal, 10)
@@ -416,7 +416,7 @@ struct ContentView: View {
         HStack(spacing: 6) {
             summaryChip("Providers", "\(model.configuredProviders.count)")
             summaryChip("Models", "\(model.unifiedModels.count)")
-            summaryChip("Gateway", productGatewayState)
+            summaryChip("Gateway", model.gatewayDisplayState.rawValue)
         }
         .smokeSection("status-summary-inline", recorder: smokeSectionRecorder)
     }
@@ -810,23 +810,20 @@ struct ContentView: View {
     }
 
     private var relayKitProductStatus: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let displayState = model.gatewayDisplayState
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text("RelayKit status")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text(productGatewayState.uppercased())
+                Text(displayState.rawValue.uppercased())
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(productGatewayState == "running" ? Color(hex: 0x78D8FF) : mutedText)
+                    .foregroundStyle(displayState == .running ? Color(hex: 0x78D8FF) : mutedText)
             }
             acceptanceLine("Providers", "\(model.configuredProviders.count)")
             acceptanceLine("Total models", "\(model.unifiedModels.count)")
-            acceptanceLine("Gateway", productGatewayState)
+            acceptanceLine("Gateway", displayState.rawValue)
         }
-    }
-
-    private var productGatewayState: String {
-        model.gatewayStatus == "running" || model.gatewayStatus == "ok" ? "running" : "ready"
     }
 
     private func acceptanceLine(_ title: String, _ value: String) -> some View {
@@ -1245,7 +1242,7 @@ struct ContentView: View {
 
             SectionCard {
                 sectionEyebrow("GATEWAY")
-                settingsInfoRow(title: "Gateway status", subtitle: model.gatewayStatus)
+                settingsInfoRow(title: "Gateway status", subtitle: model.gatewayDisplayState.rawValue)
                 settingsInfoRow(title: "Port", subtitle: "127.0.0.1:19777")
                 HStack(spacing: 8) {
                     Button("Start") { model.startGateway() }
@@ -1389,7 +1386,14 @@ struct ContentView: View {
     }
 
     private var statusColor: Color {
-        model.gatewayStatus == "ok" || model.gatewayStatus == "running" ? Color(hex: 0x0F766E) : secondaryText
+        switch model.gatewayDisplayState {
+        case .running:
+            Color(hex: 0x0F766E)
+        case .error:
+            Color(hex: 0xFF8F70)
+        case .stopped:
+            secondaryText
+        }
     }
 
     private var codexHeaderStatus: String {

@@ -800,6 +800,41 @@ func expectRedactedProviderSaveAndGatewayGuidance() {
     }
 }
 
+func expectGatewayDisplayStateContract() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+
+    for required in [
+        "enum GatewayDisplayState: String",
+        "case stopped = \"Stopped\"",
+        "case running = \"Running\"",
+        "case error = \"Error\"",
+        "case \"ok\", \"running\":",
+        "case \"stopped\":",
+        "var gatewayDisplayState: GatewayDisplayState",
+        "GatewayDisplayState(rawGatewayHealth: gatewayStatus)",
+    ] {
+        if !appModel.contains(required) {
+            fatalError("gateway display state contract is missing \(required)")
+        }
+    }
+
+    if content.contains("model.gatewayStatus") || content.contains("productGatewayState") {
+        fatalError("ContentView must use the AppModel gateway display state instead of raw health")
+    }
+    for required in [
+        "Label(model.gatewayDisplayState.rawValue",
+        "summaryChip(\"Gateway\", model.gatewayDisplayState.rawValue)",
+        "let displayState = model.gatewayDisplayState",
+        "settingsInfoRow(title: \"Gateway status\", subtitle: model.gatewayDisplayState.rawValue)",
+    ] {
+        if !content.contains(required) {
+            fatalError("gateway display state is not wired into every product surface: \(required)")
+        }
+    }
+}
+
 func expectOfficialAuthURLSanitizer() {
     let samples = [
         "\u{001B}[0mhttps://auth.openai.com/codex/device\u{001B}[0m",
@@ -1395,6 +1430,7 @@ expectOfficialProofRootOverride()
 expectProviderFormPresentationLabels()
 expectExplicitUpstreamProtocolSelectionWins()
 expectRedactedProviderSaveAndGatewayGuidance()
+try expectGatewayDisplayStateContract()
 try expectOfficialChannelPresentationLabels()
 expectOfficialChannelSnapshots()
 try expectProviderSaveTransactions()

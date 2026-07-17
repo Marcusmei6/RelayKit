@@ -10,6 +10,7 @@ full=false
 live_query=false
 include_worktree=false
 rc1=false
+signed_beta=false
 
 fail() {
   jq -n --arg code "$1" '{status:"failed",error_code:$code}' >&2
@@ -30,12 +31,20 @@ while [[ "$#" -gt 0 ]]; do
     --live-query) live_query=true; shift ;;
     --worktree) include_worktree=true; shift ;;
     --rc1) rc1=true; shift ;;
+    --signed-beta) signed_beta=true; shift ;;
     *) fail "invalid_arguments" ;;
   esac
 done
 
 [[ -n "${mode}" ]] || fail "invalid_arguments"
-if [[ "${rc1}" == true ]]; then
+if [[ "${signed_beta}" == true && "${mode}" == "execute" ]]; then
+  fail "signed_beta_plan_only"
+fi
+if [[ "${signed_beta}" == true ]]; then
+  [[ "${rc1}" == false && "${full}" == false && "${live_query}" == false && "${include_worktree}" == false && -z "${changed_files_file}" ]] || fail "signed_beta_profile_not_unique"
+  base="${base:-HEAD}"
+  head="${head:-HEAD}"
+elif [[ "${rc1}" == true ]]; then
   [[ "${full}" == false && "${live_query}" == false && "${include_worktree}" == false ]] || fail "rc1_profile_not_unique"
   base="${base:-HEAD}"
   head="${head:-HEAD}"
@@ -57,7 +66,7 @@ if [[ -n "${changed_files_file}" ]]; then
   cp "${changed_files_file}" "${changed_input}"
   changed_format="lines"
 else
-  if [[ "${include_worktree}" == false && -n "$(git -C "${ROOT}" status --porcelain)" ]]; then
+  if [[ "${signed_beta}" == false && "${include_worktree}" == false && -n "$(git -C "${ROOT}" status --porcelain)" ]]; then
     fail "dirty_worktree"
   fi
   git -C "${ROOT}" diff --name-only -z --diff-filter=ACDMRTUXB "${base_sha}" "${head_sha}" -- >"${changed_input}"
@@ -70,13 +79,13 @@ fi
 
 plan="${tmp}/plan.json"
 set +e
-python3 - "${ROOT}" "${base_sha}" "${head_sha}" "${changed_input}" "${changed_format}" "${full}" "${live_query}" "${rc1}" >"${plan}" <<'PY'
+python3 - "${ROOT}" "${base_sha}" "${head_sha}" "${changed_input}" "${changed_format}" "${full}" "${live_query}" "${rc1}" "${signed_beta}" >"${plan}" <<'PY'
 import json
 import shlex
 import sys
 from pathlib import Path, PurePosixPath
 
-root, base, head, changed_path, changed_format, full_raw, live_raw, rc1_raw = sys.argv[1:]
+root, base, head, changed_path, changed_format, full_raw, live_raw, rc1_raw, signed_beta_raw = sys.argv[1:]
 raw = open(changed_path, "rb").read()
 if changed_format == "nul":
     files = [part.decode("utf-8") for part in raw.split(b"\0") if part]
@@ -86,6 +95,7 @@ files = sorted(set(files))
 full = full_raw == "true"
 live = live_raw == "true"
 rc1 = rc1_raw == "true"
+signed_beta = signed_beta_raw == "true"
 
 classes = set()
 shell_files = []
@@ -175,6 +185,84 @@ def add(command_id, command, reason):
 
 quoted_base = shlex.quote(base)
 quoted_head = shlex.quote(head)
+if signed_beta:
+    plan_steps = [
+        {
+            "id": "sign-package",
+            "owner": "relaykit_release",
+            "action": "Build and Developer ID sign the v0.1.0 package with Hardened Runtime using release-owned credentials outside the repository",
+            "acceptance": "The bundled helper and App pass strict codesign verification",
+        },
+        {
+            "id": "notarization-accepted",
+            "owner": "relaykit_release",
+            "action": "Submit the signed package for Apple notarization and wait for a terminal result",
+            "acceptance": "The current submission status is Accepted before any later step begins",
+        },
+        {
+            "id": "staple-ticket",
+            "owner": "relaykit_release",
+            "action": "Run stapler staple and stapler validate on the accepted App bundle",
+            "acceptance": "The notarization ticket is attached and validates successfully",
+        },
+        {
+            "id": "gatekeeper-assessment",
+            "owner": "relaykit_release",
+            "action": "Run Gatekeeper assessment on the stapled App bundle",
+            "acceptance": "Gatekeeper accepts the Developer ID signed and notarized App",
+        },
+        {
+            "id": "install-dogfood",
+            "owner": "relaykit_test",
+            "action": "Install and launch dogfood from the signed zip rather than the repository checkout",
+            "acceptance": "The installed App identity and artifact hash match the signed package",
+        },
+        *[
+            {
+                "id": f"private-route-stage-{stage}",
+                "owner": "relaykit_test",
+                "action": f"Run real private route stage {stage} from the repository-external private dogfood scenario",
+                "acceptance": "Current-run route, visible result, usage, and process binding evidence all pass without recording private values",
+            }
+            for stage in range(1, 7)
+        ],
+        {
+            "id": "cleanup",
+            "owner": "relaykit_test",
+            "action": "Stop only Case 1-owned processes, remove isolated state, and verify shared resources were untouched",
+            "acceptance": "Owned processes and isolated listeners are gone while port 18787 and global Codex state remain unchanged",
+        },
+        {
+            "id": "manifest",
+            "owner": "relaykit_test",
+            "action": "Write a redacted signed-beta manifest binding package, notarization, install, six route stages, and cleanup evidence",
+            "acceptance": "The manifest contains hashes, statuses, owner results, and no credentials or private route values",
+        },
+    ]
+    print(json.dumps({
+        "status": "planned",
+        "validation_profile": "signed-beta",
+        "release_version": "v0.1.0",
+        "execution_allowed": False,
+        "base": base,
+        "head": head,
+        "changed_files": files,
+        "change_classes": ["signed-beta"],
+        "plan_steps": plan_steps,
+        "selected_commands": [],
+        "skipped_commands": [],
+        "reasons": {step["id"]: step["acceptance"] for step in plan_steps},
+        "requires_build": True,
+        "requires_package": True,
+        "requires_gui": True,
+        "requires_live_query": True,
+        "requires_full_e2e": True,
+        "requires_signing": True,
+        "requires_notarization": True,
+        "requires_private_routes": True,
+    }, sort_keys=True))
+    raise SystemExit(0)
+
 if rc1:
     add("diff-check", "git diff --check", "RC1 final validation requires a clean whitespace/error check")
     add("public-boundary", "./scripts/public-boundary-check.sh", "RC1 must remain publishable without cleanup")

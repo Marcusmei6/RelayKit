@@ -64,6 +64,61 @@ jq -e '
   any(.selected_commands[]; .id == "rc1-helper-lifecycle-proof")
 ' "${tmp}/rc1.json" >/dev/null || fail "RC1 profile did not select the unique final matrix"
 
+signed_beta_repo="${tmp}/signed-beta-repo"
+new_git_repo "${signed_beta_repo}"
+"${signed_beta_repo}/scripts/relaykit-validate.sh" --plan-only --signed-beta >"${tmp}/signed-beta.json"
+jq -e '
+  .status == "planned" and
+  .validation_profile == "signed-beta" and
+  .release_version == "v0.1.0" and
+  .execution_allowed == false and
+  [.plan_steps[].id] == [
+    "sign-package",
+    "notarization-accepted",
+    "staple-ticket",
+    "gatekeeper-assessment",
+    "install-dogfood",
+    "private-route-stage-1",
+    "private-route-stage-2",
+    "private-route-stage-3",
+    "private-route-stage-4",
+    "private-route-stage-5",
+    "private-route-stage-6",
+    "cleanup",
+    "manifest"
+  ] and
+  all(.plan_steps[]; (.owner == "relaykit_release" or .owner == "relaykit_test")) and
+  ([.plan_steps[] | select(.owner == "relaykit_release")] | length) == 4 and
+  ([.plan_steps[] | select(.owner == "relaykit_test")] | length) == 9 and
+  ([.plan_steps[] | select(.id | startswith("private-route-stage-"))] | length) == 6 and
+  all(.plan_steps[] | select(.id | startswith("private-route-stage-"));
+    (.action | contains("real private route stage")) and
+    (.action | contains("repository-external private dogfood scenario"))) and
+  (.plan_steps[] | select(.id == "notarization-accepted") | .acceptance | contains("Accepted")) and
+  (.plan_steps[] | select(.id == "staple-ticket") | .action | contains("stapler")) and
+  (.plan_steps[] | select(.id == "gatekeeper-assessment") | .action | contains("Gatekeeper")) and
+  (.plan_steps[] | select(.id == "install-dogfood") | .action | contains("signed zip")) and
+  (.plan_steps[] | select(.id == "cleanup") | .action | contains("shared resources")) and
+  (.plan_steps[] | select(.id == "manifest") | .action | contains("redacted signed-beta manifest")) and
+  .requires_build == true and
+  .requires_package == true and
+  .requires_gui == true and
+  .requires_live_query == true and
+  .requires_full_e2e == true
+' "${tmp}/signed-beta.json" >/dev/null || fail "Signed Beta profile did not return the fixed owner-tagged Case 1 plan"
+
+printf '%s\n' 'dirty implementation lane' >>"${signed_beta_repo}/tracked.txt"
+"${signed_beta_repo}/scripts/relaykit-validate.sh" --plan-only --signed-beta >"${tmp}/signed-beta-dirty.json"
+jq -e '.status == "planned" and .validation_profile == "signed-beta" and .execution_allowed == false' "${tmp}/signed-beta-dirty.json" >/dev/null ||
+  fail "Signed Beta plan-only profile was blocked by an implementation-lane worktree"
+
+signed_beta_execute_status=0
+"${signed_beta_repo}/scripts/relaykit-validate.sh" --execute --signed-beta >"${tmp}/signed-beta-execute.stdout" 2>"${tmp}/signed-beta-execute.json" || signed_beta_execute_status=$?
+[[ "${signed_beta_execute_status}" -eq 2 && ! -s "${tmp}/signed-beta-execute.stdout" ]] ||
+  fail "Signed Beta profile did not fail closed under --execute"
+jq -e -s 'length == 1 and .[0].status == "failed" and .[0].error_code == "signed_beta_plan_only"' "${tmp}/signed-beta-execute.json" >/dev/null ||
+  fail "Signed Beta execute rejection was not machine-readable"
+
 plan_fixture() {
   local name="$1"
   shift

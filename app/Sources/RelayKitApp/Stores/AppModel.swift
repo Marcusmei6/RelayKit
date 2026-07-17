@@ -5,6 +5,23 @@ import RelayKitCore
 
 @MainActor
 final class AppModel: ObservableObject {
+    enum GatewayDisplayState: String {
+        case stopped = "Stopped"
+        case running = "Running"
+        case error = "Error"
+
+        init(rawGatewayHealth: String) {
+            switch rawGatewayHealth.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "ok", "running":
+                self = .running
+            case "stopped":
+                self = .stopped
+            default:
+                self = .error
+            }
+        }
+    }
+
     @Published var providerConfigPath: String {
         didSet {
             if persistsProviderConfigPath {
@@ -602,6 +619,10 @@ final class AppModel: ObservableObject {
 
     var gatewayIsRunning: Bool {
         gateway.isRunning
+    }
+
+    var gatewayDisplayState: GatewayDisplayState {
+        GatewayDisplayState(rawGatewayHealth: gatewayStatus)
     }
 
     var gatewayProcessIdentifier: Int32? {
