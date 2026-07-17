@@ -950,7 +950,7 @@ func writeWebSocketFunctionCallArguments(w *bufio.Writer, event string, outputIn
 func (s *Server) completeResponse(ctx context.Context, req responsesRequest, messages []chatMessage, start time.Time, transport string) (map[string]any, int, map[string]any) {
 	if model, ok := s.officialModelForModel(req.Model); ok {
 		if officialUsesCodexHome(*s.config.OfficialPassthrough) {
-			result, err := s.completeOfficialWithCodex(ctx, *s.config.OfficialPassthrough, model, messages)
+			result, err := s.completeOfficialWithCodex(ctx, *s.config.OfficialPassthrough, model, messages, req.Tools)
 			if err != nil {
 				status, errorType, message := officialCodexFailureDetails(err)
 				s.recordFailedUsage("openai", req.Model, errorType, status, start, transport)
@@ -1059,7 +1059,7 @@ func (s *Server) completeResponse(ctx context.Context, req responsesRequest, mes
 
 func (s *Server) officialResponses(w http.ResponseWriter, r *http.Request, req responsesRequest, model config.Model, messages []chatMessage, start time.Time) {
 	if officialUsesCodexHome(*s.config.OfficialPassthrough) {
-		result, err := s.completeOfficialWithCodex(r.Context(), *s.config.OfficialPassthrough, model, messages)
+		result, err := s.completeOfficialWithCodex(r.Context(), *s.config.OfficialPassthrough, model, messages, req.Tools)
 		if err != nil {
 			status, errorType, message := officialCodexFailureDetails(err)
 			s.recordFailedUsage("openai", req.Model, errorType, status, start, "responses_http")
@@ -1573,7 +1573,26 @@ func officialCodexFailureDetails(err error) (int, string, string) {
 	return http.StatusBadGateway, "official_request_failed", "RelayKit official Codex request failed"
 }
 
-func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, messages []chatMessage) (map[string]any, error) {
+type officialCodexDecision struct {
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	ArgumentsJSON string `json:"arguments_json"`
+	Text          string `json:"text"`
+}
+
+const officialCodexDecisionSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "name", "arguments_json", "text"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["message", "function_call"]},
+    "name": {"type": "string"},
+    "arguments_json": {"type": "string"},
+    "text": {"type": "string"}
+  }
+}`
+
+func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, messages []chatMessage, tools []responsesTool) (map[string]any, error) {
 	codexHome := strings.TrimPrefix(official.CredentialRef.Value, "~/")
 	if codexHome != official.CredentialRef.Value {
 		home, err := os.UserHomeDir()
@@ -1592,15 +1611,29 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 	}
 	defer os.RemoveAll(outDir)
 	outPath := filepath.Join(outDir, "last-message.txt")
+	schemaPath := filepath.Join(outDir, "tool-decision-schema.json")
 	binary := official.CodexBinary
 	if binary == "" {
 		binary = "codex"
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, binary, "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-rules", "--ignore-user-config", "--sandbox", "read-only", "--color", "never", "-m", upstreamModelName(model), "-o", outPath, "-")
+	args := []string{"exec", "--skip-git-repo-check", "--ephemeral", "--ignore-rules", "--ignore-user-config", "--sandbox", "read-only", "--color", "never"}
+	prompt := codexPrompt(messages)
+	if len(tools) > 0 {
+		if err := os.WriteFile(schemaPath, []byte(officialCodexDecisionSchema), 0600); err != nil {
+			return nil, err
+		}
+		args = append(args, "--disable", "shell_tool", "--disable", "unified_exec", "--output-schema", schemaPath)
+		prompt, err = codexToolDecisionPrompt(messages, tools)
+		if err != nil {
+			return nil, err
+		}
+	}
+	args = append(args, "-m", upstreamModelName(model), "-o", outPath, "-")
+	cmd := exec.CommandContext(cmdCtx, binary, args...)
 	cmd.Env = append(os.Environ(), "HOME="+isolatedHome, "CODEX_HOME="+codexHome)
-	cmd.Stdin = strings.NewReader(codexPrompt(messages))
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stdout = io.Discard
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -1615,6 +1648,9 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 	if text == "" {
 		return nil, fmt.Errorf("empty official response")
 	}
+	if len(tools) > 0 {
+		return responsesFromOfficialCodexDecision(text, tools, model.ID)
+	}
 	return responsesFromChat(chatResponse{
 		ID: "codex-official",
 		Choices: []chatChoice{{
@@ -1622,6 +1658,73 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 			FinishReason: "stop",
 		}},
 	}, model.ID), nil
+}
+
+func codexToolDecisionPrompt(messages []chatMessage, tools []responsesTool) (string, error) {
+	encodedTools, err := json.Marshal(tools)
+	if err != nil {
+		return "", err
+	}
+	return "You are choosing the next response for a separate client. Do not call or execute any of your own tools. " +
+		"The client will execute an external function_call exactly once. If the conversation can be answered now, " +
+		"return kind=message with final text. If an external tool is required, return kind=function_call using one exact " +
+		"tool name and put a compact JSON object string in arguments_json. Use empty name, arguments_json={} and empty " +
+		"text where a field does not apply.\nExternal tools: " + string(encodedTools) + "\nConversation:\n" + codexPrompt(messages), nil
+}
+
+func responsesFromOfficialCodexDecision(raw string, tools []responsesTool, requestedModel string) (map[string]any, error) {
+	var decision officialCodexDecision
+	if err := json.Unmarshal([]byte(raw), &decision); err != nil {
+		return nil, fmt.Errorf("invalid official tool decision")
+	}
+	if decision.Kind == "message" {
+		text := strings.TrimSpace(decision.Text)
+		if text == "" {
+			return nil, fmt.Errorf("empty official message decision")
+		}
+		return responsesFromChat(chatResponse{
+			ID: "codex-official",
+			Choices: []chatChoice{{
+				Message:      chatMessage{Role: "assistant", Content: text},
+				FinishReason: "stop",
+			}},
+		}, requestedModel), nil
+	}
+	if decision.Kind != "function_call" || !officialToolAllowed(decision.Name, tools) {
+		return nil, fmt.Errorf("invalid official function decision")
+	}
+	arguments := normalizeToolArguments(decision.Name, strings.TrimSpace(decision.ArgumentsJSON))
+	var argumentObject map[string]any
+	if arguments == "" || json.Unmarshal([]byte(arguments), &argumentObject) != nil || argumentObject == nil {
+		return nil, fmt.Errorf("invalid official function arguments")
+	}
+	response := responseID("")
+	callID := strings.Replace(response, "resp_", "call_", 1)
+	return map[string]any{
+		"id":          response,
+		"object":      "response",
+		"status":      "completed",
+		"model":       requestedModel,
+		"output_text": "",
+		"output": []map[string]any{{
+			"type":      "function_call",
+			"id":        callID,
+			"status":    "completed",
+			"call_id":   callID,
+			"name":      decision.Name,
+			"arguments": arguments,
+		}},
+		"usage": responsesUsage(nil),
+	}, nil
+}
+
+func officialToolAllowed(name string, tools []responsesTool) bool {
+	for _, tool := range tools {
+		if tool.Type == "function" && tool.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func codexPrompt(messages []chatMessage) string {

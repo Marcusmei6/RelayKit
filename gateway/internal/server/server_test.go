@@ -754,6 +754,129 @@ printf '{"home":"%s","codex_home":"%s","model":"%s","args":"%s"}\n' "$HOME" "$CO
 	}
 }
 
+func TestOfficialPassthroughCodexHomePreservesDesktopToolRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	codexHome := filepath.Join(dir, "codex-home")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(dir, "codex-record.txt")
+	fakeCodex := filepath.Join(dir, "codex")
+	fakeScript := `#!/bin/sh
+set -eu
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$arg"; fi
+  prev="$arg"
+done
+prompt=$(cat)
+if printf '%s' "$prompt" | grep -q "Tool result call_"; then
+  printf '%s\n' '{"kind":"message","name":"","arguments_json":"{}","text":"TOOL COMPLETE"}' >"$out"
+else
+  printf '%s\n' '{"kind":"function_call","name":"exec_command","arguments_json":"{\"cmd\":\"printf RELAYKIT_TOOL; pwd\"}","text":""}' >"$out"
+fi
+printf '%s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
+`
+	if err := os.WriteFile(fakeCodex, []byte(fakeScript), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{
+  "official_passthrough": {
+    "base_url": "https://api.openai.example/v1",
+    "credential_ref": {"kind": "codex_home", "value": "` + codexHome + `"},
+    "codex_binary": "` + fakeCodex + `",
+    "models": [{"id": "gpt-5.5", "display_name": "GPT-5.5"}]
+  },
+  "providers": []
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAYKIT_TEST_CODEX_RECORD", recordPath)
+	usagePath := filepath.Join(dir, "usage.jsonl")
+	h, err := NewWithUsageLog(cfgPath, usagePath)
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	conn, reader := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, `{"model":"gpt-5.5","input":"run the shell check","tools":[{"type":"function","name":"exec_command","description":"Run a shell command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}]}`)
+	first := readTestWebSocketUntil(t, reader, "response.completed")
+	for _, want := range []string{
+		`"type":"response.output_item.added"`,
+		`"type":"function_call"`,
+		`"call_id":"call_`,
+		`"name":"exec_command"`,
+		`{\"cmd\":\"printf RELAYKIT_TOOL; pwd\"}`,
+		`"type":"response.function_call_arguments.done"`,
+	} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("first response missing %q in %s", want, first)
+		}
+	}
+	callID := responseCallID(t, first)
+	outputConn, outputReader := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer outputConn.Close()
+	writeTestWebSocketText(t, outputConn, `{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"run the shell check"}]},{"type":"function_call_output","call_id":"`+callID+`","output":"RELAYKIT_TOOL\n/workspace"}],"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}]}`)
+	second := readTestWebSocketUntil(t, outputReader, "response.completed")
+	if !strings.Contains(second, `"output_text":"TOOL COMPLETE"`) || strings.Contains(second, `"type":"function_call"`) {
+		t.Fatalf("second response = %s", second)
+	}
+
+	record, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--output-schema", "--disable shell_tool", "--disable unified_exec"} {
+		if !strings.Contains(string(record), want) {
+			t.Fatalf("codex args missing %q in %s", want, record)
+		}
+	}
+}
+
+func responseCallID(t *testing.T, events string) string {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(events))
+	for {
+		var event struct {
+			Type string `json:"type"`
+			Item struct {
+				Type   string `json:"type"`
+				CallID string `json:"call_id"`
+			} `json:"item"`
+		}
+		if err := decoder.Decode(&event); err != nil {
+			break
+		}
+		if event.Type == "response.output_item.done" && event.Item.Type == "function_call" && event.Item.CallID != "" {
+			return event.Item.CallID
+		}
+	}
+	t.Fatal("function call id not found")
+	return ""
+}
+
+func TestOfficialCodexDecisionRejectsUnadvertisedOrInvalidFunctionCalls(t *testing.T) {
+	tools := []responsesTool{{Type: "function", Name: "exec_command"}}
+	for name, raw := range map[string]string{
+		"unadvertised tool": `{"kind":"function_call","name":"delete_everything","arguments_json":"{}","text":""}`,
+		"invalid arguments": `{"kind":"function_call","name":"exec_command","arguments_json":"not-json","text":""}`,
+		"empty message":     `{"kind":"message","name":"","arguments_json":"{}","text":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := responsesFromOfficialCodexDecision(raw, tools, "gpt-5.5"); err == nil {
+				t.Fatal("expected decision to be rejected")
+			}
+		})
+	}
+}
+
 func TestOfficialPassthroughCodexHomeReportsUnsupportedAccountModel(t *testing.T) {
 	dir := t.TempDir()
 	codexHome := filepath.Join(dir, "codex-home")
