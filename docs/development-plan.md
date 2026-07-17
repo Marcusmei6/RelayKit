@@ -290,18 +290,19 @@ Status: implementation complete for its bound artifact; the fresh final matrix p
 
 ## Phase 7.10: RC1 Native Responses Chain Wave 2
 
-Status: needs work for the final RC1 candidate. The prior local ad-hoc App-first plus isolated Desktop A/B/C run remains valid evidence for its bound artifact only; it cannot close the new candidate until the compact UI, typed Official state, redirect/SSE limits, provider/Keychain transaction, derived manifest, and one-package final matrix all pass fresh.
+Status: needs work for the final RC1 candidate. Commit `665515f`, zip SHA-256 `462d3b2bfe9a2a5a910e0c6d4091a1fd1ec67b29b0ae9fd63ce18045c3005001`, and extracted tree SHA-256 `dd065dffa81ceaa9f6c0eefa8b354515bf15ab792d3bd95a64379c67837afb37` are the single current setup and must be reused without rebuilding.
 
-- Candidate `d51f249` and zip SHA-256 `d5dd4501c53accf20d710ecceaf600a82156e27c97863d89baa7351d4a01b05e` are the latest current setup. `dist/rc1-remediated-preflight-1-20260716T181059Z/` failed because the same-run unique WindowServer surface had no remotely visible AXPopover or semantic identifiers. The final Desktop A/B/C route stage was therefore not run and the phase remains `needs work`.
+- The native 480x760 `NSPopover` remains the product surface. Failed custom AX role/parent/attachment retries were removed. The historical `exact remote AXPopover proof blocked` conclusion remains accurate but is separated from the product gate.
+- Two current-package ordinary launches passed zero-surface-before and unique same-PID WindowServer-surface-after checks with process-bound screenshots. Provider/Keychain persistence, App-owned Gateway startup, and isolated Desktop A/B/C are still incomplete, so no current manifest PASS exists.
 
 - The top-level proof begins with an empty isolated provider destination and uses exact RelayKit PID/window-bound AX to save provider name, loopback URL, synthetic key, model, and `openai_responses`. It rejects completed provider injection, `key_file`, and curl-only proof.
 - Saved config must contain `api_format=openai_responses` and a Keychain reference only. The same extracted App must relaunch and expose the restored protocol, URL, model, and saved-key state before its bundled Gateway is started through the UI.
 - The dedicated `rc1_native_responses_three_stage` Desktop profile attaches to the App-owned Gateway and UI-saved config. Stages A/B/C each have exactly one submission and require, respectively, a text marker, native Markdown structure, and the exact shell command plus `pwd` with a verified `function_call_output` roundtrip.
 - Current evidence is run-bound and hash-bound. A PASS manifest requires every named predicate, empty `failed_events`, all three stages in `evidence_verified/submitted` state, Desktop WebSocket ingress, Gateway SSE egress, tool roundtrip, matching run ids, and current harness/scenario/App zip/screenshot/usage/provider-event/provider-config hashes.
 - Historical `observation_failed_*` evidence remains failed and untouched. It cannot be relabeled, copied, or used to derive phase-B PASS.
-- Final run `rc1-native-20260716T111701Z-external-sandbox` is bound to App zip SHA-256 `abf74744aedbe699e20b37064802d8753e40424d8886e68d2c32954eadec776a`. Its native-App evidence proves UI save, Keychain-reference-only storage, relaunch persistence, and UI-owned Gateway startup. Its Desktop stage ledger proves one submitted and verified plain response, native Markdown response, and real shell-tool roundtrip with matching `function_call_output` and process exit zero.
+- Historical run `rc1-native-20260716T111701Z-external-sandbox` remains valid only for its bound App zip SHA-256 `abf74744aedbe699e20b37064802d8753e40424d8886e68d2c32954eadec776a`; it is ineligible for the current candidate.
 - The RC1 stage ledger, process-bound screenshots, rollout binding, usage, provider events, and tool evidence are authoritative for A/B/C. The generic manual-proof render summary is a separate schema and must not override or substitute for the RC1 stage result.
-- Final Go race/test/vet/gofmt, Swift build/validation, focused proof contracts, current-artifact menu smoke, diagnostics redaction, Desktop acceptance, public-boundary, shell syntax, and diff checks passed. Global Codex config/auth hashes were unchanged, temporary listeners were released, and port `18787` remained untouched.
+- Current-candidate Swift, Go race/test/vet/gofmt, manifest, Desktop AX, manual-proof, public-boundary, and diff checks passed. Current-artifact live route, diagnostics, final Test/CR, cleanup, and manifest derivation remain pending.
 
 ## Release Gate
 
