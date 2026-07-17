@@ -1446,7 +1446,7 @@ prepare_extracted_app() {
     0)
       rm -rf "${APP_INSTALL_DIR}"
       mkdir -p "${APP_INSTALL_DIR}"
-      /usr/bin/unzip -q "${ZIP_PATH}" -d "${APP_INSTALL_DIR}"
+      /usr/bin/ditto -x -k "${ZIP_PATH}" "${APP_INSTALL_DIR}"
       ;;
     1)
       verify_extracted_app_matches_zip "${ZIP_PATH}" "${APP_BUNDLE}" "${RUN_DIR}/extracted-app-verify" || {
@@ -1473,7 +1473,7 @@ verify_extracted_app_matches_zip() {
   [[ -s "${zip_path}" && -d "${extracted_app}" && -n "${scratch_dir}" && "${scratch_dir}" != "/" ]] || return 1
   rm -rf "${scratch_dir}"
   mkdir -p "${scratch_dir}"
-  if ! /usr/bin/unzip -q "${zip_path}" -d "${scratch_dir}"; then
+  if ! /usr/bin/ditto -x -k "${zip_path}" "${scratch_dir}"; then
     rm -rf "${scratch_dir}"
     return 1
   fi

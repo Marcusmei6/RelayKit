@@ -164,6 +164,17 @@ grep -Fq 'RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP' "${PROOF_SCRIPT}" ||
 prepare_app_body="$(sed -n '/^prepare_extracted_app() {/,/^}/p' "${PROOF_SCRIPT}")"
 grep -Fq '"${ROOT}/script/package_release.sh" --verify' <<<"${prepare_app_body}" ||
   fail "manual proof must still rebuild the current zip by default"
+grep -Fq '/usr/bin/ditto -x -k "${ZIP_PATH}" "${APP_INSTALL_DIR}"' <<<"${prepare_app_body}" ||
+  fail "manual proof must preserve sealed resources when extracting the current App zip"
+if grep -Fq '/usr/bin/unzip' <<<"${prepare_app_body}"; then
+  fail "manual proof current App zip extraction must not use unzip"
+fi
+verify_extracted_app_body="$(sed -n '/^verify_extracted_app_matches_zip() {/,/^}/p' "${PROOF_SCRIPT}")"
+grep -Fq '/usr/bin/ditto -x -k "${zip_path}" "${scratch_dir}"' <<<"${verify_extracted_app_body}" ||
+  fail "manual proof scratch verification must preserve sealed resources"
+if grep -Fq '/usr/bin/unzip' <<<"${verify_extracted_app_body}"; then
+  fail "manual proof scratch verification extraction must not use unzip"
+fi
 grep -Fq 'relaykit_app_launched_from_extracted_zip' "${PROOF_SCRIPT}" ||
   fail "manual proof evidence must disclose the extracted App launch"
 grep -Fq 'official_preflight_route_evidence_allowed: false' "${PROOF_SCRIPT}" ||
