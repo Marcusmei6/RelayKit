@@ -488,7 +488,19 @@ run_bound_window_success desktop-layer0 inspect 4301 61 <<'JSON'
     {"owner_pid":4301,"window_id":62,"layer":25},
     {"owner_pid":9999,"window_id":61,"layer":0}
   ],
-  "ax_window_numbers": [61,null]
+  "ax_window_numbers": [61,62]
+}
+JSON
+
+run_bound_window_failure window_selector_not_unique desktop-multiple-exact inspect 4302 63 <<'JSON'
+{
+  "current_identity": {"pid":4302,"window_id":63},
+  "process_running": true,
+  "bundle_identifier": "com.openai.codex",
+  "frontmost_pid": 4302,
+  "accessibility_trusted": true,
+  "windows": [{"owner_pid":4302,"window_id":63,"layer":0}],
+  "ax_window_numbers": [63,63]
 }
 JSON
 
@@ -616,7 +628,7 @@ JSON
 jq -e '.candidate_count == 0' "${last_stdout}" >/dev/null ||
   fail "Desktop accepted a nonzero-layer WindowServer identity"
 
-run_bound_window_failure window_selector_not_unique desktop-fallback-count inspect 4502 121 <<'JSON'
+run_bound_window_failure ax_window_id_resolution_failed desktop-unresolved-window inspect 4502 121 <<'JSON'
 {
   "current_identity": {"pid":4502,"window_id":121},
   "process_running": true,
@@ -631,7 +643,7 @@ run_bound_window_failure window_selector_not_unique desktop-fallback-count inspe
 }
 JSON
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
-  fail "Desktop fallback stopped counting same-PID layer-zero windows"
+  fail "Desktop unresolved AX window did not report the AX window count"
 
 run_bound_window_failure frontmost_identity_mismatch desktop-other-frontmost inspect 4503 131 <<'JSON'
 {
@@ -978,9 +990,8 @@ for required_attribute in kAXRoleAttribute kAXSubroleAttribute kAXChildrenAttrib
 done
 grep -Fq 'relayKitPopoverRootIdentifier = "relaykit-popover-root"' "${SOURCE}" ||
   fail "RelayKit stable popover identifier is missing"
-if rg -Fq 'dlsym' "${SOURCE}" || rg -Fq '"_AXUIElementGetWindow"' "${SOURCE}"; then
-  fail "RelayKit retained the obsolete private AX window resolver"
-fi
+rg -Fq 'dlsym' "${SOURCE}" || fail "Desktop exact binding is missing dynamic symbol resolution"
+rg -Fq '"_AXUIElementGetWindow"' "${SOURCE}" || fail "Desktop exact binding is missing the native window resolver"
 if rg -Fq 'private let axWindowNumberAttribute = "AXWindowNumber"' "${SOURCE}"; then
   fail "RelayKit binding still treats AXWindowNumber as a valid generic attribute"
 fi
@@ -1062,6 +1073,11 @@ grep -Fq 'maximumAXDepth = 64' "${SOURCE}" ||
   fail "Desktop semantic traversal depth does not cover a completed Codex task"
 grep -Fq 'maximumAXNodes = 50_000' "${SOURCE}" ||
   fail "Desktop semantic traversal node bound does not cover a completed Codex task"
+grep -Fq 'modelPickerWaitSeconds: TimeInterval = 10' "${SOURCE}" ||
+  fail "cold Desktop model picker wait is not bounded at 10 seconds"
+submit_body="$(sed -n '/private func executeSubmit/,/^}/p' "${SOURCE}")"
+grep -Fq 'timeout: modelPickerWaitSeconds' <<<"${submit_body}" ||
+  fail "submit does not use the bounded cold model picker wait"
 
 run_success "${self_test[@]}" --scenario exact
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
@@ -1083,13 +1099,13 @@ run_failure selector_not_unique "${self_test[@]}" --scenario reveal-multiple
 jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null ||
   fail "Markdown reveal did not fail closed on duplicate headings"
 
-run_success "${self_test[@]}" --scenario window-fallback
+run_success "${self_test[@]}" --scenario desktop-window-id-exact
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
-  fail "single CGWindow plus single AXWindow did not produce the bounded window fallback"
+  fail "Desktop native window resolver did not return the exact nonzero ID"
 
-run_failure window_selector_not_unique "${self_test[@]}" --scenario window-ambiguous
-jq -e '.candidate_count == 2' "${last_stdout}" >/dev/null ||
-  fail "multiple unnumbered AX windows did not fail closed"
+run_failure ax_window_id_resolver_unavailable "${self_test[@]}" --scenario desktop-window-id-resolver-unavailable
+run_failure ax_window_id_resolution_failed "${self_test[@]}" --scenario desktop-window-id-ax-error
+run_failure ax_window_id_resolution_failed "${self_test[@]}" --scenario desktop-window-id-zero
 
 run_success "${self_test[@]}" --scenario model-ui-labels
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
@@ -1439,7 +1455,7 @@ for required_source_text in \
   'performVerifiedPress' \
   'performVerifiedWrite' \
   'verifyBoundWindow' \
-  'AXWindowNumber' \
+  '_AXUIElementGetWindow' \
   'New task in \(workspace)' \
   '在 \(workspace) 中新建任务' \
   '"Send"' \

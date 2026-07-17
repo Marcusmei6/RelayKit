@@ -8,7 +8,6 @@ import Foundation
 
 private let codexBundleIdentifier = "com.openai.codex"
 private let relayKitBundleIdentifier = "dev.relaykit.app"
-private let desktopAXWindowNumberAttribute = "AXWindowNumber" as CFString
 private let axIdentifierAttribute = "AXIdentifier" as CFString
 private let axSelectedValueAttribute = "AXSelectedValue" as CFString
 private let axSelectedAttribute = "AXSelected" as CFString
@@ -35,6 +34,7 @@ private let relayKitWindowSemanticIdentifiers = Set([
     "official-provider-row",
 ])
 private let selectorWaitSeconds: TimeInterval = 3
+private let modelPickerWaitSeconds: TimeInterval = 10
 private let selectorPollSeconds: TimeInterval = 0.05
 private let maximumWorkspacePathComponents = 32
 private let requiredPrivatePermissions: mode_t = 0o600
@@ -252,7 +252,10 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
             throw DriverFailure("invalid_arguments", exitStatus: 2)
         }
         switch scenario {
-        case "exact", "zero", "multiple", "reveal-exact", "reveal-multiple", "window-fallback", "window-ambiguous", "model-ui-labels", "model-nux-exact", "model-nux-absent", "model-nux-multiple", "desktop-login-required", "send-structure", "send-structure-custom", "composer-value", "empty-composer",
+        case "exact", "zero", "multiple", "reveal-exact", "reveal-multiple",
+             "desktop-window-id-exact", "desktop-window-id-resolver-unavailable",
+             "desktop-window-id-ax-error", "desktop-window-id-zero",
+             "model-ui-labels", "model-nux-exact", "model-nux-absent", "model-nux-multiple", "desktop-login-required", "send-structure", "send-structure-custom", "composer-value", "empty-composer",
              "workspace-path-exact", "workspace-url-exact", "workspace-url-multiple",
              "workspace-ancestor-exact", "workspace-ancestor-multiple",
              "protocol-identifier-distractors", "protocol-identifier-zero",
@@ -548,11 +551,44 @@ private func copyAXAttribute(_ element: AXUIElement, _ attribute: CFString) -> C
     return value
 }
 
-private func desktopAXWindowNumber(_ element: AXUIElement) -> UInt32? {
-    guard let value = copyAXAttribute(element, desktopAXWindowNumberAttribute) as? NSNumber else {
-        return nil
+private typealias DesktopAXWindowResolver = @convention(c) (
+    AXUIElement,
+    UnsafeMutablePointer<CGWindowID>
+) -> AXError
+
+private func validatedDesktopWindowID(
+    symbolAvailable: Bool,
+    status: AXError,
+    windowID: CGWindowID
+) throws -> UInt32 {
+    guard symbolAvailable else {
+        throw DriverFailure("ax_window_id_resolver_unavailable", exitStatus: 4)
     }
-    return value.uint32Value
+    guard status == .success, windowID != 0 else {
+        throw DriverFailure("ax_window_id_resolution_failed", exitStatus: 4)
+    }
+    return windowID
+}
+
+private func desktopAXWindowNumber(_ element: AXUIElement) throws -> UInt32 {
+    guard let symbol = dlsym(
+        UnsafeMutableRawPointer(bitPattern: -2),
+        "_AXUIElementGetWindow"
+    ) else {
+        return try validatedDesktopWindowID(
+            symbolAvailable: false,
+            status: .failure,
+            windowID: 0
+        )
+    }
+    let resolver = unsafeBitCast(symbol, to: DesktopAXWindowResolver.self)
+    var windowID: CGWindowID = 0
+    let status = resolver(element, &windowID)
+    return try validatedDesktopWindowID(
+        symbolAvailable: true,
+        status: status,
+        windowID: windowID
+    )
 }
 
 private func isRelayKitPopover(role: String?, identifier: String?) -> Bool {
@@ -642,18 +678,12 @@ private func verifyWindowServerIdentity(
 }
 
 private func boundWindowIndex(
-    windowNumbers: [UInt32?],
-    expectedWindowID: UInt32,
-    windowServerWindowCount: Int
+    windowNumbers: [UInt32],
+    expectedWindowID: UInt32
 ) throws -> Int {
     let exactMatches = windowNumbers.indices.filter { windowNumbers[$0] == expectedWindowID }
     if exactMatches.count == 1 {
         return exactMatches[0]
-    }
-    if exactMatches.isEmpty,
-       windowServerWindowCount == 1,
-       windowNumbers.count == 1 {
-        return 0
     }
     throw DriverFailure("window_selector_not_unique", exitStatus: 4, candidateCount: windowNumbers.count)
 }
@@ -698,9 +728,9 @@ private func resolveBoundWindowIndex(
     windowServerMetadata: () -> [WindowServerMetadata],
     frontmostPID: () -> pid_t?,
     accessibilityTrusted: () -> Bool,
-    axWindowNumbers: () -> [UInt32?]
+    axWindowNumbers: () throws -> [UInt32]
 ) throws -> Int {
-    let windowServerWindowCount = try verifyApplicationIdentity(
+    _ = try verifyApplicationIdentity(
         context: context,
         currentIdentity: currentIdentity,
         processIsRunning: processIsRunning,
@@ -711,9 +741,8 @@ private func resolveBoundWindowIndex(
         requireFrontmost: context.applicationMode == .desktop
     )
     return try boundWindowIndex(
-        windowNumbers: axWindowNumbers(),
-        expectedWindowID: context.identity.windowID,
-        windowServerWindowCount: windowServerWindowCount
+        windowNumbers: try axWindowNumbers(),
+        expectedWindowID: context.identity.windowID
     )
 }
 
@@ -937,7 +966,7 @@ private func resolveBoundActionRoot<Node>(
     frontmostPID: () -> pid_t?,
     accessibilityTrusted: () -> Bool,
     axWindows: () -> AXActionRoots<Node>,
-    desktopWindowNumber: (Node) -> UInt32?,
+    desktopWindowNumber: (Node) throws -> UInt32,
     axRole: (Node) -> String?,
     axIdentifier: (Node) -> String?,
     relayKitSemanticBinding: (Node) -> RelayKitSemanticBinding
@@ -959,11 +988,19 @@ private func resolveBoundActionRoot<Node>(
     let axWindowRoots = availableAXWindows.roots
     switch context.applicationMode {
     case .desktop:
-        let windowNumbers = axWindowRoots.map(desktopWindowNumber)
+        let windowNumbers: [UInt32]
+        do {
+            windowNumbers = try axWindowRoots.map(desktopWindowNumber)
+        } catch let failure as DriverFailure {
+            throw DriverFailure(
+                failure.code,
+                exitStatus: failure.exitStatus,
+                candidateCount: axWindowRoots.count
+            )
+        }
         let selectedIndex = try boundWindowIndex(
             windowNumbers: windowNumbers,
-            expectedWindowID: context.identity.windowID,
-            windowServerWindowCount: windowServerWindowCount
+            expectedWindowID: context.identity.windowID
         )
         return BoundActionRoot(
             root: axWindowRoots[selectedIndex],
@@ -1976,9 +2013,10 @@ private func performVerifiedWrite(
 
 private func waitForUniqueSelector(
     context: DriverContext,
-    selector: @escaping SemanticSelector
+    selector: @escaping SemanticSelector,
+    timeout: TimeInterval = selectorWaitSeconds
 ) throws {
-    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    let deadline = Date().addingTimeInterval(timeout)
     while true {
         let nodes = try currentNodes(context)
         let matches = matchingIndices(in: nodes.map(\.semantic), selector: selector)
@@ -2828,7 +2866,11 @@ private func executeSubmit(options: [String: String]) throws -> DriverReport {
     let context = try makeContext(options: options, command: .submit)
     let pickerSelector = modelPickerSelector(catalogLabels: catalogLabels)
     try withSelectorFailureCode("model_picker_not_unique") {
-        try waitForUniqueSelector(context: context, selector: pickerSelector)
+        try waitForUniqueSelector(
+            context: context,
+            selector: pickerSelector,
+            timeout: modelPickerWaitSeconds
+        )
     }
     var nodes = try currentNodes(context)
     var picker = try withSelectorFailureCode("model_picker_not_unique") {
@@ -3775,18 +3817,33 @@ private func executeSelfTest(options: [String: String]) throws -> DriverReport {
         let matches = matchingIndices(in: records, selector: markdownHeadingSelector(text: target))
         _ = try requireUniqueIndex(matches)
         throw DriverFailure("internal_error", exitStatus: 70)
-    case "window-fallback":
-        let index = try boundWindowIndex(
-            windowNumbers: [nil],
-            expectedWindowID: 42,
-            windowServerWindowCount: 1
+    case "desktop-window-id-exact":
+        let windowID = try validatedDesktopWindowID(
+            symbolAvailable: true,
+            status: .success,
+            windowID: 42
         )
+        let index = try boundWindowIndex(windowNumbers: [windowID], expectedWindowID: 42)
         return .success(command: "self-test", candidateCount: index + 1, actionCount: 0)
-    case "window-ambiguous":
-        _ = try boundWindowIndex(
-            windowNumbers: [nil, nil],
-            expectedWindowID: 42,
-            windowServerWindowCount: 1
+    case "desktop-window-id-resolver-unavailable":
+        _ = try validatedDesktopWindowID(
+            symbolAvailable: false,
+            status: .failure,
+            windowID: 0
+        )
+        throw DriverFailure("internal_error", exitStatus: 70)
+    case "desktop-window-id-ax-error":
+        _ = try validatedDesktopWindowID(
+            symbolAvailable: true,
+            status: .cannotComplete,
+            windowID: 42
+        )
+        throw DriverFailure("internal_error", exitStatus: 70)
+    case "desktop-window-id-zero":
+        _ = try validatedDesktopWindowID(
+            symbolAvailable: true,
+            status: .success,
+            windowID: 0
         )
         throw DriverFailure("internal_error", exitStatus: 70)
     case "model-ui-labels":
@@ -4161,8 +4218,13 @@ private func executeBoundWindowTest(
             )
         },
         desktopWindowNumber: { node in
-            guard let index = windowNodeIDs.firstIndex(of: node.id) else { return nil }
-            return input.axWindowNumbers[index]
+            guard let index = windowNodeIDs.firstIndex(of: node.id) else {
+                throw DriverFailure("ax_window_id_resolution_failed", exitStatus: 4)
+            }
+            guard let windowID = input.axWindowNumbers[index], windowID != 0 else {
+                throw DriverFailure("ax_window_id_resolution_failed", exitStatus: 4)
+            }
+            return windowID
         },
         axRole: { $0.role },
         axIdentifier: { $0.identifier },

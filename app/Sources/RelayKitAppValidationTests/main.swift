@@ -361,8 +361,26 @@ func expectProviderTestSinglePostLifecycle() throws {
     if modelBody.contains("restartGateway()") || !modelBody.contains("if !gateway.isRunning") {
         fatalError("provider test must reuse a running gateway and start only when stopped")
     }
+    if modelBody.contains("refreshModels()") ||
+        !modelBody.contains("recordProviderTestResult(result)") ||
+        !modelBody.contains("models.removeAll { $0.id == result.modelID }") ||
+        !modelBody.contains("models.append(RelayModel(id: result.modelID, ownedBy: result.providerID))") {
+        fatalError("typed provider-test result must update model availability without a second provider probe")
+    }
     if !content.contains("ProviderTestSaveAction.resolve") {
         fatalError("add/import provider tests must use the idempotent save decision")
+    }
+
+    guard let saveStart = content.range(of: "private func save()"),
+          let saveEnd = content.range(of: "private func field", range: saveStart.upperBound..<content.endIndex) else {
+        fatalError("provider save function boundaries are missing")
+    }
+    let saveBody = content[saveStart.lowerBound..<saveEnd.lowerBound]
+    if !saveBody.contains("case .add, .import:") ||
+        !saveBody.contains("persistAddOrImportDraft()") ||
+        !saveBody.contains("ProviderTestSaveAction.resolve") ||
+        !saveBody.contains("model.updateProvider(originalProviderID") {
+        fatalError("final Save must update a provider already persisted by Responses connection test")
     }
 }
 

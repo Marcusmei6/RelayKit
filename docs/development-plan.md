@@ -277,7 +277,7 @@ See `docs/agents/README.md` for the assignment header and dispatch rules.
 
 ## Phase 7.9: RC1 Public Proof Remediation
 
-Status: implementation complete for its bound artifact; the fresh final matrix passed in `relaykit_test`, independent `relaykit_cr` passed, and `automated_classifier=false` was preserved for local ad-hoc RC1 acceptance. A newer final-candidate audit is now `needs work`; Signed Beta remains a separate, unexecuted distribution lane.
+Status: implementation complete for its bound artifact; the fresh final matrix passed in `relaykit_test`, independent `relaykit_cr` passed, and `automated_classifier=false` was preserved for local ad-hoc RC1 acceptance. Phase 7.10 records the newer product-level candidate result; Signed Beta remains a separate, unexecuted distribution lane.
 
 - The tracked remote-Mac acceptance guide and resume helper are machine-neutral. Real host, account, address, and checkout paths are local environment inputs only; the pre-remediation originals remain in ignored `docs/private/` and `scripts/private/` archives.
 - `scripts/public-boundary-check.sh` scans tracked text for personal home paths, private network addresses, SSH targets, and machine identifiers in addition to existing provider, credential, and sensitive-path gates. Its contract proves ignored and untracked fixture content stays out of scope while forcibly tracked private/build paths fail.
@@ -290,19 +290,20 @@ Status: implementation complete for its bound artifact; the fresh final matrix p
 
 ## Phase 7.10: RC1 Native Responses Chain Wave 2
 
-Status: needs work for the final RC1 candidate. Commit `665515f`, zip SHA-256 `462d3b2bfe9a2a5a910e0c6d4091a1fd1ec67b29b0ae9fd63ce18045c3005001`, and extracted tree SHA-256 `dd065dffa81ceaa9f6c0eefa8b354515bf15ab792d3bd95a64379c67837afb37` are the single current setup and must be reused without rebuilding.
+Status: complete for the local ad-hoc RC1 product gate. Signed Beta remains a separate, unexecuted distribution lane. The fixed zip SHA-256 is `8a4050017c4ca21b85c3ef645c02d31cfbe0e901c38b5578f74ddf5cdb76d3dc`; its fresh extraction and the exercised App tree both hash to `0e965ee792beb2a62c7494db3acb4b6e5c2c3bc03bc06c381323c14a740bca5c` under the current bundle-tree algorithm.
 
 - The native 480x760 `NSPopover` remains the product surface. Failed custom AX role/parent/attachment retries were removed. The historical `exact remote AXPopover proof blocked` conclusion remains accurate but is separated from the product gate.
-- Two current-package ordinary launches passed zero-surface-before and unique same-PID WindowServer-surface-after checks with process-bound screenshots. Provider/Keychain persistence, App-owned Gateway startup, and isolated Desktop A/B/C are still incomplete, so no current manifest PASS exists.
+- Two current-package ordinary launches passed zero-surface-before and unique same-PID WindowServer-surface-after checks. The current App-first flow saved a Keychain-reference-only native Responses provider, restored it after reopening the same extracted App, retained one reachable/available model, exposed it from the App-owned gateway, and passed the ordinary right-click Quit/19777-release gate.
+- One isolated Desktop run completed the plain, Markdown, and real shell/tool stages with exact PID/window and rollout bindings. Markdown structure and the native tool block are visible in current-run screenshots; the function call/output match, the command exited 0, and no raw XML/`function_calls` or unresolved tool payload was accepted.
 
 - The top-level proof begins with an empty isolated provider destination and uses exact RelayKit PID/window-bound AX to save provider name, loopback URL, synthetic key, model, and `openai_responses`. It rejects completed provider injection, `key_file`, and curl-only proof.
 - Saved config must contain `api_format=openai_responses` and a Keychain reference only. The same extracted App must relaunch and expose the restored protocol, URL, model, and saved-key state before its bundled Gateway is started through the UI.
 - The dedicated `rc1_native_responses_three_stage` Desktop profile attaches to the App-owned Gateway and UI-saved config. Stages A/B/C each have exactly one submission and require, respectively, a text marker, native Markdown structure, and the exact shell command plus `pwd` with a verified `function_call_output` roundtrip.
 - Current evidence is run-bound and hash-bound. A PASS manifest requires every named predicate, empty `failed_events`, all three stages in `evidence_verified/submitted` state, Desktop WebSocket ingress, Gateway SSE egress, tool roundtrip, matching run ids, and current harness/scenario/App zip/screenshot/usage/provider-event/provider-config hashes.
 - Historical `observation_failed_*` evidence remains failed and untouched. It cannot be relabeled, copied, or used to derive phase-B PASS.
-- Historical run `rc1-native-20260716T111701Z-external-sandbox` remains valid only for its bound App zip SHA-256 `abf74744aedbe699e20b37064802d8753e40424d8886e68d2c32954eadec776a`; it is ineligible for the current candidate.
+- Failed candidates `462d3b2bfe9a2a5a910e0c6d4091a1fd1ec67b29b0ae9fd63ce18045c3005001` and `be70c14b22483fb28e62f51854d0659d4f567fd7837b53690d302a0e2b9c1c2f`, plus historical run `rc1-native-20260716T111701Z-external-sandbox`, remain ineligible for the current candidate.
 - The RC1 stage ledger, process-bound screenshots, rollout binding, usage, provider events, and tool evidence are authoritative for A/B/C. The generic manual-proof render summary is a separate schema and must not override or substitute for the RC1 stage result.
-- Current-candidate Swift, Go race/test/vet/gofmt, manifest, Desktop AX, manual-proof, public-boundary, and diff checks passed. Current-artifact live route, diagnostics, final Test/CR, cleanup, and manifest derivation remain pending.
+- Current-candidate Desktop AX/manual/RC1 contracts, Swift, Go test/vet/gofmt, public-boundary, diagnostics redaction, frozen package verification, current App/Desktop evidence, and cleanup checks passed. `dist/rc1-final-current-run-20260717/final/product-evidence.json` is the current product truth; the manifest is generated from it only after the tracked worktree is committed and clean.
 
 ## Release Gate
 

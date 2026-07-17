@@ -1811,15 +1811,26 @@ private struct ProviderFormView: View {
     private func save() {
         let saved: Bool
         switch mode {
-        case .add:
-            saved = model.addProvider(draft, keychainCredential: keychainCredential)
+        case .add, .import:
+            saved = persistAddOrImportDraft()
         case .edit(let provider):
             saved = model.updateProvider(provider.id, draft: draft, keychainCredential: keychainCredential)
-        case .import:
-            saved = model.addProvider(draft, keychainCredential: keychainCredential)
         }
         if saved {
             onClose()
+        }
+    }
+
+    private func persistAddOrImportDraft() -> Bool {
+        let action = ProviderTestSaveAction.resolve(
+            providerID: resolvedProviderId,
+            persistedProviderIDs: Set(model.configuredProviders.map(\.id))
+        )
+        switch action {
+        case .add:
+            return model.addProvider(draft, keychainCredential: keychainCredential)
+        case .update(let originalProviderID):
+            return model.updateProvider(originalProviderID, draft: draft, keychainCredential: keychainCredential)
         }
     }
 
@@ -2470,16 +2481,7 @@ private struct ProviderFormView: View {
     private func saveForConnectionTest() -> Bool {
         switch mode {
         case .add, .import:
-            let action = ProviderTestSaveAction.resolve(
-                providerID: resolvedProviderId,
-                persistedProviderIDs: Set(model.configuredProviders.map(\.id))
-            )
-            switch action {
-            case .add:
-                return model.addProvider(draft, keychainCredential: keychainCredential)
-            case .update(let originalProviderID):
-                return model.updateProvider(originalProviderID, draft: draft, keychainCredential: keychainCredential)
-            }
+            return persistAddOrImportDraft()
         case .edit(let provider):
             return model.updateProvider(provider.id, draft: draft, keychainCredential: keychainCredential)
         }

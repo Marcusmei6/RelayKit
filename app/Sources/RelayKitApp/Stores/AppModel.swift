@@ -187,7 +187,15 @@ final class AppModel: ObservableObject {
         guard gateway.isRunning else {
             throw GatewayClientError.gatewayUnavailable
         }
-        return try await client.testProvider(providerID: providerID, modelID: modelID)
+        let result = try await client.testProvider(providerID: providerID, modelID: modelID)
+        recordProviderTestResult(result)
+        return result
+    }
+
+    private func recordProviderTestResult(_ result: ProviderTestResponse) {
+        models.removeAll { $0.id == result.modelID }
+        guard result.connectionKind == .connected else { return }
+        models.append(RelayModel(id: result.modelID, ownedBy: result.providerID))
     }
 
     func providerHealth(for provider: ConfiguredProviderEntry) -> ProviderHealthSnapshot {
