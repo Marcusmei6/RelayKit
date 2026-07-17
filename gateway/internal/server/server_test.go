@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -838,6 +839,360 @@ printf '%s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
 			t.Fatalf("codex args missing %q in %s", want, record)
 		}
 	}
+}
+
+func TestOfficialPassthroughCodexHomeExplicitExecCommandIsDeterministic(t *testing.T) {
+	dir := t.TempDir()
+	codexHome := filepath.Join(dir, "codex-home")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(dir, "codex-record.txt")
+	fakeCodex := filepath.Join(dir, "codex")
+	fakeScript := `#!/bin/sh
+set -eu
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$arg"; fi
+  prev="$arg"
+done
+prompt=$(cat)
+printf 'invoked %s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
+printf '%s' "$prompt" >"$RELAYKIT_TEST_CODEX_PROMPT_RECORD"
+if printf '%s' "$prompt" | grep -q "Tool result call_explicit"; then
+  printf '%s\n' 'FINAL TOOL OUTPUT' >"$out"
+else
+  printf '%s\n' '{"kind":"message","name":"","arguments_json":"{}","text":"NESTED MESSAGE ONLY"}' >"$out"
+fi
+`
+	if err := os.WriteFile(fakeCodex, []byte(fakeScript), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfgJSON := `{
+  "official_passthrough": {
+    "base_url": "https://api.openai.example/v1",
+    "credential_ref": {"kind": "codex_home", "value": "` + codexHome + `"},
+    "codex_binary": "` + fakeCodex + `",
+    "models": [{"id": "gpt-5.5", "display_name": "GPT-5.5"}]
+  },
+  "providers": []
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAYKIT_TEST_CODEX_RECORD", recordPath)
+	promptRecordPath := filepath.Join(dir, "codex-prompt.txt")
+	t.Setenv("RELAYKIT_TEST_CODEX_PROMPT_RECORD", promptRecordPath)
+	h, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	validTools := []map[string]any{{
+		"type": "function",
+		"name": "exec_command",
+		"parameters": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"cmd": map[string]any{"type": "string"}},
+			"required":   []string{"cmd"},
+		},
+	}}
+	request := func(input any, tools []map[string]any) *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]any{"model": "gpt-5.5", "input": input, "tools": tools})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	invocationCount := func() int {
+		record, err := os.ReadFile(recordPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(record), "invoked ")
+	}
+
+	const command = "printf '  preserve these bytes  '; pwd"
+	const exact = "Use the shell tool to run exactly: " + command + "\nThen report only the exact tool output."
+
+	t.Run("exact first leg bypasses fabricated nested message and preserves arguments", func(t *testing.T) {
+		rec := request(exact, validTools)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var response struct {
+			Output []struct {
+				Type      string `json:"type"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"output"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Output) != 1 || response.Output[0].Type != "function_call" || response.Output[0].Name != "exec_command" {
+			t.Fatalf("response output = %#v", response.Output)
+		}
+		var arguments map[string]string
+		if err := json.Unmarshal([]byte(response.Output[0].Arguments), &arguments); err != nil {
+			t.Fatalf("decode arguments = %v", err)
+		}
+		if arguments["cmd"] != command {
+			t.Fatalf("cmd = %q, want %q", arguments["cmd"], command)
+		}
+		if invocationCount() != 0 {
+			t.Fatalf("nested Codex invocations = %d, want 0", invocationCount())
+		}
+	})
+
+	t.Run("function output second leg uses nested message-only completion", func(t *testing.T) {
+		rec := request([]map[string]any{
+			{"type": "message", "role": "user", "content": []map[string]string{{"type": "input_text", "text": exact}}},
+			{"type": "function_call", "call_id": "call_explicit", "name": "exec_command", "arguments": `{"cmd":"` + command + `"}`},
+			{"type": "function_call_output", "call_id": "call_explicit", "output": "exact output"},
+		}, validTools)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"output_text":"FINAL TOOL OUTPUT"`) || strings.Contains(rec.Body.String(), `"type":"function_call"`) {
+			t.Fatalf("second leg response = %s", rec.Body.String())
+		}
+		if invocationCount() != 1 {
+			t.Fatalf("nested Codex invocations = %d, want 1", invocationCount())
+		}
+		record, err := os.ReadFile(recordPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := string(record)
+		if strings.Contains(args, "--output-schema") {
+			t.Fatalf("message-only nested args included output schema: %s", args)
+		}
+		for _, want := range []string{"--disable shell_tool", "--disable unified_exec"} {
+			if !strings.Contains(args, want) {
+				t.Fatalf("message-only nested args missing %q: %s", want, args)
+			}
+		}
+		prompt, err := os.ReadFile(promptRecordPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(prompt), "External tools:") || !strings.Contains(string(prompt), "Return only the final textual answer") {
+			t.Fatalf("message-only nested prompt = %s", prompt)
+		}
+	})
+
+	for name, tc := range map[string]struct {
+		input any
+		tools []map[string]any
+	}{
+		"malformed exact prefix": {
+			input: "Use the shell tool to run exactly: " + command,
+			tools: validTools,
+		},
+		"unadvertised exec command": {
+			input: exact,
+			tools: []map[string]any{{"type": "function", "name": "other", "parameters": validTools[0]["parameters"]}},
+		},
+		"exec command with incompatible cmd schema": {
+			input: exact,
+			tools: []map[string]any{{
+				"type":       "function",
+				"name":       "exec_command",
+				"parameters": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "number"}}, "required": []string{"cmd"}},
+			}},
+		},
+	} {
+		t.Run(name+" fails closed", func(t *testing.T) {
+			rec := request(tc.input, tc.tools)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if invocationCount() != 1 {
+				t.Fatalf("nested Codex invocations = %d, want 1", invocationCount())
+			}
+		})
+	}
+
+	t.Run("near match retains nested decision", func(t *testing.T) {
+		rec := request("Please "+exact, validTools)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"output_text":"NESTED MESSAGE ONLY"`) {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if invocationCount() != 2 {
+			t.Fatalf("nested Codex invocations = %d, want 2", invocationCount())
+		}
+	})
+}
+
+func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t *testing.T) {
+	validTools := []responsesTool{{
+		Type: "function",
+		Name: "exec_command",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"cmd":               map[string]any{"type": "string"},
+				"yield_time_ms":     map[string]any{"type": "number"},
+				"max_output_tokens": map[string]any{"type": "number"},
+			},
+			"required": []any{"cmd"},
+		},
+	}}
+	const command = "printf explicit"
+	const exact = "Use the shell tool to run exactly: " + command + "\nThen report only the exact tool output."
+	const arguments = `{"cmd":"printf explicit"}`
+	encodeInput := func(input any) json.RawMessage {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	check := func(t *testing.T, input any, tools []responsesTool, wantCommand string, wantMessageOnly, wantErr bool) {
+		t.Helper()
+		raw := encodeInput(input)
+		messages, err := chatMessages(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotCommand, messageOnly, err := officialExplicitExecCommand(raw, messages, tools)
+		if (err != nil) != wantErr {
+			t.Fatalf("err = %v, want error = %t", err, wantErr)
+		}
+		if gotCommand != wantCommand || messageOnly != wantMessageOnly {
+			t.Fatalf("command = %q, messageOnly = %t; want %q, %t", gotCommand, messageOnly, wantCommand, wantMessageOnly)
+		}
+	}
+
+	t.Run("exact string first leg remains supported", func(t *testing.T) {
+		check(t, exact, validTools, command, false, false)
+	})
+	t.Run("latest exact user message is executable", func(t *testing.T) {
+		check(t, []map[string]any{{"type": "message", "role": "user", "content": "history"}, {"type": "message", "role": "user", "content": exact}}, validTools, command, false, false)
+	})
+	t.Run("historical exact request followed by user does not execute", func(t *testing.T) {
+		check(t, []map[string]any{{"type": "message", "role": "user", "content": exact}, {"type": "message", "role": "user", "content": "new request"}}, validTools, "", false, false)
+	})
+	t.Run("historical malformed prefix followed by user does not fail", func(t *testing.T) {
+		check(t, []map[string]any{{"type": "message", "role": "user", "content": explicitExecCommandPrefix + command}, {"type": "message", "role": "user", "content": "new request"}}, validTools, "", false, false)
+	})
+	t.Run("ordered current explicit roundtrip is message only", func(t *testing.T) {
+		check(t, []map[string]any{
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		}, validTools, "", true, false)
+	})
+	t.Run("later user makes prior explicit roundtrip historical", func(t *testing.T) {
+		check(t, []map[string]any{
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+			{"type": "message", "role": "user", "content": "new request"},
+		}, validTools, "", false, false)
+	})
+	t.Run("normal multi tool output retains nested decision", func(t *testing.T) {
+		check(t, []map[string]any{
+			{"type": "message", "role": "user", "content": "look this up"},
+			{"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": `{"query":"x"}`},
+			{"type": "function_call_output", "call_id": "call_lookup", "output": "result"},
+		}, append(validTools, responsesTool{Type: "function", Name: "lookup", Parameters: map[string]any{"type": "object"}}), "", false, false)
+	})
+
+	for _, role := range []string{"assistant", "system"} {
+		t.Run(role+" history does not trigger explicit command", func(t *testing.T) {
+			check(t, []map[string]any{{"type": "message", "role": role, "content": exact}}, validTools, "", false, false)
+		})
+	}
+
+	invalidRoundTrips := map[string][]map[string]any{
+		"missing function call": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		},
+		"empty function call id": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "", "output": "done"},
+		},
+		"mismatched output call id": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_2", "output": "done"},
+		},
+		"empty output": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": ""},
+		},
+		"empty content": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "content": ""},
+		},
+		"ambiguous output fields": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done", "content": "done"},
+		},
+		"duplicate outputs": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done again"},
+		},
+		"wrong order": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+		},
+		"wrong function": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		},
+		"wrong command arguments": {
+			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": `{"cmd":"different"}`},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		},
+	}
+	for name, input := range invalidRoundTrips {
+		t.Run(name+" fails closed", func(t *testing.T) {
+			check(t, input, validTools, "", false, true)
+		})
+	}
+
+	t.Run("malformed current prefix with output fails closed", func(t *testing.T) {
+		check(t, []map[string]any{
+			{"type": "message", "role": "user", "content": explicitExecCommandPrefix + command},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		}, validTools, "", false, true)
+	})
+
+	t.Run("additional required tool field fails closed", func(t *testing.T) {
+		incompatible := []responsesTool{{
+			Type: "function", Name: "exec_command",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"cmd": map[string]any{"type": "string"}, "shell": map[string]any{"type": "string"}},
+				"required":   []any{"cmd", "shell"},
+			},
+		}}
+		check(t, exact, incompatible, "", false, true)
+	})
 }
 
 func responseCallID(t *testing.T, events string) string {

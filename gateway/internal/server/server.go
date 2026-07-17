@@ -950,7 +950,7 @@ func writeWebSocketFunctionCallArguments(w *bufio.Writer, event string, outputIn
 func (s *Server) completeResponse(ctx context.Context, req responsesRequest, messages []chatMessage, start time.Time, transport string) (map[string]any, int, map[string]any) {
 	if model, ok := s.officialModelForModel(req.Model); ok {
 		if officialUsesCodexHome(*s.config.OfficialPassthrough) {
-			result, err := s.completeOfficialWithCodex(ctx, *s.config.OfficialPassthrough, model, messages, req.Tools)
+			result, err := s.completeOfficialWithCodex(ctx, *s.config.OfficialPassthrough, model, req, messages)
 			if err != nil {
 				status, errorType, message := officialCodexFailureDetails(err)
 				s.recordFailedUsage("openai", req.Model, errorType, status, start, transport)
@@ -1059,7 +1059,7 @@ func (s *Server) completeResponse(ctx context.Context, req responsesRequest, mes
 
 func (s *Server) officialResponses(w http.ResponseWriter, r *http.Request, req responsesRequest, model config.Model, messages []chatMessage, start time.Time) {
 	if officialUsesCodexHome(*s.config.OfficialPassthrough) {
-		result, err := s.completeOfficialWithCodex(r.Context(), *s.config.OfficialPassthrough, model, messages, req.Tools)
+		result, err := s.completeOfficialWithCodex(r.Context(), *s.config.OfficialPassthrough, model, req, messages)
 		if err != nil {
 			status, errorType, message := officialCodexFailureDetails(err)
 			s.recordFailedUsage("openai", req.Model, errorType, status, start, "responses_http")
@@ -1592,7 +1592,24 @@ const officialCodexDecisionSchema = `{
   }
 }`
 
-func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, messages []chatMessage, tools []responsesTool) (map[string]any, error) {
+const (
+	explicitExecCommandPrefix = "Use the shell tool to run exactly: "
+	explicitExecCommandSuffix = "\nThen report only the exact tool output."
+)
+
+func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, req responsesRequest, messages []chatMessage) (map[string]any, error) {
+	command, messageOnly, err := officialExplicitExecCommand(req.Input, messages, req.Tools)
+	if err != nil {
+		return nil, &officialCodexFailure{
+			status:    http.StatusBadRequest,
+			errorType: "invalid_request_error",
+			message:   "invalid explicit shell tool request",
+		}
+	}
+	if command != "" {
+		return explicitExecCommandResponse(command, model.ID)
+	}
+
 	codexHome := strings.TrimPrefix(official.CredentialRef.Value, "~/")
 	if codexHome != official.CredentialRef.Value {
 		home, err := os.UserHomeDir()
@@ -1620,12 +1637,15 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 	defer cancel()
 	args := []string{"exec", "--skip-git-repo-check", "--ephemeral", "--ignore-rules", "--ignore-user-config", "--sandbox", "read-only", "--color", "never"}
 	prompt := codexPrompt(messages)
-	if len(tools) > 0 {
+	if messageOnly {
+		args = append(args, "--disable", "shell_tool", "--disable", "unified_exec")
+		prompt = codexExplicitToolResultPrompt(messages)
+	} else if len(req.Tools) > 0 {
 		if err := os.WriteFile(schemaPath, []byte(officialCodexDecisionSchema), 0600); err != nil {
 			return nil, err
 		}
 		args = append(args, "--disable", "shell_tool", "--disable", "unified_exec", "--output-schema", schemaPath)
-		prompt, err = codexToolDecisionPrompt(messages, tools)
+		prompt, err = codexToolDecisionPrompt(messages, req.Tools)
 		if err != nil {
 			return nil, err
 		}
@@ -1648,8 +1668,17 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 	if text == "" {
 		return nil, fmt.Errorf("empty official response")
 	}
-	if len(tools) > 0 {
-		return responsesFromOfficialCodexDecision(text, tools, model.ID)
+	if messageOnly {
+		return responsesFromChat(chatResponse{
+			ID: "codex-official",
+			Choices: []chatChoice{{
+				Message:      chatMessage{Role: "assistant", Content: text},
+				FinishReason: "stop",
+			}},
+		}, model.ID), nil
+	}
+	if len(req.Tools) > 0 {
+		return responsesFromOfficialCodexDecision(text, req.Tools, model.ID)
 	}
 	return responsesFromChat(chatResponse{
 		ID: "codex-official",
@@ -1658,6 +1687,156 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 			FinishReason: "stop",
 		}},
 	}, model.ID), nil
+}
+
+func codexExplicitToolResultPrompt(messages []chatMessage) string {
+	return "The requested external shell command has already completed. Do not call or request any tool. " +
+		"Return only the final textual answer from the completed tool result.\nConversation:\n" + codexPrompt(messages)
+}
+
+func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools []responsesTool) (command string, messageOnly bool, err error) {
+	var text string
+	if json.Unmarshal(input, &text) == nil {
+		command, explicit, err := parseExplicitExecCommand(text, tools)
+		if !explicit {
+			return "", false, nil
+		}
+		return command, false, err
+	}
+
+	var items []responsesInputItem
+	if json.Unmarshal(input, &items) != nil {
+		return "", false, nil
+	}
+	currentUser := -1
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Role == "user" && (items[i].Type == "" || items[i].Type == "message") {
+			currentUser = i
+			break
+		}
+	}
+	if currentUser < 0 {
+		return "", false, nil
+	}
+	message, ok := items[currentUser].chatMessage()
+	if !ok {
+		return "", false, nil
+	}
+	command, explicit, err := parseExplicitExecCommand(message.Content, tools)
+	if !explicit {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if currentUser == len(items)-1 {
+		return command, false, nil
+	}
+	if len(items)-currentUser != 3 {
+		return "", false, fmt.Errorf("invalid explicit shell tool roundtrip")
+	}
+	if err := validateExplicitExecCommandRoundTrip(command, items[currentUser+1], items[currentUser+2]); err != nil {
+		return "", false, err
+	}
+	return "", true, nil
+}
+
+func parseExplicitExecCommand(text string, tools []responsesTool) (command string, explicit bool, err error) {
+	if !strings.HasPrefix(text, explicitExecCommandPrefix) {
+		return "", false, nil
+	}
+	candidate := strings.TrimPrefix(text, explicitExecCommandPrefix)
+	if !strings.HasSuffix(candidate, explicitExecCommandSuffix) {
+		return "", true, fmt.Errorf("malformed explicit shell command")
+	}
+	command = strings.TrimSuffix(candidate, explicitExecCommandSuffix)
+	if command == "" || strings.ContainsAny(command, "\r\n") || !officialExecCommandToolAllowed(tools) {
+		return "", true, fmt.Errorf("incompatible explicit shell command")
+	}
+	return command, true, nil
+}
+
+func validateExplicitExecCommandRoundTrip(command string, call, output responsesInputItem) error {
+	if call.Type != "function_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec_command" {
+		return fmt.Errorf("invalid explicit shell function call")
+	}
+	arguments, err := strictJSONObject([]byte(call.Arguments))
+	if err != nil || len(arguments) != 1 {
+		return fmt.Errorf("invalid explicit shell function arguments")
+	}
+	var calledCommand string
+	if json.Unmarshal(arguments["cmd"], &calledCommand) != nil || calledCommand != command {
+		return fmt.Errorf("explicit shell function arguments do not match")
+	}
+	if output.Type != "function_call_output" || strings.TrimSpace(output.CallID) == "" || output.CallID != call.CallID {
+		return fmt.Errorf("invalid explicit shell function output")
+	}
+	if output.Output != nil && output.Content != nil {
+		return fmt.Errorf("ambiguous explicit shell function output")
+	}
+	var result string
+	if output.Output != nil {
+		result = *output.Output
+	} else if output.Content != nil {
+		if json.Unmarshal(output.Content, &result) != nil {
+			return fmt.Errorf("invalid explicit shell function output content")
+		}
+	}
+	if strings.TrimSpace(result) == "" {
+		return fmt.Errorf("empty explicit shell function output")
+	}
+	return nil
+}
+
+func officialExecCommandToolAllowed(tools []responsesTool) bool {
+	found := false
+	for _, tool := range tools {
+		if tool.Name != "exec_command" {
+			continue
+		}
+		if found || tool.Type != "function" || tool.Parameters["type"] != "object" {
+			return false
+		}
+		properties, ok := tool.Parameters["properties"].(map[string]any)
+		if !ok {
+			return false
+		}
+		cmd, ok := properties["cmd"].(map[string]any)
+		if !ok || cmd["type"] != "string" {
+			return false
+		}
+		required, ok := tool.Parameters["required"].([]any)
+		if !ok || len(required) != 1 || required[0] != "cmd" {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
+func explicitExecCommandResponse(command, requestedModel string) (map[string]any, error) {
+	arguments, err := json.Marshal(map[string]string{"cmd": command})
+	if err != nil {
+		return nil, err
+	}
+	response := responseID("")
+	callID := strings.Replace(response, "resp_", "call_", 1)
+	return map[string]any{
+		"id":          response,
+		"object":      "response",
+		"status":      "completed",
+		"model":       requestedModel,
+		"output_text": "",
+		"output": []map[string]any{{
+			"type":      "function_call",
+			"id":        callID,
+			"status":    "completed",
+			"call_id":   callID,
+			"name":      "exec_command",
+			"arguments": string(arguments),
+		}},
+		"usage": responsesUsage(nil),
+	}, nil
 }
 
 func codexToolDecisionPrompt(messages []chatMessage, tools []responsesTool) (string, error) {
@@ -1915,16 +2094,21 @@ func chatMessages(input json.RawMessage) ([]chatMessage, error) {
 }
 
 type responsesInputItem struct {
-	Type    string          `json:"type"`
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-	CallID  string          `json:"call_id"`
-	Output  string          `json:"output"`
+	Type      string          `json:"type"`
+	Role      string          `json:"role"`
+	Content   json.RawMessage `json:"content"`
+	CallID    string          `json:"call_id"`
+	Name      string          `json:"name"`
+	Arguments string          `json:"arguments"`
+	Output    *string         `json:"output"`
 }
 
 func (i responsesInputItem) chatMessage() (chatMessage, bool) {
 	if i.Type == "function_call_output" {
-		output := strings.TrimSpace(i.Output)
+		output := ""
+		if i.Output != nil {
+			output = strings.TrimSpace(*i.Output)
+		}
 		if output == "" {
 			var text string
 			if err := json.Unmarshal(i.Content, &text); err == nil {
