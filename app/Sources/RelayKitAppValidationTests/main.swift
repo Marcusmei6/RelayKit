@@ -1271,18 +1271,14 @@ func expectStatusPopoverContract() throws {
     for forbidden in ["RelayKitPanel", "NSPanel(", "styleMask: [.titled", "makeKeyAndOrderFront", "activate(ignoringOtherApps:)"] {
         if source.contains(forbidden) { fatalError("status popover retained window experiment token: \(forbidden)") }
     }
-    guard source.contains("final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate"),
-          source.contains("private static let popoverAccessibilityIdentifier = \"relaykit-popover-root\""),
+    guard source.contains("final class RelayKitApp: NSObject, NSApplicationDelegate"),
           source.contains("private let popover = NSPopover()"),
-          source.contains("private weak var popoverAccessibilityWindow: NSWindow?"),
-          source.contains("private var popoverAccessibilityGeneration = 0"),
           source.contains("app.setActivationPolicy(.accessory)") else {
         fatalError("single reusable accessory status popover contract is missing")
     }
     guard let launchStart = source.range(of: "func applicationDidFinishLaunching"),
           let resignStart = source.range(of: "func applicationDidResignActive", range: launchStart.upperBound..<source.endIndex),
-          let delegateStart = source.range(of: "func popoverDidShow", range: resignStart.upperBound..<source.endIndex),
-          let terminateStart = source.range(of: "func applicationWillTerminate", range: delegateStart.upperBound..<source.endIndex),
+          let terminateStart = source.range(of: "func applicationWillTerminate", range: resignStart.upperBound..<source.endIndex),
           let toggleStart = source.range(of: "@objc private func togglePopover", range: terminateStart.upperBound..<source.endIndex),
           let menuStart = source.range(of: "private func showStatusMenu", range: toggleStart.upperBound..<source.endIndex),
           let quitStart = source.range(of: "@objc private func quitRelayKit", range: menuStart.upperBound..<source.endIndex),
@@ -1291,20 +1287,20 @@ func expectStatusPopoverContract() throws {
         fatalError("status popover lifecycle helper boundaries are missing")
     }
     let launch = source[launchStart.lowerBound..<resignStart.lowerBound]
-    let resign = source[resignStart.lowerBound..<delegateStart.lowerBound]
-    let delegates = source[delegateStart.lowerBound..<terminateStart.lowerBound]
+    let resign = source[resignStart.lowerBound..<terminateStart.lowerBound]
     let termination = source[terminateStart.lowerBound..<toggleStart.lowerBound]
     let toggle = source[toggleStart.lowerBound..<menuStart.lowerBound]
     let quit = source[quitStart.lowerBound..<valueStart.lowerBound]
     let evidence = source[evidenceStart.lowerBound..<source.endIndex]
-    for required in ["#selector(togglePopover(_:))", "sendAction(on: [.leftMouseUp, .rightMouseUp])", "popover.behavior = smokeKeepsPopoverOpen ? .applicationDefined : .transient", "popover.contentSize = NSSize(width: 480, height: 760)", "popover.contentViewController = NSHostingController(", "popover.delegate = self", "NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown])", "DispatchQueue.main.async", "self?.popover.close()", "self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)"] {
+    for required in ["#selector(togglePopover(_:))", "sendAction(on: [.leftMouseUp, .rightMouseUp])", "popover.behavior = smokeKeepsPopoverOpen ? .applicationDefined : .transient", "popover.contentSize = NSSize(width: 480, height: 760)", "popover.contentViewController = NSHostingController(", "NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown])", "DispatchQueue.main.async", "self?.popover.close()", "self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)"] {
         if !launch.contains(required) { fatalError("status popover launch setup is missing \(required)") }
     }
-    for required in ["schedulePopoverAccessibilityAttachment(generation: popoverAccessibilityGeneration, remainingAttempts: 20)", "generation == popoverAccessibilityGeneration, popover.isShown", "remainingAttempts: remainingAttempts - 1", "attachPopoverAccessibilityRoot()", "detachPopoverAccessibilityRoot()", "popover.contentViewController?.view.window", "window.setAccessibilityRole(.popover)", "window.setAccessibilityIdentifier(Self.popoverAccessibilityIdentifier)", "window.setAccessibilityParent(button)", "button.setAccessibilityChildren([window])", "window.setAccessibilityIdentifier(nil)", "window.setAccessibilityParent(nil)"] {
-        if !delegates.contains(required) { fatalError("status popover accessibility lifecycle is missing \(required)") }
-    }
-    for forbidden in ["button.setAccessibilityChildren([popover])", "application.setAccessibilityWindows", "_AXUIElementGetWindow", "window.windowNumber", "relaykit-popover-root-window-"] {
+    for forbidden in ["NSPopoverDelegate", "popover.delegate = self", "popoverDidShow", "popoverDidClose", "popoverAccessibilityGeneration", "popoverAccessibilityIdentifier", "popoverAccessibilityWindow", "schedulePopoverAccessibilityAttachment", "attachPopoverAccessibilityRoot", "detachPopoverAccessibilityRoot", "setAccessibilityRole(.popover)", "setAccessibilityIdentifier(", "setAccessibilityParent(", "setAccessibilityChildren(", "application.setAccessibilityWindows", "_AXUIElementGetWindow", "window.windowNumber", "relaykit-popover-root-window-"] {
         if source.contains(forbidden) { fatalError("status popover retained forbidden AX binding: \(forbidden)") }
+    }
+    guard content.contains(".accessibilityIdentifier(\"tab-\\(item.rawValue)\")"),
+          content.contains("case connect"), content.contains("case usage"), content.contains("case settings") else {
+        fatalError("actionable tab accessibility identifiers are missing")
     }
     for identifier in ["tab-connect", "tab-usage", "tab-settings"] {
         if content.contains(".smokeSection(\"\(identifier)\"") {
@@ -1337,11 +1333,10 @@ func expectStatusPopoverContract() throws {
     }
     guard let removeMonitor = termination.range(of: "NSEvent.removeMonitor"),
           let close = termination.range(of: "popover.close()"),
-          let detach = termination.range(of: "detachPopoverAccessibilityRoot()"),
           let gatewayStop = termination.range(of: "model.stopGateway()"),
           let authStop = termination.range(of: "model.stopOfficialAuthProcessForShutdown()"),
-          removeMonitor.lowerBound < close.lowerBound && close.lowerBound < detach.lowerBound &&
-          detach.lowerBound < gatewayStop.lowerBound && gatewayStop.lowerBound < authStop.lowerBound else {
+          removeMonitor.lowerBound < close.lowerBound && close.lowerBound < gatewayStop.lowerBound &&
+          gatewayStop.lowerBound < authStop.lowerBound else {
         fatalError("termination must remove monitor and close popover before shutdown")
     }
     if !quit.contains("NSApplication.shared.terminate(sender)") {

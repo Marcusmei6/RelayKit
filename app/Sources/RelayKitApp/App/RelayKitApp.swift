@@ -5,13 +5,10 @@ import SwiftUI
 
 @main
 @MainActor
-final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
-    private static let popoverAccessibilityIdentifier = "relaykit-popover-root"
+final class RelayKitApp: NSObject, NSApplicationDelegate {
     private let model = AppModel()
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
-    private weak var popoverAccessibilityWindow: NSWindow?
-    private var popoverAccessibilityGeneration = 0
     private var smokeSections = Set<String>()
     private let smokeTab = Tab(rawValue: value(after: "--ui-smoke-tab") ?? "") ?? .connect
     private let smokeShowsProvider = CommandLine.arguments.contains("--ui-smoke-provider")
@@ -82,7 +79,6 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 .environmentObject(model)
                 .frame(width: 480, height: 760)
         )
-        popover.delegate = self
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.popover.close()
@@ -114,58 +110,12 @@ final class RelayKitApp: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.close()
     }
 
-    func popoverDidShow(_ notification: Notification) {
-        popoverAccessibilityGeneration += 1
-        schedulePopoverAccessibilityAttachment(generation: popoverAccessibilityGeneration, remainingAttempts: 20)
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        popoverAccessibilityGeneration += 1
-        detachPopoverAccessibilityRoot()
-    }
-
-    private func schedulePopoverAccessibilityAttachment(generation: Int, remainingAttempts: Int) {
-        guard generation == popoverAccessibilityGeneration, popover.isShown else { return }
-        attachPopoverAccessibilityRoot()
-        guard remainingAttempts > 0 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.schedulePopoverAccessibilityAttachment(
-                generation: generation,
-                remainingAttempts: remainingAttempts - 1
-            )
-        }
-    }
-
-    private func attachPopoverAccessibilityRoot() {
-        guard let button = statusItem?.button,
-              let window = popover.contentViewController?.view.window else {
-            detachPopoverAccessibilityRoot()
-            return
-        }
-        popoverAccessibilityWindow = window
-        window.setAccessibilityElement(true)
-        window.setAccessibilityRole(.popover)
-        window.setAccessibilityIdentifier(Self.popoverAccessibilityIdentifier)
-        window.setAccessibilityParent(button)
-        button.setAccessibilityChildren([window])
-    }
-
-    private func detachPopoverAccessibilityRoot() {
-        statusItem?.button?.setAccessibilityChildren([])
-        if let window = popoverAccessibilityWindow {
-            window.setAccessibilityIdentifier(nil)
-            window.setAccessibilityParent(nil)
-        }
-        popoverAccessibilityWindow = nil
-    }
-
     func applicationWillTerminate(_ notification: Notification) {
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
             self.outsideClickMonitor = nil
         }
         popover.close()
-        detachPopoverAccessibilityRoot()
         model.stopGateway()
         model.stopOfficialAuthProcessForShutdown()
     }
