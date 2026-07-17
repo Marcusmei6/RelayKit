@@ -32,10 +32,24 @@ grep -Fq 'model.stopOfficialAuthProcessForShutdown()' <<<"${termination_body}" |
 
 grep -Fq '/usr/bin/open -n "${APP_BUNDLE}"' "${SCRIPT}" ||
   fail "normal extracted app launch must use LaunchServices"
+grep -Fq 'RelayKit status item did not become available after normal app launch' "${SCRIPT}" ||
+  fail "normal launch must wait for the exact status item before clicking"
 grep -Fq 'RELAYKIT_DOGFOOD_REUSE_CURRENT_ZIP' "${SCRIPT}" ||
   fail "dogfood must support reusing the exact zip already bound to route evidence"
 grep -Fq 'RELAYKIT_DOGFOOD_REUSE_CURRENT_ZIP must be 0 or 1' "${SCRIPT}" ||
   fail "dogfood zip reuse must reject unsupported values"
+grep -Fq '/usr/bin/ditto -x -k "${ZIP_PATH}" "${INSTALL_DIR}"' "${SCRIPT}" ||
+  fail "signed app extraction must preserve macOS metadata without AppleDouble files"
+if grep -Fq '/usr/bin/unzip' "${SCRIPT}"; then
+  fail "signed app extraction must not materialize AppleDouble files inside the bundle"
+fi
+grep -Fq 'test -x "${BUNDLED_RELAY}" || fail "extracted bundled gateway is missing"' "${SCRIPT}" ||
+  fail "dogfood must require the bundled gateway executable"
+if grep -Fq '"${APP_REAL}" --verify-bundled-gateway' "${SCRIPT}"; then
+  fail "signed dogfood must verify the gateway through the normal App lifecycle"
+fi
+grep -Fq 'bundled_gateway_verify: "passed_via_normal_app_lifecycle"' "${SCRIPT}" ||
+  fail "dogfood evidence must describe the normal App gateway proof"
 grep -Fq 'launch_method: "launchservices_open_extracted_app"' "${SCRIPT}" ||
   fail "evidence must identify the LaunchServices launch path"
 grep -Fq 'normal_launch: true' "${SCRIPT}" ||
@@ -51,8 +65,16 @@ grep -Fq '.smokeRecordOnly("provider-connection-use-reachable-visible", recorder
   fail "Use reachable smoke recording must preserve the real AXButton identifier"
 grep -Fq 'set candidateElement to contents of candidate' "${SCRIPT}" ||
   fail "provider input must dereference the AX tree item"
-grep -Fq 'set providerScroll to scroll area 1 of group 1 of pop over 1 of menu bar 1' "${SCRIPT}" ||
-  fail "provider input must descend through the provider sheet wrapper"
+grep -Fq 'set popoverRoot to group 1 of pop over 1 of menu bar 1' "${SCRIPT}" ||
+  fail "provider input must bind the exact popover root"
+grep -Fq 'repeat with candidate in (every group of popoverRoot)' "${SCRIPT}" ||
+  fail "provider input must stay within first-level groups of the exact popover"
+grep -Fq 'value of attribute "AXIdentifier" of candidateElement is "provider-form-container"' "${SCRIPT}" ||
+  fail "provider input must bind the exact provider sheet container"
+grep -Fq 'multiple provider form containers' "${SCRIPT}" ||
+  fail "provider input must reject ambiguous provider sheet containers"
+grep -Fq 'set providerScroll to scroll area 1 of providerForm' "${SCRIPT}" ||
+  fail "provider input must descend through the bound provider sheet wrapper"
 if grep -Fq 'repeat with candidate in entire contents' "${SCRIPT}"; then
   fail "provider input must not scan an untyped global AX list"
 fi
@@ -109,16 +131,16 @@ grep -Fq -- '"-credential-stdin"' "${GATEWAY_PROCESS_SOURCE}" ||
 grep -Fq 'credential_handoff: "anonymous_stdin_pipe"' "${SCRIPT}" ||
   fail "evidence must identify the App-to-gateway in-memory credential handoff"
 
-reload_body="$(sed -n '/private func reloadGatewayAfterProviderSave/,/^    }/p' "${APP_MODEL_SOURCE}")"
+reload_body="$(sed -n '/private func saveProviderTransaction/,/^    }/p' "${APP_MODEL_SOURCE}")"
 [[ -n "${reload_body}" ]] ||
-  fail "provider save must define a running-gateway credential reload"
-grep -Fq 'guard gateway.isRunning else' <<<"${reload_body}" ||
+  fail "provider save transaction must define a running-gateway credential reload"
+grep -Fq 'guard reloadRunningGateway else' <<<"${reload_body}" ||
   fail "provider save must not start a previously stopped gateway"
 grep -Fq 'restartGateway()' <<<"${reload_body}" ||
   fail "provider save must restart a running gateway with the new Keychain snapshot"
-reload_call_count="$(grep -Fc 'reloadGatewayAfterProviderSave(confirmation: confirmation)' "${APP_MODEL_SOURCE}" || true)"
+reload_call_count="$(grep -Fc 'reloadRunningGateway: gatewayWasRunning' "${APP_MODEL_SOURCE}" || true)"
 [[ "${reload_call_count}" -eq 2 ]] ||
-  fail "provider add and update must both reload a running gateway after persistence"
+  fail "provider add and update must both use the transactional running-gateway reload"
 
 grep -Fq 'write_reopen_failure_evidence()' "${SCRIPT}" ||
   fail "reopened provider failures must preserve a redacted runtime diagnosis"
@@ -146,6 +168,7 @@ for field in \
   zip_build_time_utc \
   extracted_app_path \
   connect_clicked \
+  gateway_warmup_retry_used \
   settings_clicked \
   usage_clicked \
   gateway_restart_clicked \

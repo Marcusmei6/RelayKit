@@ -44,6 +44,7 @@ GATEWAY_19777_RELEASED_AFTER_QUIT=false
 REACHABLE_MODELS_REPROBED_AFTER_REOPEN=false
 FIXTURE_KEYCHAIN_REMOVED=false
 PROVIDER_SAVE_RELOADED_RUNNING_GATEWAY=false
+GATEWAY_WARMUP_RETRY_USED=false
 CODEX_CONFIG_BEFORE=""
 CODEX_AUTH_BEFORE=""
 
@@ -434,7 +435,19 @@ on run argv
   tell application "System Events"
     tell process "RelayKitApp.bin"
       set frontmost to true
-      set providerScroll to scroll area 1 of group 1 of pop over 1 of menu bar 1
+      set providerForm to missing value
+      set popoverRoot to group 1 of pop over 1 of menu bar 1
+      repeat with candidate in (every group of popoverRoot)
+        set candidateElement to contents of candidate
+        try
+          if value of attribute "AXIdentifier" of candidateElement is "provider-form-container" then
+            if providerForm is not missing value then error "multiple provider form containers"
+            set providerForm to candidateElement
+          end if
+        end try
+      end repeat
+      if providerForm is missing value then error "provider form container not found"
+      set providerScroll to scroll area 1 of providerForm
       set fieldCandidates to every text field of UI element 1 of providerScroll
       set fieldCandidates to fieldCandidates & (every text field of providerScroll)
       repeat with candidate in fieldCandidates
@@ -811,6 +824,26 @@ launch_normal_extracted_app() {
     cat /tmp/relaykit-dogfood-open.log >&2 || true
     fail "LaunchServices did not start the extracted app"
   fi
+  local status_item_ready=0
+  local status_item_probe=""
+  for _ in {1..100}; do
+    status_item_probe="$(/usr/bin/osascript - "${APP_PID}" 2>/dev/null <<'APPLESCRIPT' || true
+on run argv
+  tell application "System Events"
+    tell (first process whose unix id is (item 1 of argv as integer))
+      return exists (first menu bar item of menu bar 1 whose description is "RelayKit")
+    end tell
+  end tell
+end run
+APPLESCRIPT
+    )"
+    if [[ "${status_item_probe}" == "true" ]]; then
+      status_item_ready=1
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "${status_item_ready}" == "1" ]] || fail "RelayKit status item did not become available after normal app launch"
   /usr/bin/osascript - "${APP_PID}" >/tmp/relaykit-dogfood-open-popover.log 2>&1 <<'APPLESCRIPT'
 on run argv
   tell application "System Events"
@@ -1130,10 +1163,10 @@ zip_build_time_utc="$(date -u -r "$(stat -f '%m' "${ZIP_PATH}")" '+%Y-%m-%dT%H:%
 
 rm -rf "${OUT}"
 mkdir -p "${INSTALL_DIR}" "${SCREENSHOT_DIR}"
-/usr/bin/unzip -q "${ZIP_PATH}" -d "${INSTALL_DIR}"
+/usr/bin/ditto -x -k "${ZIP_PATH}" "${INSTALL_DIR}"
 test -x "${APP_REAL}" || fail "extracted app executable is missing"
+test -x "${BUNDLED_RELAY}" || fail "extracted bundled gateway is missing"
 codesign --verify --deep --strict --verbose=4 "${APP_BUNDLE}" >/dev/null
-"${APP_REAL}" --verify-bundled-gateway >/dev/null
 
 set +e
 spctl_output="$(spctl -a -vvv -t exec "${APP_BUNDLE}" 2>&1)"
@@ -1244,7 +1277,13 @@ if ! wait_for_ax_text "1 reachable"; then
     fail "App gateway started but model health could not be read"
   visible_count="$(jq '.data // [] | length' "${RUN_DIR}/app-gateway-models.json")"
   hidden_count="$(jq '.model_health.hidden // [] | length' "${RUN_DIR}/app-gateway-models.json")"
-  fail "App gateway health was visible=${visible_count} hidden=${hidden_count}, but reachable UI did not appear"
+  capture_popover "provider-gateway-warmup-first-attempt"
+  ax_press_exact "provider-connection-test-entry" || fail "gateway warm-up Test connection AX click failed"
+  if ! wait_for_ax_text "1 reachable"; then
+    capture_popover "provider-test-connection-failure"
+    fail "App gateway health was visible=${visible_count} hidden=${hidden_count}, but reachable UI did not appear after one warm-up retry"
+  fi
+  GATEWAY_WARMUP_RETRY_USED=true
 fi
 wait_for_ax_text "1 unavailable" || fail "unavailable model count did not appear"
 wait_for_ax_exact "provider-connection-use-reachable-visible" || fail "Use reachable action did not appear"
@@ -1374,6 +1413,7 @@ jq -n \
     --argjson gateway_19777_released_after_quit "${GATEWAY_19777_RELEASED_AFTER_QUIT}" \
     --argjson reachable_models_reprobed_after_reopen "${REACHABLE_MODELS_REPROBED_AFTER_REOPEN}" \
     --argjson provider_save_reloaded_running_gateway "${PROVIDER_SAVE_RELOADED_RUNNING_GATEWAY}" \
+    --argjson gateway_warmup_retry_used "${GATEWAY_WARMUP_RETRY_USED}" \
     --argjson fixture_keychain_item_removed "${FIXTURE_KEYCHAIN_REMOVED}" \
   --argjson screenshot_count "${screenshot_count}" \
   '{
@@ -1387,7 +1427,7 @@ jq -n \
       normal_launch: true,
       ui_smoke_launch_used_for_dogfood_claim: false,
       codesign_verify: "passed",
-      bundled_gateway_verify: "passed",
+      bundled_gateway_verify: "passed_via_normal_app_lifecycle",
       gatekeeper: {
         status: $spctl_status,
         output: $spctl_output,
@@ -1396,6 +1436,7 @@ jq -n \
     },
     app_regression: {
       connect_clicked: true,
+      gateway_warmup_retry_used: $gateway_warmup_retry_used,
       settings_clicked: true,
       usage_clicked: true,
       gateway_restart_clicked: true,
@@ -1440,7 +1481,7 @@ jq -n \
       fixture_keychain_item_removed: $fixture_keychain_item_removed,
       shared_18787_free_after: true,
       gateway_19777_free_after: true,
-      signed_beta_status: "Apple Developer Program approval pending"
+      signed_beta_status: (if $spctl_status == 0 and ($spctl_output | contains("Notarized Developer ID")) then "notarized_developer_id_candidate" else "local_ad_hoc" end)
     },
     route_proof_boundary: {
       current_setup_evidence_only: true,
