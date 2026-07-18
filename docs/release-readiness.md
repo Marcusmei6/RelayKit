@@ -4,9 +4,9 @@ RelayKit is preparing for public beta distribution, not a public release yet.
 
 ## Signed Beta v0.1.0 Current Candidate
 
-Release readiness is **incomplete**. Product freeze is commit `8c231338792d83af6579521892c43414889ae809`; harness remediations are commits `8cce29d9036afecfe5eac5deee3f153296f5324a` and `4178c51a9a3348e17a81016e16b6d19aa1cc0efb`. The fixed Developer ID signed and notarized zip has SHA-256 `bd229bf98caf22bce9b0e1e9a763ad0faf8c060b713ee984e0b7af276a46da8c`. Signing, notarization, packaging, and signed-package dogfood are not current blockers.
+Release readiness is **incomplete**. Product freeze is commit `8c231338792d83af6579521892c43414889ae809`; harness remediations are commits `8cce29d9036afecfe5eac5deee3f153296f5324a` and `4178c51a9a3348e17a81016e16b6d19aa1cc0efb`. The fixed zip with SHA-256 `bd229bf98caf22bce9b0e1e9a763ad0faf8c060b713ee984e0b7af276a46da8c` is already Developer ID signed, notarized, and stapled. Preserve this artifact; do not rebuild, repackage, re-sign, re-notarize, or re-staple it for the remaining gate.
 
-The latest eligible attempt is the redacted manifest at `dist/signed-beta-v0.1.0/final-current-run-20260718T083620Z/manifest.json`. It ended with `query_content_invalid`: `official-plain` was submitted exactly once and reached `evidence_verified`; the other five stages remained `not_submitted`, each with submission count `0`. Test omitted the exact `RELAYKIT_FORMAT_OK` token from both Markdown queries. This is a Test scenario failure, not a product, harness, model, adapter, authentication, or protocol failure. The partial attempt is failed and ineligible and establishes no route PASS.
+The latest eligible attempt is the redacted manifest at `dist/signed-beta-v0.1.0/final-current-run-20260718T083620Z/manifest.json`. It ended with `query_content_invalid`: `official-plain` was submitted exactly once and reached `evidence_verified`; the other five stages remained `not_submitted`, each with submission count `0`. The partial attempt is failed and ineligible and establishes no route PASS.
 
 Later Test and Worker lanes sent zero requests and failed at execution-role/infrastructure authorization. The current blocker is `EXECUTION_ROLE_AUTHORIZATION_BLOCKED`; the required final fresh six-stage run remains unexecuted. Earlier Official tool-text behavior and authentication drift remain historical and ineligible, not current blockers.
 
@@ -14,7 +14,7 @@ The current global auth hash is `2efbbf0d93ba4fd4430039315fbf2bc979d7624dac7c786
 
 The tracked worktree is clean, `19777` is free, and `18787` was untouched. Exact remote `AXPopover` binding remains a historical blocked item and is not a release gate. Signed Beta v0.1.0 remains incomplete, the public GitHub Release is not published, and the updater is not implemented.
 
-The next safe action is for a role-authorized persistent executor to run one fresh six-stage proof, followed sequentially by Test adjudication and CR. Do not publish a GitHub Release or implement an updater from the current state.
+The current completion sequence is: preserve the fixed artifact; run one fresh six-stage proof against that current package; clean up the proof session and produce its redacted manifest; obtain `relaykit_test` adjudication; obtain `relaykit_cr` review; then make the release decision. Do not publish a GitHub Release, begin a real-user beta, or implement an updater before those gates.
 
 ## Historical Local/RC1 State
 
@@ -72,7 +72,9 @@ Reserved app metadata:
 
 These values are already written into `Info.plist` as `CFBundleIdentifier`, `CFBundleShortVersionString`, and `CFBundleVersion` so the later Sparkle 2 updater phase can reuse the package structure. Do not implement an updater before signed beta. See `docs/update-policy.md` and `docs/updater-readiness.md`.
 
-## Local Checks
+## Historical Local/RC1 Checks
+
+The checks below describe earlier local/RC1 artifacts. They are historical reference only and do not complete the current Signed Beta candidate or replace its fresh six-stage current-package proof.
 
 ```bash
 test -x dist/RelayKitApp.app/Contents/MacOS/relay
@@ -98,7 +100,9 @@ Latest local check on this machine, 2026-07-10:
 
 `./script/build_app_bundle.sh --verify` and `./script/package_release.sh --verify` must continue to reject local beta artifacts that are missing `_CodeSignature/CodeResources`, are not `Signature=adhoc`, have a `TeamIdentifier`, or contain iOS-style provisioning profiles.
 
-## Signed Beta Flow
+## Historical Signed Beta Packaging Flow
+
+This packaging contract remains documented for a future version or a required rebuild. Do not rerun it for the fixed current artifact, which is already signed, notarized, and stapled.
 
 The signed beta script is present but intentionally fails without real Apple distribution inputs:
 
@@ -137,7 +141,7 @@ Expected signed beta output:
 
 If the credentials are missing, the script must print `missing Developer ID signing identity / notarization credentials` and must not create or reuse a signed zip.
 
-Future Signed Beta checklist:
+Historical packaging/rebuild checklist (not the current completion sequence):
 
 1. Confirm a Developer ID Application identity:
 
@@ -197,12 +201,12 @@ Local beta:
 - no cloud telemetry;
 - feedback collected manually with `docs/feedback-template.md`.
 
-Signed beta still needs:
+The current Signed Beta candidate still needs:
 
-- external Developer ID Application certificate and notarization credentials;
-- successful run of `./script/package_signed_release.sh`;
-- a stapled app that passes the acceptance commands above;
-- draft GitHub Release assets and checksum.
+- one fresh six-stage proof against the preserved current package;
+- proof-session cleanup and a redacted manifest;
+- sequential `relaykit_test` adjudication and `relaykit_cr` review;
+- a release decision after both gates. No route PASS or publication decision exists yet.
 
 Public release still needs:
 

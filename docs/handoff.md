@@ -6,9 +6,9 @@ RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-c
 
 ## Signed Beta v0.1.0 Current Candidate
 
-Status: **incomplete**. Product freeze is commit `8c231338792d83af6579521892c43414889ae809`; harness remediations are commits `8cce29d9036afecfe5eac5deee3f153296f5324a` and `4178c51a9a3348e17a81016e16b6d19aa1cc0efb`. The fixed Developer ID signed and notarized zip has SHA-256 `bd229bf98caf22bce9b0e1e9a763ad0faf8c060b713ee984e0b7af276a46da8c`. Signing, notarization, packaging, and signed-package dogfood are not current blockers.
+Status: **incomplete**. Product freeze is commit `8c231338792d83af6579521892c43414889ae809`; harness remediations are commits `8cce29d9036afecfe5eac5deee3f153296f5324a` and `4178c51a9a3348e17a81016e16b6d19aa1cc0efb`. The fixed zip with SHA-256 `bd229bf98caf22bce9b0e1e9a763ad0faf8c060b713ee984e0b7af276a46da8c` is already Developer ID signed, notarized, and stapled. Preserve this artifact; do not rebuild, repackage, re-sign, re-notarize, or re-staple it for the remaining gate.
 
-The latest eligible attempt is the redacted manifest at `dist/signed-beta-v0.1.0/final-current-run-20260718T083620Z/manifest.json`. It ended with `query_content_invalid`: `official-plain` was submitted exactly once and reached `evidence_verified`, while each of the other five stages remained `not_submitted` with submission count `0`. Test omitted the exact `RELAYKIT_FORMAT_OK` token from both Markdown queries. This is a Test scenario failure, not a product, harness, model, adapter, authentication, or protocol failure. The partial attempt is failed and ineligible; it establishes no route PASS.
+The latest eligible attempt is the redacted manifest at `dist/signed-beta-v0.1.0/final-current-run-20260718T083620Z/manifest.json`. It ended with `query_content_invalid`: `official-plain` was submitted exactly once and reached `evidence_verified`, while each of the other five stages remained `not_submitted` with submission count `0`. The partial attempt is failed and ineligible; it establishes no route PASS.
 
 Later Test and Worker lanes sent zero requests and failed at execution-role/infrastructure authorization. The current blocker is `EXECUTION_ROLE_AUTHORIZATION_BLOCKED`, and the required final fresh six-stage run remains unexecuted. Earlier Official tool-text behavior and authentication drift remain historical and ineligible; neither is the current blocker.
 
@@ -16,7 +16,7 @@ The current global auth hash is `2efbbf0d93ba4fd4430039315fbf2bc979d7624dac7c786
 
 The tracked worktree is clean, `19777` is free, and `18787` was untouched. Private route artifacts stay under ignored `dist/` and DesktopProof directories. Signed Beta v0.1.0 remains incomplete, the public GitHub Release is not published, and the updater is not implemented. Exact remote `AXPopover` binding remains a historical blocked item and is not a release gate.
 
-The next safe action is for a role-authorized persistent executor to run one fresh six-stage proof, followed sequentially by Test adjudication and CR.
+The current completion sequence is: preserve the fixed artifact; run one fresh six-stage proof against that current package; clean up the proof session and produce its redacted manifest; obtain `relaykit_test` adjudication; obtain `relaykit_cr` review; then make the release decision. A real-user beta starts only after those gates.
 
 Current product scope:
 
@@ -39,9 +39,9 @@ Validation must not mutate shared Codex state:
 
 The normal RelayKit App gateway path listens on `127.0.0.1:19777`. Isolated proof scripts may choose random loopback ports so they do not interfere with the app or shared services.
 
-## Current Verification Commands
+## Historical Local/RC1 Verification Commands
 
-Run these before claiming the beta candidate is ready:
+The commands below belong to the earlier local/RC1 product gate. They are historical reference only and do not complete the current Signed Beta candidate or replace its fresh six-stage current-package proof:
 
 ```bash
 cd app && swift build
@@ -115,7 +115,7 @@ Public-safe scripts:
 - `scripts/export-diagnostics.sh`: writes a redacted aggregate diagnostics bundle under `dist/diagnostics/` with version, bundle id, gateway health, provider/model counts, usage aggregate, and allowlisted recent error types. Unknown or contaminated error labels become `other`; a failed sensitive-content scan removes `diagnostics.json`. It must not export provider URLs, credentials, headers, raw request/response bodies, copied Codex auth files, or Keychain item names.
 - `scripts/export-diagnostics-test.sh`: injects private URL, Keychain, header, request/response, provider, and error-label sentinels into isolated fixtures and proves none appear in the exported bundle.
 - `scripts/codex-desktop-acceptance.sh`: builds an isolated Codex config/catalog around a loopback gateway and fake/demo provider contract.
-- `scripts/codex-desktop-manual-proof.sh`: creates isolated state under `~/Library/Application Support/RelayKit/DesktopProof/` and launches isolated Codex Desktop for GUI route proof. The intended standard live interface is one explicitly authorized `run-auto --scenario /absolute/path/scenario.json` invocation; the default manual entry remains a compatibility path. Its caller keeps query bodies in private `0600` temporary files, and the harness never asks a human to select, type, click Send, or press Enter. Fixture setup uses a random safe loopback port; the real App-first path uses the extracted RelayKit App's normal `19777` lifecycle and refuses to proceed if that port is already occupied. It discovers the current Desktop executable by bundle id `com.openai.codex`, uses the matching app-bundled `Contents/Resources/codex` catalog/app-server binary, preserves current official model metadata, and merges every configured provider model with its public display and upstream names. The default `sandbox-exec` profile denies writes to the physical global `.codex` tree, Codex/OpenAI Application Support state, Codex/CUA preference files, LaunchAgents, and the legacy gateway config while allowing the isolated DesktopProof tree. Before/after global, source, plus harness hashes fail closed on any change. Setup-only proves official + demo provider picker data; full proof still requires real isolated Desktop requests and writes evidence to `dist/codex-desktop-manual-proof/`. Only current-run evidence may advance preserved attempt/complete state, and process-bound screenshots stay with that evidence. `$relaykit-desktop-query` is a separate single-query dispatcher and is not full route proof.
+- `scripts/codex-desktop-manual-proof.sh`: creates isolated state under `~/Library/Application Support/RelayKit/DesktopProof/` and launches isolated Codex Desktop for GUI route proof. The historical RC1 proof used one explicitly authorized `run-auto --scenario /absolute/path/scenario.json` invocation with no human interaction. Its caller keeps query bodies in private `0600` temporary files. Fixture setup uses a random safe loopback port; the real App-first path uses the extracted RelayKit App's normal `19777` lifecycle and refuses to proceed if that port is already occupied. It discovers the current Desktop executable by bundle id `com.openai.codex`, uses the matching app-bundled `Contents/Resources/codex` catalog/app-server binary, preserves current official model metadata, and merges every configured provider model with its public display and upstream names. The default `sandbox-exec` profile denies writes to the physical global `.codex` tree, Codex/OpenAI Application Support state, Codex/CUA preference files, LaunchAgents, and the legacy gateway config while allowing the isolated DesktopProof tree. Before/after global, source, plus harness hashes fail closed on any change. Setup-only proves official + demo provider picker data; full proof still requires real isolated Desktop requests and writes evidence to `dist/codex-desktop-manual-proof/`. Only current-run evidence may advance preserved attempt/complete state, and process-bound screenshots stay with that evidence. `$relaykit-desktop-query` is a separate single-query dispatcher and is not full route proof.
 - `scripts/codex-desktop-manual-proof-test.sh`: verifies Desktop executable and bundled CLI discovery, current official catalog preservation, full provider-model merging, official gateway allowlist synchronization, fail-closed global/source/harness state guards, last-route preservation, route outcome semantics, current-run tool evidence, interactive Desktop AX readiness, and bounded cleanup when an Electron process ignores `SIGTERM`.
 - `scripts/full-merged-catalog-proof.sh`: proves official + demo provider catalog merge and request routing with loopback upstreams.
 
@@ -136,7 +136,7 @@ Historical RC1 release status:
 - public release: not complete.
 - updater runtime: deferred until a signed and notarized artifact exists.
 
-Signed Beta boundary: Developer ID and notary-profile readiness no longer block future distribution work. This goal deliberately stops before `package_signed_release.sh`, notarization submission, stapling, Gatekeeper validation, GitHub Release creation, or updater metadata, so no Signed Beta completion claim or new signed artifact is allowed here.
+Historical RC1 boundary: Developer ID and notary-profile readiness no longer blocked later distribution work, but that RC1 goal stopped before `package_signed_release.sh`, notarization submission, stapling, Gatekeeper validation, GitHub Release creation, or updater metadata. That historical boundary does not describe the current fixed signed, notarized, and stapled artifact.
 
 Do not describe the local ad-hoc package as a signed beta. Do not mock notarization success.
 
@@ -199,37 +199,20 @@ Historical Desktop route evidence:
 - `markdown_render_verified`, `tool_gui_verified`, and `raw_protocol_absent` are true. No bare `<function_calls>`, `<invoke>`, `<parameter>`, `<tool_call>`, raw XML, or unresolved tool JSON was accepted.
 - The completed run used the current Desktop-bundled Codex CLI, did not use mock OK, old usage, CLI fallback, or manually edited evidence, and released both protected ports.
 
-Automated Desktop route-proof contract:
+Current Signed Beta completion sequence:
 
-1. Invoke the four-stage harness only after live requests are explicitly authorized. Accessibility permission, authenticated Desktop state, and repository-external provider configuration are one-time prerequisites.
-2. Create a unique `0700` temporary directory with separate `0600` query files and a `0600` v1 scenario. Query bodies must not enter argv, environment variables, tracked files, reports, or evidence.
-3. Invoke exactly `./scripts/codex-desktop-manual-proof.sh run-auto --scenario /absolute/path/scenario.json` with stdin closed. Do not add a manual fallback or resubmit an ambiguous paid request.
-4. The harness selects the model and submits every stage itself. Auth, Keychain, Accessibility, PID/window, or selector failures must end with a bounded machine-readable error instead of asking a person to select, type, click Send, or press Enter.
-5. For a harness-only rerun, set both `RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP=1` and `RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP=1`, verify the product artifact SHA before/after, and do not invoke a package script. Accept full-standard success only when the harness exits `0` and current evidence records `desktop_gui_route_proof=automated_gui_complete`, `human_intervention_count=0`, unchanged product/harness/scenario layers, and the fixed product artifact SHA. The accepted current result satisfies this contract.
-
-Manual compatibility rerun contract:
-
-1. Run the harness in its default `manual_user_only` mode and keep its terminal open.
-2. The harness/AX setup check verifies the current official plus configured provider model picker before route proof; do not ask the user to validate GPT-5.2.
-3. Send the generated GPT-5.5 request, GPT-5.6 Luna request, provider Markdown request, and provider shell/tool request, waiting for each visible result before advancing the terminal stage.
-4. Return to the proof terminal and press Enter after each stage. GUI completion requires process-bound screenshots, fresh completed/200 usage for both lanes, a matched function call plus output, correct Markdown/tool rendering, and no raw XML/`function_calls`.
-5. The tool checkpoint regenerates current-run rollout evidence before evaluation and combines matching exit-zero evidence with the visible tool command/marker; localized Desktop success text is not treated as route success by itself.
-
-Future Signed Beta checklist:
-
-1. Confirm `security find-identity -p codesigning -v | grep "Developer ID Application"` finds the Developer ID Application identity.
-2. Store notarization credentials with `xcrun notarytool store-credentials` outside git.
-3. Export `RELAYKIT_SIGNING_IDENTITY`, `RELAYKIT_NOTARYTOOL_PROFILE`, `RELAYKIT_APPLE_TEAM_ID`, and `RELAYKIT_GITHUB_REPO`.
-4. Run `./script/package_signed_release.sh`.
-5. Verify `codesign --verify --deep --strict --verbose=4 dist/RelayKitApp.app`, `spctl -a -vvv -t exec dist/RelayKitApp.app`, and `xcrun stapler validate dist/RelayKitApp.app`.
-6. Install dogfood from the signed zip, not from the repo checkout.
-7. Create the GitHub Release draft with `./script/create_github_release_draft.sh`.
+1. Preserve the fixed SHA-256 `bd229bf98caf22bce9b0e1e9a763ad0faf8c060b713ee984e0b7af276a46da8c` artifact without repeating package, signing, notarization, or stapling work.
+2. Run one fresh six-stage proof against the current package.
+3. Clean up the proof session and generate the redacted manifest.
+4. Send the unchanged evidence to `relaykit_test` for adjudication.
+5. After Test, send the unchanged result to `relaykit_cr` for review.
+6. Make the release decision only after both gates.
 
 Versioning, install/uninstall instructions, privacy docs, updater policy, and the signed package script are reserved in `docs/release-readiness.md`, `docs/update-policy.md`, and `docs/updater-readiness.md`.
 
-## User Feedback Loop
+## Post-Gate User Feedback Loop
 
-The next useful milestone is a small real-user beta, not more private machine proof. Use:
+The next milestone is the six-stage current-package proof, then `relaykit_test`, then `relaykit_cr`, and only then a release decision. If those gates approve the candidate, begin the small real-user beta using:
 
 - `docs/beta-test-guide.md` for install, provider setup, local verification, and cleanup.
 - `docs/feedback-template.md` for structured feedback without asking users to share keys, tokens, provider base URLs, or raw private logs.
