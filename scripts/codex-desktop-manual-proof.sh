@@ -731,6 +731,10 @@ for index, stage in enumerate(stages):
         field_value = stage[field]
         if not isinstance(field_value, str) or not field_value.strip() or len(field_value) > 256:
             raise SystemExit(f"stage {index} {field} is invalid")
+    dynamic_model_id = stage["model_id"] == "@current-official"
+    dynamic_model_label = stage["model_label"] == "@current-official"
+    if dynamic_model_id != dynamic_model_label:
+        raise SystemExit(f"stage {index} dynamic model fields must both be @current-official")
     if stage["expect"] not in {"plain", "markdown", "tool"}:
         raise SystemExit(f"stage {index} expectation is invalid")
     query_path = Path(stage["query_file"])
@@ -869,6 +873,93 @@ resolve_automated_model_label() {
   ' "${app_server_path}"
 }
 
+resolve_automated_scenario_models() {
+  local scenario_path="$1"
+  local app_server_path="$2"
+  python3 - "${scenario_path}" "${app_server_path}" <<'PY'
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+scenario_path = Path(sys.argv[1])
+app_server_path = Path(sys.argv[2])
+
+try:
+    scenario = json.loads(scenario_path.read_text())
+    app_server = json.loads(app_server_path.read_text())
+except (OSError, json.JSONDecodeError):
+    raise SystemExit("current_official_catalog_invalid")
+
+stages = scenario.get("stages")
+if not isinstance(stages, list):
+    raise SystemExit("scenario_invalid")
+
+dynamic_stages = [
+    stage for stage in stages
+    if stage.get("model_id") == "@current-official"
+    and stage.get("model_label") == "@current-official"
+]
+
+current_official = None
+if dynamic_stages:
+    official = app_server.get("official")
+    if not isinstance(official, list):
+        raise SystemExit("current_official_catalog_invalid")
+    visible = []
+    for item in official:
+        if not isinstance(item, dict):
+            raise SystemExit("current_official_catalog_invalid")
+        hidden = item.get("hidden", False)
+        if not isinstance(hidden, bool):
+            raise SystemExit("current_official_catalog_invalid")
+        if hidden:
+            continue
+        model = item.get("model")
+        label = item.get("displayName")
+        if not isinstance(model, str) or not model.strip() or not isinstance(label, str) or not label.strip():
+            raise SystemExit("current_official_catalog_invalid")
+        visible.append((model.strip(), label.strip()))
+    if not visible:
+        raise SystemExit("current_official_catalog_empty")
+    duplicates = [model for model, count in Counter(model for model, _ in visible).items() if count > 1]
+    if duplicates:
+        raise SystemExit("current_official_model_duplicate")
+    current_official = visible[0]
+
+catalog = []
+for section in ("official", "provider"):
+    items = app_server.get(section, [])
+    if not isinstance(items, list):
+        raise SystemExit("model_label_resolution_failed")
+    catalog.extend(item for item in items if isinstance(item, dict))
+
+resolved = []
+for stage in stages:
+    stage = dict(stage)
+    if stage.get("model_id") == "@current-official":
+        if stage.get("model_label") != "@current-official" or current_official is None:
+            raise SystemExit("scenario_invalid")
+        stage["model_id"], stage["model_label"] = current_official
+    else:
+        model_id = stage.get("model_id")
+        labels = [
+            item.get("displayName").strip()
+            for item in catalog
+            if item.get("model") == model_id
+            and isinstance(item.get("displayName"), str)
+            and item.get("displayName").strip()
+        ]
+        if len(labels) != 1:
+            raise SystemExit("model_label_resolution_failed")
+        stage["model_label"] = labels[0]
+    resolved.append(stage)
+
+scenario["stages"] = resolved
+print(json.dumps(scenario, sort_keys=True))
+PY
+}
+
 automated_stages_complete() {
   local stages_path="$1"
   local expected_count="$2"
@@ -977,7 +1068,7 @@ from pathlib import Path
 
 sessions_root = Path(sys.argv[1]) / "sessions"
 since_epoch = float(sys.argv[2] or 0)
-model_id = sys.argv[3]
+expected_model = sys.argv[3]
 marker = sys.argv[4]
 output = Path(sys.argv[5])
 
@@ -1006,6 +1097,7 @@ for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
     current_model = ""
     user_marker_count = 0
     assistant_marker_count = 0
+    user_marker_models = []
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError:
@@ -1027,7 +1119,7 @@ for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
         if record_type == "turn_context":
             current_model = payload.get("model") or current_model
             continue
-        if record_type != "response_item" or current_model != model_id:
+        if record_type != "response_item":
             continue
         event_epoch = parse_ts(record.get("timestamp"))
         if since_epoch and (not event_epoch or event_epoch < since_epoch):
@@ -1039,15 +1131,18 @@ for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
             continue
         if payload.get("role") == "user":
             user_marker_count += 1
+            if isinstance(current_model, str) and current_model.strip():
+                user_marker_models.append(current_model.strip())
         elif payload.get("role") == "assistant":
             assistant_marker_count += 1
-    if user_marker_count == 1 and assistant_marker_count == 1:
+    marker_models = sorted(set(user_marker_models))
+    if user_marker_count == 1 and len(marker_models) == 1:
         candidates.append({
             "session_file": str(path.relative_to(sessions_root)),
             "thread_id": thread_id or None,
-            "model": model_id,
+            "model": marker_models[0],
             "user_marker_found": True,
-            "assistant_marker_found": True,
+            "assistant_marker_found": assistant_marker_count == 1,
             "user_marker_count": user_marker_count,
             "assistant_marker_count": assistant_marker_count,
         })
@@ -1056,17 +1151,84 @@ proof_found = len(candidates) == 1
 result = {
     "proof_found": proof_found,
     "candidate_count": len(candidates),
+    "binding_status": "bound" if proof_found else ("rollout_not_found" if len(candidates) == 0 else "rollout_not_unique"),
     "session_file": candidates[0]["session_file"] if proof_found else None,
     "thread_id": candidates[0]["thread_id"] if proof_found else None,
-    "model": model_id,
+    "model": candidates[0]["model"] if proof_found else None,
+    "expected_model": expected_model,
     "user_marker_found": proof_found,
-    "assistant_marker_found": proof_found,
+    "assistant_marker_found": candidates[0]["assistant_marker_found"] if proof_found else False,
     "user_marker_count": candidates[0]["user_marker_count"] if proof_found else 0,
     "assistant_marker_count": candidates[0]["assistant_marker_count"] if proof_found else 0,
 }
+
 output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 raise SystemExit(0 if proof_found else 1)
 PY
+}
+
+submitted_model_selection_matches() {
+  local binding_file="$1"
+  local expected_model="$2"
+  jq -e --arg expected "${expected_model}" '
+    .proof_found == true
+    and .candidate_count == 1
+    and (.model | type) == "string"
+    and .model == $expected
+  ' "${binding_file}" >/dev/null
+}
+
+fresh_completed_stage_usage() {
+  local usage_file="$1"
+  local baseline_count="$2"
+  case "${baseline_count}" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  jq -e --argjson baseline "${baseline_count}" '
+    [.[$baseline:][] | select((.status // "") == "completed" and (.http_status // 0) == 200)] as $events
+    | ($events | map(.model // "") | unique) as $models
+    | if ($events | length) == 0 then empty
+      else {
+        model: (if ($models | length) == 1 and ($models[0] | type) == "string" and ($models[0] | length) > 0 then $models[0] else null end),
+        event_count: ($events | length),
+        model_count: ($models | length),
+        status: "completed",
+        http_status: 200
+      }
+      end
+  ' "${usage_file}"
+}
+
+submitted_model_usage_matches() {
+  local usage_file="$1"
+  local baseline_count="$2"
+  local binding_file="$3"
+  local usage_json usage_model bound_model
+  usage_json="$(fresh_completed_stage_usage "${usage_file}" "${baseline_count}")" || return $?
+  usage_model="$(jq -r '.model // empty' <<<"${usage_json}")"
+  bound_model="$(jq -er '.model | select(type == "string" and length > 0)' "${binding_file}")" || return 6
+  [[ -n "${usage_model}" && "${usage_model}" == "${bound_model}" ]] || return 5
+  printf '%s\n' "${usage_json}"
+}
+
+wait_for_submitted_rollout_binding() {
+  local codex_home="$1"
+  local since_epoch="$2"
+  local expected_model="$3"
+  local marker="$4"
+  local output="$5"
+  local timeout_seconds="$6"
+  local deadline=$((SECONDS + timeout_seconds))
+  local binding_status
+  while (( SECONDS < deadline )); do
+    if write_automated_rollout_binding "${codex_home}" "${since_epoch}" "${expected_model}" "${marker}" "${output}"; then
+      return 0
+    fi
+    binding_status="$(jq -r '.binding_status // "rollout_not_found"' "${output}" 2>/dev/null || printf 'rollout_not_found')"
+    [[ "${binding_status}" == "rollout_not_found" ]] || return 2
+    sleep 1
+  done
+  return 3
 }
 
 scenario_argument() {
@@ -3419,16 +3581,23 @@ wait_for_automated_stage() {
   local timeout_seconds="$7"
   local binding_file="${RUN_DIR}/automated-rollout-${evidence_role}.json"
   local deadline=$((SECONDS + timeout_seconds))
+  local bound_model usage_status driver_code
+  bound_model="$(jq -er '.model | select(type == "string" and length > 0)' "${binding_file}")" || return 6
   while (( SECONDS < deadline )); do
     verify_desktop_window_identity || return 1
     summarize_usage || return 4
-    if fresh_stage_error "${OUT}/usage-events.json" "${baseline_count}" "${model_id}" >"${RUN_DIR}/automated-stage-error.json" 2>/dev/null; then
+    if fresh_stage_error "${OUT}/usage-events.json" "${baseline_count}" "${bound_model}" >"${RUN_DIR}/automated-stage-error.json" 2>/dev/null; then
       return 2
     fi
-    if fresh_stage_usage "${OUT}/usage-events.json" "${baseline_count}" "${model_id}" >"${RUN_DIR}/automated-stage-usage.json" 2>/dev/null; then
+    usage_status=0
+    submitted_model_usage_matches "${OUT}/usage-events.json" "${baseline_count}" "${binding_file}" >"${RUN_DIR}/automated-stage-usage.json" 2>/dev/null || usage_status=$?
+    if [[ "${usage_status}" -eq 5 ]]; then
+      return 5
+    elif [[ "${usage_status}" -eq 6 ]]; then
+      return 6
+    elif [[ "${usage_status}" -eq 0 ]]; then
       if ! write_automated_rollout_binding "${CODEX_HOME_DIR}" "${since_epoch}" "${model_id}" "${marker}" "${binding_file}"; then
-        sleep 1
-        continue
+        return 6
       fi
       if ! capture_desktop_window "${evidence_role}" "${marker}" "${expectation}"; then
         sleep 1
@@ -3751,7 +3920,8 @@ run_automated_proof() {
   local catalog_labels="${AUTOMATED_CATALOG_LABELS_FILE}"
   local overall_since stage_timeout desktop_pid expected_stage_count standard_route_status gpt55_marker gpt56_marker
   local stage index=0 stage_id model_id model_label query_source query_copy response_marker evidence_role expectation
-  local usage_baseline since_epoch submission_state="not_submitted" wait_status driver_code query_sha256
+  local usage_baseline since_epoch submission_state="not_submitted" wait_status bind_status driver_code query_sha256
+  local resolved_scenario_tmp resolution_error_file resolution_error
 
   [[ "${AX_DRIVER_SOURCE}" == "${driver_source}" ]] || {
     AUTO_ERROR_CODE="ax_driver_path_invalid"
@@ -3783,6 +3953,34 @@ run_automated_proof() {
     AUTO_ERROR_CODE="scenario_stage_count_invalid"
     return 1
   }
+  AUTO_ERROR_CODE="preflight_failed"
+  if [[ "${RELAYKIT_RC1_ATTACH_APP_GATEWAY:-0}" == "1" ]]; then
+    setup_rc1_native_responses_attached_preflight
+  else
+    AUTO_ERROR_CODE="global_state_capture_failed"
+    capture_global_state
+    AUTO_ERROR_CODE="preflight_failed"
+    setup_preflight real
+    AUTO_ERROR_CODE="preflight_evidence_failed"
+    write_evidence "automated_preflight_passed" "not_started" "${CONFIG_BEFORE}" "${AUTH_BEFORE}" "${CONFIG_HASH_BEFORE}" "${AUTH_HASH_BEFORE}" "${NOTIFY_HASH_BEFORE}"
+  fi
+  resolved_scenario_tmp="${AUTOMATED_SCENARIO_NORMALIZED}.resolved"
+  resolution_error_file="${RUN_DIR}/automated-scenario-resolution-error"
+  if resolve_automated_scenario_models "${AUTOMATED_SCENARIO_NORMALIZED}" "${OUT}/app-server.json" >"${resolved_scenario_tmp}" 2>"${resolution_error_file}"; then
+    chmod 600 "${resolved_scenario_tmp}"
+    mv "${resolved_scenario_tmp}" "${AUTOMATED_SCENARIO_NORMALIZED}"
+    rm -f "${resolution_error_file}"
+  else
+    resolution_error="$(head -n 1 "${resolution_error_file}" 2>/dev/null || true)"
+    case "${resolution_error}" in
+      current_official_catalog_empty|current_official_model_duplicate|current_official_catalog_invalid|model_label_resolution_failed|scenario_invalid)
+        AUTO_ERROR_CODE="${resolution_error}"
+        ;;
+      *) AUTO_ERROR_CODE="model_label_resolution_failed" ;;
+    esac
+    rm -f "${resolved_scenario_tmp}" "${resolution_error_file}"
+    return 1
+  fi
   AUTOMATED_PROFILE="$(automated_profile_for_scenario "${AUTOMATED_SCENARIO_NORMALIZED}" "${PROOF_PROVIDER_MODEL_ID}")" || {
     AUTO_ERROR_CODE="scenario_profile_invalid"
     return 1
@@ -3807,17 +4005,6 @@ run_automated_proof() {
       return 1
       ;;
   esac
-  AUTO_ERROR_CODE="preflight_failed"
-  if [[ "${RELAYKIT_RC1_ATTACH_APP_GATEWAY:-0}" == "1" ]]; then
-    setup_rc1_native_responses_attached_preflight
-  else
-    AUTO_ERROR_CODE="global_state_capture_failed"
-    capture_global_state
-    AUTO_ERROR_CODE="preflight_failed"
-    setup_preflight real
-    AUTO_ERROR_CODE="preflight_evidence_failed"
-    write_evidence "automated_preflight_passed" "not_started" "${CONFIG_BEFORE}" "${AUTH_BEFORE}" "${CONFIG_HASH_BEFORE}" "${AUTH_HASH_BEFORE}" "${NOTIFY_HASH_BEFORE}"
-  fi
   AUTO_ERROR_CODE="ax_driver_build_failed"
   build_automated_ax_driver
   AUTO_ERROR_CODE="desktop_catalog_labels_invalid"
@@ -3844,8 +4031,7 @@ run_automated_proof() {
     index=$((index + 1))
     stage_id="$(jq -er '.id' <<<"${stage}")" || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
     model_id="$(jq -er '.model_id' <<<"${stage}")" || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
-    jq -er '.model_label' <<<"${stage}" >/dev/null || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
-    model_label="$(resolve_automated_model_label "${OUT}/app-server.json" "${model_id}")" || { AUTO_ERROR_CODE="model_label_resolution_failed"; return 1; }
+    model_label="$(jq -er '.model_label' <<<"${stage}")" || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
     query_source="$(jq -er '.query_file' <<<"${stage}")" || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
     response_marker="$(jq -er '.response_marker' <<<"${stage}")" || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
     evidence_role="$(jq -er '.evidence_role' <<<"${stage}")" || { AUTO_ERROR_CODE="stage_decode_failed"; return 1; }
@@ -3904,6 +4090,19 @@ run_automated_proof() {
     rm -f "${query_copy}"
     AUTO_ERROR_CODE="stage_evidence_write_failed"
     write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "submitted" "${submission_state}" "${usage_baseline}"
+    bind_status=0
+    wait_for_submitted_rollout_binding "${CODEX_HOME_DIR}" "${since_epoch}" "${model_id}" "${response_marker}" "${RUN_DIR}/automated-rollout-${evidence_role}.json" "${stage_timeout}" || bind_status=$?
+    if [[ "${bind_status}" -ne 0 ]]; then
+      resolution_error="$(jq -r '.binding_status // "rollout_not_found"' "${RUN_DIR}/automated-rollout-${evidence_role}.json" 2>/dev/null || printf 'rollout_not_found')"
+      AUTO_ERROR_CODE="submitted_${resolution_error}"
+      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "${AUTO_ERROR_CODE}" || true
+      return 1
+    fi
+    if ! submitted_model_selection_matches "${RUN_DIR}/automated-rollout-${evidence_role}.json" "${model_id}"; then
+      AUTO_ERROR_CODE="submitted_model_selection_mismatch"
+      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "${AUTO_ERROR_CODE}" || true
+      return 1
+    fi
     if [[ "${expectation}" == "tool" ]]; then
       printf '%s\n' "${response_marker}" >"${TOOL_MARKER_FILE}" || { AUTO_ERROR_CODE="tool_marker_write_failed"; return 1; }
       printf '%s\n' "${since_epoch}" >"${TOOL_SINCE_FILE}" || { AUTO_ERROR_CODE="tool_marker_write_failed"; return 1; }
@@ -3911,8 +4110,12 @@ run_automated_proof() {
     wait_status=0
     wait_for_automated_stage "${usage_baseline}" "${model_id}" "${evidence_role}" "${expectation}" "${response_marker}" "${since_epoch}" "${stage_timeout}" || wait_status=$?
     if [[ "${wait_status}" -ne 0 ]]; then
-      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "observation_failed_${wait_status}"
-      AUTO_ERROR_CODE="observation_failed_${wait_status}"
+      case "${wait_status}" in
+        5) AUTO_ERROR_CODE="submitted_model_usage_mismatch" ;;
+        6) AUTO_ERROR_CODE="submitted_rollout_binding_changed" ;;
+        *) AUTO_ERROR_CODE="observation_failed_${wait_status}" ;;
+      esac
+      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "${AUTO_ERROR_CODE}"
       return 1
     fi
     AUTO_ERROR_CODE="stage_evidence_write_failed"
@@ -4297,9 +4500,21 @@ EOF
     [[ -n "${4:-}" ]] || exit 2
     fresh_stage_usage "$2" "$3" "$4"
     ;;
+  --test-fresh-completed-stage-usage)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    fresh_completed_stage_usage "$2" "$3"
+    ;;
+  --test-submitted-model-usage)
+    [[ -n "${4:-}" && -z "${5:-}" ]] || exit 2
+    submitted_model_usage_matches "$2" "$3" "$4"
+    ;;
   --test-auto-rollout-binding)
     [[ -n "${6:-}" ]] || exit 2
     write_automated_rollout_binding "$2" "$3" "$4" "$5" "$6"
+    ;;
+  --test-submitted-model-selection)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    submitted_model_selection_matches "$2" "$3"
     ;;
   --test-automated-profile)
     [[ -n "${3:-}" ]] || exit 2
@@ -4308,6 +4523,10 @@ EOF
   --test-resolve-automated-model-label)
     [[ -n "${3:-}" ]] || exit 2
     resolve_automated_model_label "$2" "$3"
+    ;;
+  --test-resolve-automated-scenario-models)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    resolve_automated_scenario_models "$2" "$3"
     ;;
   --test-automated-stages-complete)
     [[ -n "${3:-}" ]] || exit 2

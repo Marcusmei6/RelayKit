@@ -24,6 +24,18 @@ expect_failure() {
   fi
 }
 
+expect_typed_failure() {
+  local expected_code="$1"
+  local message="$2"
+  shift 2
+  local output
+  if output="$("$@" 2>&1)"; then
+    fail "${message}"
+  fi
+  grep -Fxq "${expected_code}" <<<"${output}" ||
+    fail "${message}: expected ${expected_code}, got ${output}"
+}
+
 file_signature() {
   if [[ -e "$1" ]]; then
     /usr/bin/stat -f '%m:%z' "$1"
@@ -944,7 +956,11 @@ echo "Manual proof scrolled Markdown screenshot analysis test passed"
 
 cat >"${scenario_dir}/app-server-labels.json" <<'JSON'
 {
-  "official": [{"model":"gpt-5.6-luna","displayName":"GPT-5.6-Luna"}],
+  "official": [
+    {"model":"hidden/model","displayName":"Hidden Model","hidden":true},
+    {"model":"gpt-5.6-luna","displayName":"GPT-5.6-Luna"},
+    {"model":"gpt-5.5","displayName":"GPT-5.5"}
+  ],
   "provider": [{"model":"public/model","displayName":"Current Provider Label"}]
 }
 JSON
@@ -952,8 +968,56 @@ test "$("${PROOF_SCRIPT}" --test-resolve-automated-model-label "${scenario_dir}/
 test "$("${PROOF_SCRIPT}" --test-resolve-automated-model-label "${scenario_dir}/app-server-labels.json" public/model)" = "Current Provider Label"
 expect_failure "automated proof accepted a scenario label for a model absent from current app-server data" \
   "${PROOF_SCRIPT}" --test-resolve-automated-model-label "${scenario_dir}/app-server-labels.json" missing/model
-grep -Fq 'resolve_automated_model_label "${OUT}/app-server.json" "${model_id}"' "${PROOF_SCRIPT}" ||
-  fail "automated proof must resolve the current picker label from stable model id"
+
+dynamic_scenario="${scenario_dir}/dynamic-scenario.json"
+jq '.stages = [
+  (.stages[0] | .id = "dynamic-one" | .evidence_role = "dynamic-one" | .model_id = "@current-official" | .model_label = "@current-official"),
+  (.stages[0] | .id = "dynamic-two" | .evidence_role = "dynamic-two" | .model_id = "@current-official" | .model_label = "@current-official")
+]' "${scenario_file}" >"${dynamic_scenario}"
+chmod 600 "${dynamic_scenario}"
+"${PROOF_SCRIPT}" --test-auto-scenario "${dynamic_scenario}" >"${scenario_dir}/dynamic-normalized.json"
+"${PROOF_SCRIPT}" --test-resolve-automated-scenario-models \
+  "${scenario_dir}/dynamic-normalized.json" "${scenario_dir}/app-server-labels.json" >"${scenario_dir}/dynamic-resolved.json"
+jq -e '
+  [.stages[] | [.model_id, .model_label]] == [
+    ["gpt-5.6-luna", "GPT-5.6-Luna"],
+    ["gpt-5.6-luna", "GPT-5.6-Luna"]
+  ]
+' "${scenario_dir}/dynamic-resolved.json" >/dev/null ||
+  fail "dynamic Official stages did not resolve once to the first visible catalog pair"
+
+fixed_normalized="${scenario_dir}/fixed-normalized.json"
+"${PROOF_SCRIPT}" --test-auto-scenario "${scenario_file}" >"${fixed_normalized}"
+"${PROOF_SCRIPT}" --test-resolve-automated-scenario-models \
+  "${fixed_normalized}" "${scenario_dir}/app-server-labels.json" >"${scenario_dir}/fixed-resolved.json"
+jq -e '.stages[0].model_id == "public/model" and .stages[0].model_label == "Current Provider Label"' \
+  "${scenario_dir}/fixed-resolved.json" >/dev/null || fail "fixed model fixtures lost current-label compatibility"
+
+half_dynamic="${scenario_dir}/half-dynamic.json"
+jq '.stages[0].model_id = "@current-official"' "${scenario_file}" >"${half_dynamic}"
+chmod 600 "${half_dynamic}"
+expect_failure "automated scenario accepted only one dynamic model sentinel" \
+  "${PROOF_SCRIPT}" --test-auto-scenario "${half_dynamic}"
+
+cat >"${scenario_dir}/official-empty.json" <<'JSON'
+{"official":[{"model":"hidden/model","displayName":"Hidden Model","hidden":true}],"provider":[]}
+JSON
+expect_typed_failure current_official_catalog_empty "dynamic Official accepted an empty visible catalog" \
+  "${PROOF_SCRIPT}" --test-resolve-automated-scenario-models "${scenario_dir}/dynamic-normalized.json" "${scenario_dir}/official-empty.json"
+
+cat >"${scenario_dir}/official-duplicate.json" <<'JSON'
+{"official":[{"model":"gpt-public","displayName":"GPT Public"},{"model":"gpt-public","displayName":"GPT Public Duplicate"}],"provider":[]}
+JSON
+expect_typed_failure current_official_model_duplicate "dynamic Official accepted a duplicate model id" \
+  "${PROOF_SCRIPT}" --test-resolve-automated-scenario-models "${scenario_dir}/dynamic-normalized.json" "${scenario_dir}/official-duplicate.json"
+
+cat >"${scenario_dir}/official-invalid.json" <<'JSON'
+{"official":[{"model":"","displayName":"Invalid Official"}],"provider":[]}
+JSON
+expect_typed_failure current_official_catalog_invalid "dynamic Official accepted invalid catalog fields" \
+  "${PROOF_SCRIPT}" --test-resolve-automated-scenario-models "${scenario_dir}/dynamic-normalized.json" "${scenario_dir}/official-invalid.json"
+
+echo "Manual proof dynamic Official resolution fixtures passed"
 
 scenario_link="${scenario_dir}/scenario-link.json"
 ln -s "${scenario_file}" "${scenario_link}"
@@ -1026,18 +1090,65 @@ cat >"${binding_sessions}/rollout-auto.jsonl" <<'JSONL'
 {"timestamp":"2099-07-11T00:00:00Z","type":"session_meta","payload":{"id":"thread-auto"}}
 {"timestamp":"2099-07-11T00:00:01Z","type":"turn_context","payload":{"model":"public/model"}}
 {"timestamp":"2099-07-11T00:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with RELAYKIT_AUTO_BIND"}]}}
-{"timestamp":"2099-07-11T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"RELAYKIT_AUTO_BIND"}]}}
 JSONL
 "${PROOF_SCRIPT}" --test-auto-rollout-binding "${binding_home}" 0 "public/model" "RELAYKIT_AUTO_BIND" "${scenario_dir}/binding.json"
-jq -e '.proof_found == true and .thread_id == "thread-auto" and .model == "public/model" and .user_marker_found == true and .assistant_marker_found == true' "${scenario_dir}/binding.json" >/dev/null
-expect_failure "wrong rollout model satisfied an automated stage binding" \
-  "${PROOF_SCRIPT}" --test-auto-rollout-binding "${binding_home}" 0 "other/model" "RELAYKIT_AUTO_BIND" "${scenario_dir}/wrong-binding.json"
+jq -e '.proof_found == true and .thread_id == "thread-auto" and .model == "public/model" and .user_marker_found == true and .assistant_marker_found == false and .assistant_marker_count == 0' "${scenario_dir}/binding.json" >/dev/null
+"${PROOF_SCRIPT}" --test-submitted-model-selection "${scenario_dir}/binding.json" "public/model"
+expect_failure "submitted picker mismatch passed the typed selection comparison" \
+  "${PROOF_SCRIPT}" --test-submitted-model-selection "${scenario_dir}/binding.json" "other/model"
+
+zero_binding_home="${scenario_dir}/zero-binding-home"
+mkdir -p "${zero_binding_home}/sessions"
+expect_failure "zero rollout candidates satisfied submitted binding" \
+  "${PROOF_SCRIPT}" --test-auto-rollout-binding "${zero_binding_home}" 0 "public/model" "RELAYKIT_AUTO_BIND" "${scenario_dir}/zero-binding.json"
+jq -e '.proof_found == false and .candidate_count == 0 and .binding_status == "rollout_not_found"' "${scenario_dir}/zero-binding.json" >/dev/null
+
+multiple_binding_home="${scenario_dir}/multiple-binding-home"
+for thread in one two; do
+  thread_dir="${multiple_binding_home}/sessions/2099/07/${thread}"
+  mkdir -p "${thread_dir}"
+  cat >"${thread_dir}/rollout-${thread}.jsonl" <<JSONL
+{"timestamp":"2099-07-11T00:00:00Z","type":"session_meta","payload":{"id":"thread-${thread}"}}
+{"timestamp":"2099-07-11T00:00:01Z","type":"turn_context","payload":{"model":"public/model"}}
+{"timestamp":"2099-07-11T00:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with RELAYKIT_AUTO_BIND"}]}}
+JSONL
+done
+expect_failure "multiple rollout candidates satisfied submitted binding" \
+  "${PROOF_SCRIPT}" --test-auto-rollout-binding "${multiple_binding_home}" 0 "public/model" "RELAYKIT_AUTO_BIND" "${scenario_dir}/multiple-binding.json"
+jq -e '.proof_found == false and .candidate_count == 2 and .binding_status == "rollout_not_unique"' "${scenario_dir}/multiple-binding.json" >/dev/null
+
+cat >>"${binding_sessions}/rollout-auto.jsonl" <<'JSONL'
+{"timestamp":"2099-07-11T00:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"RELAYKIT_AUTO_BIND"}]}}
+JSONL
+"${PROOF_SCRIPT}" --test-auto-rollout-binding "${binding_home}" 0 "public/model" "RELAYKIT_AUTO_BIND" "${scenario_dir}/binding-with-assistant.json"
+jq -e '.proof_found == true and .assistant_marker_found == true and .assistant_marker_count == 1' "${scenario_dir}/binding-with-assistant.json" >/dev/null
+
+cat >"${scenario_dir}/matching-submitted-usage.json" <<'JSON'
+[
+  {"request_id":"old","model":"public/model","status":"completed","http_status":200},
+  {"request_id":"new","model":"public/model","status":"completed","http_status":200}
+]
+JSON
+"${PROOF_SCRIPT}" --test-submitted-model-usage "${scenario_dir}/matching-submitted-usage.json" 1 "${scenario_dir}/binding.json" >"${scenario_dir}/matching-submitted-event.json"
+jq -e '.model == "public/model" and .event_count == 1' "${scenario_dir}/matching-submitted-event.json" >/dev/null
+
+cat >"${scenario_dir}/mismatching-submitted-usage.json" <<'JSON'
+[
+  {"request_id":"old","model":"public/model","status":"completed","http_status":200},
+  {"request_id":"new","model":"other/model","status":"completed","http_status":200}
+]
+JSON
+expect_failure "usage model mismatch passed the bound rollout comparison" \
+  "${PROOF_SCRIPT}" --test-submitted-model-usage "${scenario_dir}/mismatching-submitted-usage.json" 1 "${scenario_dir}/binding.json"
+
 cat >>"${binding_sessions}/rollout-auto.jsonl" <<'JSONL'
 {"timestamp":"2099-07-11T00:00:04Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with RELAYKIT_AUTO_BIND"}]}}
 {"timestamp":"2099-07-11T00:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"RELAYKIT_AUTO_BIND"}]}}
 JSONL
 expect_failure "duplicate marker messages satisfied a single automated rollout binding" \
   "${PROOF_SCRIPT}" --test-auto-rollout-binding "${binding_home}" 0 "public/model" "RELAYKIT_AUTO_BIND" "${scenario_dir}/duplicate-binding.json"
+
+echo "Manual proof pre-assistant rollout and submitted-model fixtures passed"
 
 cat >"${scenario_dir}/standard-profile.json" <<'JSON'
 {"stages":[
@@ -1089,6 +1200,7 @@ expect_failure "custom tool completion accepted raw protocol" \
 
 auto_body="$(sed -n '/^run_automated_proof() {/,/^}/p' "${PROOF_SCRIPT}")"
 auto_wait_body="$(sed -n '/^wait_for_automated_stage() {/,/^}/p' "${PROOF_SCRIPT}")"
+submitted_binding_body="$(sed -n '/^wait_for_submitted_rollout_binding() {/,/^}/p' "${PROOF_SCRIPT}")"
 if grep -Eq 'wait_for_user_continue|read -r _|continue_file' <<<"${auto_body}"; then
   fail "automated proof must never wait for user input"
 fi
@@ -1123,6 +1235,24 @@ grep -Fq 'codex-desktop-ax-driver.swift' <<<"${auto_body}" ||
   fail "automated proof must invoke the deterministic AX driver"
 test "$(rg -c '"\$\{AX_DRIVER_BINARY\}" submit' <<<"${auto_body}")" -eq 1 ||
   fail "the automated state machine must contain exactly one submit call site"
+if grep -Fq '"${AX_DRIVER_BINARY}" submit' <<<"${auto_wait_body}${submitted_binding_body}"; then
+  fail "submitted observation paths must never resend or reopen the picker"
+fi
+submit_line="$(grep -n '"${AX_DRIVER_BINARY}" submit' <<<"${auto_body}" | cut -d: -f1)"
+submitted_binding_line="$(grep -n 'wait_for_submitted_rollout_binding' <<<"${auto_body}" | cut -d: -f1)"
+assistant_render_wait_line="$(grep -n 'wait_for_automated_stage' <<<"${auto_body}" | cut -d: -f1)"
+[[ -n "${submit_line}" && -n "${submitted_binding_line}" && -n "${assistant_render_wait_line}" &&
+   "${submit_line}" -lt "${submitted_binding_line}" && "${submitted_binding_line}" -lt "${assistant_render_wait_line}" ]] ||
+  fail "the unique user-marker rollout must bind after one submit and before assistant/render waiting"
+grep -Fq 'AUTO_ERROR_CODE="submitted_model_selection_mismatch"' <<<"${auto_body}" ||
+  fail "picker selection mismatch must retain its typed failure"
+grep -Fq 'AUTO_ERROR_CODE="submitted_model_usage_mismatch"' <<<"${auto_body}" ||
+  fail "completed usage mismatch must retain its typed failure"
+grep -Fq 'resolve_automated_scenario_models "${AUTOMATED_SCENARIO_NORMALIZED}" "${OUT}/app-server.json"' <<<"${auto_body}" ||
+  fail "scenario models must resolve once from the current-run app-server catalog before submit"
+if grep -Fq 'resolve_automated_model_label "${OUT}/app-server.json"' <<<"${auto_body}"; then
+  fail "dynamic Official stages must not independently re-resolve inside the submit loop"
+fi
 catalog_labels_line="$(grep -n 'write_automated_catalog_labels' <<<"${auto_body}" | cut -d: -f1 | head -1)"
 desktop_launch_line="$(grep -n 'launch_desktop' <<<"${auto_body}" | cut -d: -f1 | head -1)"
 [[ -n "${catalog_labels_line}" && -n "${desktop_launch_line}" && "${catalog_labels_line}" -lt "${desktop_launch_line}" ]] ||
