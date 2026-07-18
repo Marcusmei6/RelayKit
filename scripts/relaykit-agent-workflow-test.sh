@@ -113,16 +113,22 @@ signed_beta_exception_contract = (
     "Signed Beta live-gate exception: `execution_allowed=false` from the signed-beta plan means plan-only and forbids "
     "selector-driven automatic execution; it does not deny a separately user-authorized, Planner-bounded one-time live gate."
 )
+signed_beta_global_guard_contract = (
+    "The only permitted global config/auth interaction is the designated read-only non-content metadata/hash/signature "
+    "guard. The guard must not mutate, copy, repair, restore, refresh, migrate, parse, inspect, print, or disclose global "
+    "content. It may accept the current pre-run metadata/hash/signature as the baseline, must require exact before/after "
+    "equality, and must fail closed on any mismatch or guard error."
+)
 signed_beta_bounds_contract = (
-    "Ordinary Tier 2/3 validation retains the selector path. For this exception, Planner must bind one exact isolated "
-    "session, artifact, scenario, and command allowlist: one run, at most six commands, each command exactly once, with no "
-    "retry. The allowlist must encode redaction, no global config/auth or shared-service/LaunchAgent access, no port `18787`, "
-    "exact cleanup, and current run-bound evidence."
+    "For this exception, Planner must bind one exact isolated session, artifact, scenario, and command allowlist to one fresh "
+    "run: at most six commands, each command exactly once, with no retry, continuation, aggregation, relabeling, or reuse. "
+    "The allowlist must encode redaction, the non-content global guard, no other global config/auth or shared-service/LaunchAgent "
+    "access, no port `18787`, exact cleanup, and current run-bound evidence."
 )
 signed_beta_execution_contract = (
     "`relaykit_test` directly executes only that exact allowlist and must not rerun or reinterpret the selector, plan, "
-    "scenario, or author inputs. Main/root performs mechanical dispatch only. This exception does not expand or replace "
-    "the ordinary 1-3 test-message approval rule."
+    "scenario, or author inputs. Main/root performs mechanical dispatch only. Ordinary selector-path and Fast Path semantics "
+    "remain unchanged. This exception does not expand or replace the ordinary 1-3 test-message approval rule."
 )
 
 contract_sources = {
@@ -143,11 +149,15 @@ for name, source in contract_sources.items():
     assert fast_path_contract in source, name
     assert fast_path_execution_contract in source, name
     assert fast_path_closeout_contract in source, name
-for name in ("planner", "test", "agents-doc"):
-    source = contract_sources[name]
-    assert signed_beta_exception_contract in source, name
-    assert signed_beta_bounds_contract in source, name
-    assert signed_beta_execution_contract in source, name
+signed_beta_contracts = (
+    signed_beta_exception_contract,
+    signed_beta_global_guard_contract,
+    signed_beta_bounds_contract,
+    signed_beta_execution_contract,
+)
+for name, source in contract_sources.items():
+    for contract in signed_beta_contracts:
+        assert source.count(contract) == 1, (name, contract)
 
 print("RelayKit agent workflow contract tests passed")
 PY

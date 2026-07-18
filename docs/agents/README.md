@@ -44,9 +44,11 @@ Every selector-path validation lane starts with `./scripts/relaykit-validate.sh 
 
 Signed Beta live-gate exception: `execution_allowed=false` from the signed-beta plan means plan-only and forbids selector-driven automatic execution; it does not deny a separately user-authorized, Planner-bounded one-time live gate.
 
-Ordinary Tier 2/3 validation retains the selector path. For this exception, Planner must bind one exact isolated session, artifact, scenario, and command allowlist: one run, at most six commands, each command exactly once, with no retry. The allowlist must encode redaction, no global config/auth or shared-service/LaunchAgent access, no port `18787`, exact cleanup, and current run-bound evidence.
+The only permitted global config/auth interaction is the designated read-only non-content metadata/hash/signature guard. The guard must not mutate, copy, repair, restore, refresh, migrate, parse, inspect, print, or disclose global content. It may accept the current pre-run metadata/hash/signature as the baseline, must require exact before/after equality, and must fail closed on any mismatch or guard error.
 
-`relaykit_test` directly executes only that exact allowlist and must not rerun or reinterpret the selector, plan, scenario, or author inputs. Main/root performs mechanical dispatch only. This exception does not expand or replace the ordinary 1-3 test-message approval rule.
+For this exception, Planner must bind one exact isolated session, artifact, scenario, and command allowlist to one fresh run: at most six commands, each command exactly once, with no retry, continuation, aggregation, relabeling, or reuse. The allowlist must encode redaction, the non-content global guard, no other global config/auth or shared-service/LaunchAgent access, no port `18787`, exact cleanup, and current run-bound evidence.
+
+`relaykit_test` directly executes only that exact allowlist and must not rerun or reinterpret the selector, plan, scenario, or author inputs. Main/root performs mechanical dispatch only. Ordinary selector-path and Fast Path semantics remain unchanged. This exception does not expand or replace the ordinary 1-3 test-message approval rule.
 
 `relaykit_test` uses `workspace-write` because selected Swift/package commands may need ignored build outputs. That access does not grant source ownership: Test records `git status --porcelain=v1 --untracked-files=no` before and after execution, requires the snapshots to be byte-identical, and fails with `tracked_worktree_changed` instead of repairing any tracked change.
 
