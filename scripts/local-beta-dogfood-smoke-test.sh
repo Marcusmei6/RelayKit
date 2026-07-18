@@ -50,6 +50,13 @@ if grep -Fq '"${APP_REAL}" --verify-bundled-gateway' "${SCRIPT}"; then
 fi
 grep -Fq 'bundled_gateway_verify: "passed_via_normal_app_lifecycle"' "${SCRIPT}" ||
   fail "dogfood evidence must describe the normal App gateway proof"
+grep -Fq 'notarized_developer_id: $spctl_notarized_developer_id' "${SCRIPT}" ||
+  fail "dogfood evidence must retain the redacted Gatekeeper classification"
+grep -Fq 'output_redacted: true' "${SCRIPT}" ||
+  fail "dogfood evidence must mark Gatekeeper output as redacted"
+if grep -Fq 'output: $spctl_output' "${SCRIPT}"; then
+  fail "dogfood evidence must not persist certificate or Team identity output"
+fi
 grep -Fq 'launch_method: "launchservices_open_extracted_app"' "${SCRIPT}" ||
   fail "evidence must identify the LaunchServices launch path"
 grep -Fq 'normal_launch: true' "${SCRIPT}" ||

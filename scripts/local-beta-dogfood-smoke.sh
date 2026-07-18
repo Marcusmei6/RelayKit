@@ -1172,6 +1172,10 @@ set +e
 spctl_output="$(spctl -a -vvv -t exec "${APP_BUNDLE}" 2>&1)"
 spctl_status=$?
 set -e
+spctl_notarized_developer_id=false
+if [[ "${spctl_status}" -eq 0 && "${spctl_output}" == *"Notarized Developer ID"* ]]; then
+  spctl_notarized_developer_id=true
+fi
 
 RUN_DIR="$(mktemp -d /tmp/relaykit-dogfood.XXXXXX)"
 PROVIDER_CONFIG="${DOGFOOD_STATE_DIR}/providers.json"
@@ -1407,8 +1411,8 @@ jq -n \
   --arg zip_build_time_utc "${zip_build_time_utc}" \
   --arg extracted_app_path "${APP_BUNDLE}" \
   --arg screenshots_dir "${SCREENSHOT_DIR}" \
-  --arg spctl_output "${spctl_output}" \
   --argjson spctl_status "${spctl_status}" \
+  --argjson spctl_notarized_developer_id "${spctl_notarized_developer_id}" \
   --argjson app_exited_after_right_click_quit "${APP_EXITED_AFTER_RIGHT_CLICK_QUIT}" \
     --argjson gateway_19777_released_after_quit "${GATEWAY_19777_RELEASED_AFTER_QUIT}" \
     --argjson reachable_models_reprobed_after_reopen "${REACHABLE_MODELS_REPROBED_AFTER_REOPEN}" \
@@ -1430,7 +1434,9 @@ jq -n \
       bundled_gateway_verify: "passed_via_normal_app_lifecycle",
       gatekeeper: {
         status: $spctl_status,
-        output: $spctl_output,
+        accepted: ($spctl_status == 0),
+        notarized_developer_id: $spctl_notarized_developer_id,
+        output_redacted: true,
         local_beta_friction_expected: true
       }
     },
@@ -1481,7 +1487,7 @@ jq -n \
       fixture_keychain_item_removed: $fixture_keychain_item_removed,
       shared_18787_free_after: true,
       gateway_19777_free_after: true,
-      signed_beta_status: (if $spctl_status == 0 and ($spctl_output | contains("Notarized Developer ID")) then "notarized_developer_id_candidate" else "local_ad_hoc" end)
+      signed_beta_status: (if $spctl_status == 0 and $spctl_notarized_developer_id then "notarized_developer_id_candidate" else "local_ad_hoc" end)
     },
     route_proof_boundary: {
       current_setup_evidence_only: true,
