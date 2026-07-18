@@ -772,7 +772,9 @@ for arg in "$@"; do
   prev="$arg"
 done
 prompt=$(cat)
-if printf '%s' "$prompt" | grep -q "Tool result call_"; then
+if printf '%s' "$prompt" | grep -q "Return only the final textual answer"; then
+  printf '%s\n' 'TOOL COMPLETE' >"$out"
+elif printf '%s' "$prompt" | grep -q "Tool result call_"; then
   printf '%s\n' '{"kind":"message","name":"","arguments_json":"{}","text":"TOOL COMPLETE"}' >"$out"
 else
   printf '%s\n' '{"kind":"function_call","name":"exec_command","arguments_json":"{\"cmd\":\"printf RELAYKIT_TOOL; pwd\"}","text":""}' >"$out"
@@ -838,6 +840,60 @@ printf '%s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
 		if !strings.Contains(string(record), want) {
 			t.Fatalf("codex args missing %q in %s", want, record)
 		}
+	}
+
+	const v1Command = "printf RELAYKIT_V1_TOOL; pwd"
+	const v1Prompt = `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"printf RELAYKIT_V1_TOOL; pwd"}`
+	v1Request, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5",
+		"input": v1Prompt,
+		"tools": []map[string]any{{
+			"type": "function", "name": "exec_command",
+			"parameters": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"cmd": map[string]any{"type": "string"}},
+				"required":   []string{"cmd"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1Conn, v1Reader := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer v1Conn.Close()
+	writeTestWebSocketText(t, v1Conn, string(v1Request))
+	v1First := readTestWebSocketUntil(t, v1Reader, "response.completed")
+	if !strings.Contains(v1First, `"type":"function_call"`) ||
+		!strings.Contains(v1First, `"name":"exec_command"`) ||
+		!strings.Contains(v1First, `printf RELAYKIT_V1_TOOL; pwd`) {
+		t.Fatalf("V1 first response = %s", v1First)
+	}
+	v1CallID := responseCallID(t, v1First)
+	v1OutputRequest, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5",
+		"input": []map[string]any{
+			{"type": "message", "role": "user", "content": []map[string]string{{"type": "input_text", "text": v1Prompt}}},
+			{"type": "function_call", "call_id": v1CallID, "name": "exec_command", "arguments": `{"cmd":"` + v1Command + `"}`},
+			{"type": "function_call_output", "call_id": v1CallID, "output": "RELAYKIT_V1_TOOL\n/workspace"},
+		},
+		"tools": []map[string]any{{
+			"type": "function", "name": "exec_command",
+			"parameters": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"cmd": map[string]any{"type": "string"}},
+				"required":   []string{"cmd"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1OutputConn, v1OutputReader := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer v1OutputConn.Close()
+	writeTestWebSocketText(t, v1OutputConn, string(v1OutputRequest))
+	v1Second := readTestWebSocketUntil(t, v1OutputReader, "response.completed")
+	if !strings.Contains(v1Second, `"output_text":"TOOL COMPLETE"`) || strings.Contains(v1Second, `"type":"function_call"`) {
+		t.Fatalf("V1 second response = %s", v1Second)
 	}
 }
 
@@ -924,6 +980,7 @@ fi
 
 	const command = "printf '  preserve these bytes  '; pwd"
 	const exact = "Use the shell tool to run exactly: " + command + "\nThen report only the exact tool output."
+	const exactV1 = `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"printf '  preserve these bytes  '; pwd"}`
 
 	t.Run("exact first leg bypasses fabricated nested message and preserves arguments", func(t *testing.T) {
 		rec := request(exact, validTools)
@@ -949,6 +1006,21 @@ fi
 		}
 		if arguments["cmd"] != command {
 			t.Fatalf("cmd = %q, want %q", arguments["cmd"], command)
+		}
+		if invocationCount() != 0 {
+			t.Fatalf("nested Codex invocations = %d, want 0", invocationCount())
+		}
+	})
+
+	t.Run("exact V1 first leg preserves the same deterministic function call", func(t *testing.T) {
+		rec := request(exactV1, validTools)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"type":"function_call"`) ||
+			!strings.Contains(rec.Body.String(), `"name":"exec_command"`) ||
+			!strings.Contains(rec.Body.String(), `printf '  preserve these bytes  '; pwd`) {
+			t.Fatalf("V1 response = %s", rec.Body.String())
 		}
 		if invocationCount() != 0 {
 			t.Fatalf("nested Codex invocations = %d, want 0", invocationCount())
@@ -1012,6 +1084,42 @@ fi
 				"parameters": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "number"}}, "required": []string{"cmd"}},
 			}},
 		},
+		"V1 terminal newline": {
+			input: exactV1 + "\n",
+			tools: validTools,
+		},
+		"V1 duplicate command key": {
+			input: `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"one","cmd":"two"}`,
+			tools: validTools,
+		},
+		"V1 extra key": {
+			input: `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"one","extra":true}`,
+			tools: validTools,
+		},
+		"V1 wrong command type": {
+			input: `RELAYKIT_EXEC_COMMAND_V1 {"cmd":7}`,
+			tools: validTools,
+		},
+		"V1 blank command": {
+			input: `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"   "}`,
+			tools: validTools,
+		},
+		"V1 decoded multiline command": {
+			input: `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"one\ntwo"}`,
+			tools: validTools,
+		},
+		"V1 NUL": {
+			input: "RELAYKIT_EXEC_COMMAND_V1 {\"cmd\":\"one\"}\x00",
+			tools: validTools,
+		},
+		"V1 trailing bytes": {
+			input: exactV1 + " trailing",
+			tools: validTools,
+		},
+		"V1 malformed JSON": {
+			input: `RELAYKIT_EXEC_COMMAND_V1 {"cmd":`,
+			tools: validTools,
+		},
 	} {
 		t.Run(name+" fails closed", func(t *testing.T) {
 			rec := request(tc.input, tc.tools)
@@ -1051,6 +1159,7 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 	}}
 	const command = "printf explicit"
 	const exact = "Use the shell tool to run exactly: " + command + "\nThen report only the exact tool output."
+	const exactV1 = `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"printf explicit"}`
 	const arguments = `{"cmd":"printf explicit"}`
 	encodeInput := func(input any) json.RawMessage {
 		encoded, err := json.Marshal(input)
@@ -1078,11 +1187,17 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 	t.Run("exact string first leg remains supported", func(t *testing.T) {
 		check(t, exact, validTools, command, false, false)
 	})
+	t.Run("exact V1 first leg is supported", func(t *testing.T) {
+		check(t, exactV1, validTools, command, false, false)
+	})
 	t.Run("latest exact user message is executable", func(t *testing.T) {
 		check(t, []map[string]any{{"type": "message", "role": "user", "content": "history"}, {"type": "message", "role": "user", "content": exact}}, validTools, command, false, false)
 	})
 	t.Run("historical exact request followed by user does not execute", func(t *testing.T) {
 		check(t, []map[string]any{{"type": "message", "role": "user", "content": exact}, {"type": "message", "role": "user", "content": "new request"}}, validTools, "", false, false)
+	})
+	t.Run("historical V1 request followed by user does not execute", func(t *testing.T) {
+		check(t, []map[string]any{{"type": "message", "role": "user", "content": exactV1}, {"type": "message", "role": "user", "content": "new request"}}, validTools, "", false, false)
 	})
 	t.Run("historical malformed prefix followed by user does not fail", func(t *testing.T) {
 		check(t, []map[string]any{{"type": "message", "role": "user", "content": explicitExecCommandPrefix + command}, {"type": "message", "role": "user", "content": "new request"}}, validTools, "", false, false)
@@ -1090,6 +1205,13 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 	t.Run("ordered current explicit roundtrip is message only", func(t *testing.T) {
 		check(t, []map[string]any{
 			{"type": "message", "role": "user", "content": exact},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		}, validTools, "", true, false)
+	})
+	t.Run("ordered V1 explicit roundtrip is message only", func(t *testing.T) {
+		check(t, []map[string]any{
+			{"type": "message", "role": "user", "content": exactV1},
 			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
 			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
 		}, validTools, "", true, false)
@@ -1191,7 +1313,11 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 				"required":   []any{"cmd", "shell"},
 			},
 		}}
-		check(t, exact, incompatible, "", false, true)
+		check(t, exactV1, incompatible, "", false, true)
+	})
+
+	t.Run("duplicate exec command tools fail closed", func(t *testing.T) {
+		check(t, exactV1, append(validTools, validTools[0]), "", false, true)
 	})
 }
 

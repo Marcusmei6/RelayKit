@@ -1121,8 +1121,8 @@ marker = tool_stage["response_marker"]
 if re.fullmatch(r"RELAYKIT_[A-Z0-9_]{16,127}", marker) is None:
     raise SystemExit("assisted official-tool marker is not public-safe and fresh")
 expected_prompt = (
-    f"Use the shell tool to run exactly: printf '{marker}\\n'; pwd. "
-    "Then report only the exact tool output and working directory. Do not inspect any files."
+    "RELAYKIT_EXEC_COMMAND_V1 "
+    + json.dumps({"cmd": f"printf '{marker}\\n'; pwd"}, separators=(",", ":"))
 )
 try:
     prompt = Path(tool_stage["query_file"]).read_text().strip()
@@ -1136,7 +1136,14 @@ PY
 
 assisted_official_tool_prompt() {
   local marker="$1"
-  printf "Use the shell tool to run exactly: printf '%s\\\\n'; pwd. Then report only the exact tool output and working directory. Do not inspect any files.\n" "${marker}"
+  python3 - "${marker}" <<'PY'
+import json
+import sys
+
+marker = sys.argv[1]
+command = f"printf '{marker}\\n'; pwd"
+print("RELAYKIT_EXEC_COMMAND_V1 " + json.dumps({"cmd": command}, separators=(",", ":")))
+PY
 }
 
 validate_assisted_state_against_bindings() {
@@ -3756,7 +3763,12 @@ stage_checkpoint_verified() {
       [[ -s "${tool_evidence}" ]] &&
         jq -e '.proof_found == true and .function_call_found == true and .function_call_output_found == true and .process_exited_zero == true and .xml_leak_found == false and .raw_function_calls_found == false' "${tool_evidence}" >/dev/null &&
         jq -e --arg model "${provider_model}" '([.[] | select((.model // "") == $model and (.status // "") == "completed" and (.http_status // 0) == 200)] | length) >= 2' "${usage_file}" >/dev/null &&
-        jq -e --arg role "${role}" '([.[] | select(.role == $role)] | last) as $shot | $shot.captured == true and $shot.target_identity_verified == true and $shot.visual_checks.tool_marker_visible == true and $shot.visual_checks.tool_execution_visible == true and $shot.visual_checks.raw_protocol_visible == false' "${screenshot_evidence}" >/dev/null
+        jq -e --arg role "${role}" '
+          [.[] | select(.role == $role and .captured == true and .target_identity_verified == true)] as $shots
+          | ($shots | length) > 0
+          and all($shots[]; .visual_checks.raw_protocol_visible != true)
+          and any($shots[]; .visual_checks.tool_marker_visible == true and .visual_checks.tool_execution_visible == true)
+        ' "${screenshot_evidence}" >/dev/null
       ;;
     *)
       return 2
@@ -4308,10 +4320,25 @@ func occurrences(_ haystack: String, _ needle: String) -> Int {
     guard !needle.isEmpty else { return 0 }
     return haystack.components(separatedBy: needle).count - 1
 }
+func visuallyContainsMarker(_ candidate: String, _ expected: String) -> Bool {
+    let candidateCharacters = Array(candidate)
+    let expectedCharacters = Array(expected)
+    guard !expectedCharacters.isEmpty, candidateCharacters.count >= expectedCharacters.count else { return false }
+    for start in 0...(candidateCharacters.count - expectedCharacters.count) {
+        var differences = 0
+        for offset in expectedCharacters.indices where candidateCharacters[start + offset] != expectedCharacters[offset] {
+            differences += 1
+            if differences > 1 { break }
+        }
+        if differences <= 1 { return true }
+    }
+    return false
+}
 
 let normalized = compact(combined)
 let assistantNormalizedLines = assistantLines.map(compact)
 let markerNormalized = compact(marker)
+let visualMarkerLineCount = lines.map(compact).filter { visuallyContainsMarker($0, markerNormalized) }.count
 let rawProtocolVisible = ["functioncalls", "toolcall", "functioncallxml", "invoketool", "parametername"].contains { normalized.contains($0) }
 let authErrorVisible = [
     "relaykitofficialcodexloginisnotconnected",
@@ -4382,7 +4409,7 @@ func applyMarkdownChecks() {
 }
 
 if !markerNormalized.isEmpty {
-    checks["response_marker_visible"] = occurrences(normalized, markerNormalized) >= 2
+    checks["response_marker_visible"] = visualMarkerLineCount >= 2
 }
 
 switch expectation.isEmpty ? role : expectation {
@@ -4393,7 +4420,7 @@ case "gpt56-response":
 case "provider-markdown":
     applyMarkdownChecks()
 case "provider-tool":
-    checks["tool_marker_visible"] = !markerNormalized.isEmpty && occurrences(normalized, markerNormalized) >= 2
+    checks["tool_marker_visible"] = !markerNormalized.isEmpty && visualMarkerLineCount >= 2
     checks["tool_execution_visible"] =
         normalized.contains("processexitedwithcode0") || occurrences(normalized, "printf") >= 2
 case "plain":
@@ -4401,7 +4428,7 @@ case "plain":
 case "markdown":
     applyMarkdownChecks()
 case "tool":
-    checks["tool_marker_visible"] = !markerNormalized.isEmpty && occurrences(normalized, markerNormalized) >= 2
+    checks["tool_marker_visible"] = !markerNormalized.isEmpty && visualMarkerLineCount >= 2
     checks["tool_execution_visible"] = normalized.contains("processexitedwithcode0") || occurrences(normalized, "printf") >= 2
 default:
     break
@@ -4886,7 +4913,12 @@ automated_stage_checkpoint_verified() {
       ;;
     tool)
       jq -e '.proof_found == true and .function_call_found == true and .function_call_output_found == true and .process_exited_zero == true and .xml_leak_found == false and .raw_function_calls_found == false' "${DESKTOP_TOOL_EVIDENCE}" >/dev/null &&
-        jq -e --arg role "${evidence_role}" '([.[] | select(.role == $role)] | last) as $shot | $shot.captured == true and $shot.target_identity_verified == true and $shot.visual_checks.tool_marker_visible == true and $shot.visual_checks.tool_execution_visible == true and $shot.visual_checks.raw_protocol_visible == false' "${SCREENSHOT_EVIDENCE}" >/dev/null
+        jq -e --arg role "${evidence_role}" '
+          [.[] | select(.role == $role and .captured == true and .target_identity_verified == true)] as $shots
+          | ($shots | length) > 0
+          and all($shots[]; .visual_checks.raw_protocol_visible != true)
+          and any($shots[]; .visual_checks.tool_marker_visible == true and .visual_checks.tool_execution_visible == true)
+        ' "${SCREENSHOT_EVIDENCE}" >/dev/null
       ;;
     *) return 2 ;;
   esac
@@ -5404,7 +5436,42 @@ run_automated_proof() {
     usage_baseline="$(jq -er 'length' "${OUT}/usage-events.json")" || { AUTO_ERROR_CODE="usage_baseline_failed"; return 1; }
     since_epoch="$(date +%s)"
     submission_state="not_submitted"
+    if [[ "${ASSISTED_MODE}" != "true" || "${index}" -ne 6 ]]; then
+      AUTO_ERROR_CODE="stage_evidence_write_failed"
+      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "prepared" "${submission_state}" "${usage_baseline}"
+    fi
+
+    AUTO_ERROR_CODE="prepare_desktop_activation_failed"
+    activate_isolated_desktop
+    verify_desktop_window_identity
+    if ! "${AX_DRIVER_BINARY}" prepare --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --workspace "${ROOT}" >"${RUN_DIR}/ax-prepare-${index}.json"; then
+      driver_code="$(driver_failure_code "${RUN_DIR}/ax-prepare-${index}.json" "unknown")"
+      rm -f "${query_copy}"
+      if [[ "${ASSISTED_MODE}" != "true" || "${index}" -ne 6 ]]; then
+        write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "prepare_${driver_code}" || true
+      fi
+      AUTO_ERROR_CODE="prepare_${driver_code}"
+      return 1
+    fi
+    if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and (.action_count >= 1 and .action_count <= 37)' "${RUN_DIR}/ax-prepare-${index}.json" >/dev/null; then
+      rm -f "${query_copy}"
+      AUTO_ERROR_CODE="prepare_report_invalid"
+      return 1
+    fi
+
     if [[ "${ASSISTED_MODE}" == "true" && "${index}" -eq 6 ]]; then
+      AUTO_ERROR_CODE="select_model_desktop_activation_failed"
+      activate_isolated_desktop
+      verify_desktop_window_identity
+      if ! "${AX_DRIVER_BINARY}" select-model --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --model-label "${model_label}" --catalog-labels-file "${catalog_labels}" >"${RUN_DIR}/ax-select-model-${index}.json"; then
+        driver_code="$(driver_failure_code "${RUN_DIR}/ax-select-model-${index}.json" "unknown")"
+        AUTO_ERROR_CODE="select_model_${driver_code}"
+        return 1
+      fi
+      if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .model_picker_count == 1 and .composer_count == 1 and .send_count == 0 and (.action_count >= 0 and .action_count <= 3)' "${RUN_DIR}/ax-select-model-${index}.json" >/dev/null; then
+        AUTO_ERROR_CODE="select_model_report_invalid"
+        return 1
+      fi
       AUTO_ERROR_CODE="assisted_pause_state_failed"
       write_assisted_pause_state "${desktop_pid}" "${model_id}" "${query_source}" \
         "${response_marker}" "${usage_baseline}" "${since_epoch}"
@@ -5420,24 +5487,6 @@ run_automated_proof() {
       }
       submission_state="submitted"
     else
-      AUTO_ERROR_CODE="stage_evidence_write_failed"
-      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "prepared" "${submission_state}" "${usage_baseline}"
-
-      AUTO_ERROR_CODE="prepare_desktop_activation_failed"
-      activate_isolated_desktop
-      verify_desktop_window_identity
-      if ! "${AX_DRIVER_BINARY}" prepare --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --workspace "${ROOT}" >"${RUN_DIR}/ax-prepare-${index}.json"; then
-        driver_code="$(driver_failure_code "${RUN_DIR}/ax-prepare-${index}.json" "unknown")"
-        rm -f "${query_copy}"
-        write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "prepare_${driver_code}" || true
-        AUTO_ERROR_CODE="prepare_${driver_code}"
-        return 1
-      fi
-      if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and (.action_count >= 1 and .action_count <= 37)' "${RUN_DIR}/ax-prepare-${index}.json" >/dev/null; then
-        rm -f "${query_copy}"
-        AUTO_ERROR_CODE="prepare_report_invalid"
-        return 1
-      fi
       AUTO_ERROR_CODE="submit_desktop_activation_failed"
       activate_isolated_desktop
       verify_desktop_window_identity

@@ -1593,8 +1593,9 @@ const officialCodexDecisionSchema = `{
 }`
 
 const (
-	explicitExecCommandPrefix = "Use the shell tool to run exactly: "
-	explicitExecCommandSuffix = "\nThen report only the exact tool output."
+	explicitExecCommandPrefix   = "Use the shell tool to run exactly: "
+	explicitExecCommandSuffix   = "\nThen report only the exact tool output."
+	explicitExecCommandV1Prefix = "RELAYKIT_EXEC_COMMAND_V1 "
 )
 
 func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, req responsesRequest, messages []chatMessage) (map[string]any, error) {
@@ -1742,6 +1743,22 @@ func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools [
 }
 
 func parseExplicitExecCommand(text string, tools []responsesTool) (command string, explicit bool, err error) {
+	if strings.HasPrefix(text, explicitExecCommandV1Prefix) {
+		if strings.ContainsAny(text, "\r\n\x00") {
+			return "", true, fmt.Errorf("invalid V1 explicit shell command line")
+		}
+		object, err := strictJSONObject([]byte(strings.TrimPrefix(text, explicitExecCommandV1Prefix)))
+		if err != nil || len(object) != 1 {
+			return "", true, fmt.Errorf("invalid V1 explicit shell command")
+		}
+		if json.Unmarshal(object["cmd"], &command) != nil || strings.TrimSpace(command) == "" || strings.ContainsAny(command, "\r\n\x00") {
+			return "", true, fmt.Errorf("invalid V1 explicit shell command value")
+		}
+		if !officialExecCommandToolAllowed(tools) {
+			return "", true, fmt.Errorf("incompatible explicit shell command")
+		}
+		return command, true, nil
+	}
 	if !strings.HasPrefix(text, explicitExecCommandPrefix) {
 		return "", false, nil
 	}

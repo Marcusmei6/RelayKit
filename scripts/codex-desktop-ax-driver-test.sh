@@ -84,6 +84,9 @@ run_failure invalid_arguments "${binary}" dismiss-model-nux --pid 1
 run_failure invalid_arguments \
   "${binary}" prepare --pid 1 --window-identity "${tmp_dir}/window.json"
 run_failure invalid_arguments \
+  "${binary}" select-model --pid 1 --window-identity "${tmp_dir}/window.json" \
+  --model-label "Official GPT-5.6-Sol"
+run_failure invalid_arguments \
   "${binary}" submit --pid 1 --window-identity "${tmp_dir}/window.json" \
   --model-label "Official GPT-5.5" --catalog-labels-file "${tmp_dir}/catalog.json"
 run_failure invalid_command "${binary}" self-test --scenario exact
@@ -1075,9 +1078,9 @@ grep -Fq 'maximumAXNodes = 50_000' "${SOURCE}" ||
   fail "Desktop semantic traversal node bound does not cover a completed Codex task"
 grep -Fq 'modelPickerWaitSeconds: TimeInterval = 10' "${SOURCE}" ||
   fail "cold Desktop model picker wait is not bounded at 10 seconds"
-submit_body="$(sed -n '/private func executeSubmit/,/^}/p' "${SOURCE}")"
-grep -Fq 'timeout: modelPickerWaitSeconds' <<<"${submit_body}" ||
-  fail "submit does not use the bounded cold model picker wait"
+model_selection_body="$(sed -n '/private func ensureModelSelection/,/private func executeSelectModel/p' "${SOURCE}")"
+grep -Fq 'timeout: modelPickerWaitSeconds' <<<"${model_selection_body}" ||
+  fail "the shared model-selection boundary does not use the bounded cold model picker wait"
 
 run_success "${self_test[@]}" --scenario exact
 jq -e '.candidate_count == 1' "${last_stdout}" >/dev/null ||
@@ -1301,6 +1304,12 @@ grep -Fq 'semanticSnapshot' "${SOURCE}" ||
   fail "fresh-task preparation must detect a semantic tree transition when Chromium reuses AX nodes"
 grep -Fq 'composerIsEmpty(' "${SOURCE}" ||
   fail "the bounded Chromium fallback must require one empty writable composer"
+grep -Fq 'failureCode: "fresh_task_draft_clear_failed"' "${SOURCE}" ||
+  fail "prepare must clear a persisted unsent draft through the verified AX write boundary"
+rg -Uq 'value: ""(.|\n)*fresh_task_draft_clear_failed(.|\n)*waitForEmptyComposer' "${SOURCE}" ||
+  fail "prepare must verify the persisted draft is empty after clearing it"
+grep -Fq 'fresh_task_draft_clear_not_verified' "${SOURCE}" ||
+  fail "persisted draft clearing must fail closed when the composer does not become empty"
 grep -Fq 'placeholder: copyAXString(candidate, axPlaceholderValueAttribute)' "${SOURCE}" ||
   fail "placeholder-backed empty composers must use the element's exact AX placeholder"
 grep -Fq '"\n随心输入"' "${SOURCE}" ||
@@ -1309,9 +1318,37 @@ grep -Fq 'actual == expected.replacingOccurrences(of: "\n", with: " ")' "${SOURC
   fail "multiline composer readback must allow only Chromium's one-for-one LF flattening"
 
 submit_body="$(sed -n '/private func executeSubmit/,/private func relayKitIdentifierSelector/p' "${SOURCE}")"
-test "$(rg -c 'waitForUniqueApplicationOverlaySelector' <<<"${submit_body}")" -eq 2 ||
+select_model_body="$(sed -n '/private func executeSelectModel/,/private func executeSubmit/p' "${SOURCE}")"
+grep -Fq 'ensureModelSelection(' <<<"${select_model_body}" ||
+  fail "select-model must reuse the exact model-selection boundary"
+if rg -Fq 'performVerifiedWrite|structuralSendButton|unlabeledButtonSelector' <<<"${select_model_body}"; then
+  fail "select-model must not write the composer or press send"
+fi
+grep -Fq 'sendCount: 0' <<<"${select_model_body}" ||
+  fail "select-model must report that it did not submit a message"
+grep -Fq 'ensureModelSelection(' <<<"${submit_body}" ||
+  fail "submit must reuse the exact model-selection boundary"
+grep -Fq 'performVerifiedPress(context: context, selector: composerSelector)' <<<"${submit_body}" ||
+  fail "submit must focus the exact composer through verified AXPress before writing"
+rg -Uq 'performVerifiedPress\(context: context, selector: composerSelector\)(.|\n)*performVerifiedWrite\((.|\n)*selector: composerSelector,(.|\n)*value: query' <<<"${submit_body}" ||
+  fail "submit must focus the exact composer before the verified query write"
+rg -Uq 'performVerifiedWrite\((.|\n)*selector: composerSelector,(.|\n)*value: query,(.|\n)*focusBeforeWrite: true(.|\n)*\)' <<<"${submit_body}" ||
+  fail "submit must set and verify exact composer focus at the write boundary"
+grep -Fq 'waitForEmptyComposer(context: context, failureCode: "send_not_verified")' <<<"${submit_body}" ||
+  fail "submit must fail closed unless the composer empties after the send action"
+grep -Fq 'minimumStableComposerReadbackPolls = 3' "${SOURCE}" ||
+  fail "submit must wait for three stable composer polls before its single send action"
+composer_readback_body="$(sed -n '/private func waitForComposerReadback/,/private func waitForModelSelection/p' "${SOURCE}")"
+grep -Fq 'stablePolls += 1' <<<"${composer_readback_body}" ||
+  fail "composer readback must accumulate consecutive stable polls"
+grep -Fq 'CFEqual($0, composer)' <<<"${composer_readback_body}" ||
+  fail "stable composer readback must remain bound to the exact focused composer"
+grep -Fq 'stablePolls >= minimumStableComposerReadbackPolls' <<<"${composer_readback_body}" ||
+  fail "composer readback must not return before the stability threshold"
+
+test "$(rg -c 'waitForUniqueApplicationOverlaySelector' <<<"${model_selection_body}")" -eq 2 ||
   fail "only the two native model-menu selectors may use the application overlay"
-test "$(rg -c 'applicationOverlayNode' <<<"${submit_body}")" -eq 2 ||
+test "$(rg -c 'applicationOverlayNode' <<<"${model_selection_body}")" -eq 2 ||
   fail "native model-menu presses must resolve exact same-PID overlay nodes"
 
 for relaykit_command in relaykit-provider-configure relaykit-provider-protocol-probe relaykit-provider-verify relaykit-gateway-start; do

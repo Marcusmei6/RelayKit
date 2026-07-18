@@ -36,6 +36,7 @@ private let relayKitWindowSemanticIdentifiers = Set([
 private let selectorWaitSeconds: TimeInterval = 3
 private let modelPickerWaitSeconds: TimeInterval = 10
 private let selectorPollSeconds: TimeInterval = 0.05
+private let minimumStableComposerReadbackPolls = 3
 private let maximumWorkspacePathComponents = 32
 private let requiredPrivatePermissions: mode_t = 0o600
 
@@ -165,6 +166,7 @@ private enum DriverCommand: String {
     case ready
     case dismissModelNux = "dismiss-model-nux"
     case prepare
+    case selectModel = "select-model"
     case submit
     case relayKitProviderConfigure = "relaykit-provider-configure"
     case relayKitProviderProtocolProbe = "relaykit-provider-protocol-probe"
@@ -189,7 +191,7 @@ private enum DriverApplicationMode {
 
 private func applicationMode(for command: DriverCommand) -> DriverApplicationMode? {
     switch command {
-    case .inspect, .reveal, .ready, .dismissModelNux, .prepare, .submit:
+    case .inspect, .reveal, .ready, .dismissModelNux, .prepare, .selectModel, .submit:
         return .desktop
     case .relayKitProviderConfigure, .relayKitProviderProtocolProbe,
          .relayKitProviderVerify, .relayKitGatewayStart, .relayKitUIEvidence,
@@ -208,7 +210,7 @@ private struct ParsedArguments {
 private func redactedCommandName(_ arguments: [String]) -> String {
     guard let raw = arguments.first else { return "unknown" }
     let known = Set([
-        "inspect", "reveal", "ready", "dismiss-model-nux", "prepare", "submit", "self-test",
+        "inspect", "reveal", "ready", "dismiss-model-nux", "prepare", "select-model", "submit", "self-test",
         "relaykit-provider-configure", "relaykit-provider-protocol-probe",
         "relaykit-provider-verify", "relaykit-gateway-start",
         "relaykit-ui-evidence",
@@ -229,6 +231,8 @@ private func requiredOptions(for command: DriverCommand, scenario: String?) thro
         return ["--pid", "--window-identity"]
     case .prepare:
         return ["--pid", "--window-identity", "--workspace"]
+    case .selectModel:
+        return ["--pid", "--window-identity", "--model-label", "--catalog-labels-file"]
     case .submit:
         return ["--pid", "--window-identity", "--model-label", "--catalog-labels-file", "--query-file"]
     case .relayKitProviderConfigure, .relayKitProviderProtocolProbe:
@@ -2239,6 +2243,33 @@ private func bootstrapWorkspaceIfNeeded(
     ))
 }
 
+private func waitForEmptyComposer(
+    context: DriverContext,
+    failureCode: String = "fresh_task_draft_clear_not_verified"
+) throws -> [AXNode] {
+    let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    while true {
+        let nodes = try currentNodes(context)
+        let matches = matchingIndices(in: nodes.map(\.semantic), selector: composerSelector)
+        if matches.count == 1 {
+            let candidate = nodes[matches[0]].element
+            if composerIsEmpty(
+                value: copyAXString(candidate, kAXValueAttribute as CFString),
+                placeholder: copyAXString(candidate, axPlaceholderValueAttribute)
+            ) {
+                return nodes
+            }
+        }
+        if matches.count > 1 {
+            throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: matches.count)
+        }
+        if Date() >= deadline {
+            throw DriverFailure(failureCode, exitStatus: 5, candidateCount: matches.count)
+        }
+        Thread.sleep(forTimeInterval: selectorPollSeconds)
+    }
+}
+
 private func waitForFreshComposer(
     context: DriverContext,
     previousComposer: AXUIElement?,
@@ -2268,6 +2299,13 @@ private func waitForFreshComposer(
                 ) {
                     return nodes
                 }
+                try performVerifiedWrite(
+                    context: context,
+                    selector: composerSelector,
+                    value: "",
+                    failureCode: "fresh_task_draft_clear_failed"
+                )
+                return try waitForEmptyComposer(context: context)
             }
             throw DriverFailure("fresh_task_not_verified", exitStatus: 5, candidateCount: matches.count)
         }
@@ -2280,15 +2318,32 @@ private func waitForComposerReadback(
     expected: String
 ) throws -> [AXNode] {
     let deadline = Date().addingTimeInterval(selectorWaitSeconds)
+    let application = AXUIElementCreateApplication(context.pid)
+    var stablePolls = 0
     while true {
         let nodes = try currentNodes(context)
         let matches = matchingIndices(in: nodes.map(\.semantic), selector: composerSelector)
-        if matches.count == 1,
-           composerReadbackMatches(
-               actual: copyAXString(nodes[matches[0]].element, kAXValueAttribute as CFString),
-               expected: expected
-           ) {
-            return nodes
+        if matches.count == 1 {
+            let composer = nodes[matches[0]].element
+            var focusedValue: CFTypeRef?
+            let focused = AXUIElementCopyAttributeValue(
+                application,
+                kAXFocusedUIElementAttribute as CFString,
+                &focusedValue
+            ) == .success && focusedValue.map {
+                CFGetTypeID($0) == AXUIElementGetTypeID() && CFEqual($0, composer)
+            } == true
+            if focused && composerReadbackMatches(
+                actual: copyAXString(composer, kAXValueAttribute as CFString),
+                expected: expected
+            ) {
+                stablePolls += 1
+                if stablePolls >= minimumStableComposerReadbackPolls {
+                    return nodes
+                }
+            } else {
+                stablePolls = 0
+            }
         }
         if matches.count > 1 {
             throw DriverFailure("selector_not_unique", exitStatus: 5, candidateCount: matches.count)
@@ -2851,19 +2906,11 @@ private func executePrepare(options: [String: String]) throws -> DriverReport {
     )
 }
 
-private func executeSubmit(options: [String: String]) throws -> DriverReport {
-    guard let modelLabel = options["--model-label"],
-          let catalogPath = options["--catalog-labels-file"],
-          let queryPath = options["--query-file"] else {
-        throw DriverFailure("invalid_arguments", exitStatus: 2)
-    }
-    let catalogLabels = try readCatalogLabels(catalogPath)
-    guard catalogLabels.contains(modelLabel) else {
-        throw DriverFailure("model_label_not_in_catalog", exitStatus: 3)
-    }
-    try validateSecureFile(queryPath, kind: .query)
-
-    let context = try makeContext(options: options, command: .submit)
+private func ensureModelSelection(
+    context: DriverContext,
+    catalogLabels: Set<String>,
+    modelLabel: String
+) throws -> Int {
     let pickerSelector = modelPickerSelector(catalogLabels: catalogLabels)
     try withSelectorFailureCode("model_picker_not_unique") {
         try waitForUniqueSelector(
@@ -2916,12 +2963,70 @@ private func executeSubmit(options: [String: String]) throws -> DriverReport {
     guard exactSemanticMatch(picker.semantic, accepted: targetLabels) else {
         throw DriverFailure("model_selection_not_verified", exitStatus: 5)
     }
+    return actionCount
+}
+
+private func executeSelectModel(options: [String: String]) throws -> DriverReport {
+    guard let modelLabel = options["--model-label"],
+          let catalogPath = options["--catalog-labels-file"] else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let catalogLabels = try readCatalogLabels(catalogPath)
+    guard catalogLabels.contains(modelLabel) else {
+        throw DriverFailure("model_label_not_in_catalog", exitStatus: 3)
+    }
+    let context = try makeContext(options: options, command: .selectModel)
+    let actionCount = try ensureModelSelection(
+        context: context,
+        catalogLabels: catalogLabels,
+        modelLabel: modelLabel
+    )
+    let nodes = try currentNodes(context)
+    _ = try withSelectorFailureCode("composer_not_unique") {
+        try requireUniqueNode(in: nodes, selector: composerSelector)
+    }
+    return .success(
+        command: "select-model",
+        windowVerified: true,
+        modelPickerCount: 1,
+        composerCount: 1,
+        sendCount: 0,
+        actionCount: actionCount
+    )
+}
+
+private func executeSubmit(options: [String: String]) throws -> DriverReport {
+    guard let modelLabel = options["--model-label"],
+          let catalogPath = options["--catalog-labels-file"],
+          let queryPath = options["--query-file"] else {
+        throw DriverFailure("invalid_arguments", exitStatus: 2)
+    }
+    let catalogLabels = try readCatalogLabels(catalogPath)
+    guard catalogLabels.contains(modelLabel) else {
+        throw DriverFailure("model_label_not_in_catalog", exitStatus: 3)
+    }
+    try validateSecureFile(queryPath, kind: .query)
+
+    let context = try makeContext(options: options, command: .submit)
+    var actionCount = try ensureModelSelection(
+        context: context,
+        catalogLabels: catalogLabels,
+        modelLabel: modelLabel
+    )
+    var nodes = try currentNodes(context)
     _ = try withSelectorFailureCode("composer_not_unique") {
         try requireUniqueNode(in: nodes, selector: composerSelector)
     }
 
     let query = try composerValue(query: readQuery(queryPath))
-    try performVerifiedWrite(context: context, selector: composerSelector, value: query)
+    try performVerifiedPress(context: context, selector: composerSelector)
+    actionCount += 1
+    try performVerifiedWrite(
+        context: context,
+        selector: composerSelector,
+        value: query,
+        focusBeforeWrite: true
+    )
     actionCount += 1
 
     nodes = try waitForComposerReadback(context: context, expected: query)
@@ -2933,6 +3038,7 @@ private func executeSubmit(options: [String: String]) throws -> DriverReport {
         targetProvider: structuralSendButton
     )
     actionCount += 1
+    _ = try waitForEmptyComposer(context: context, failureCode: "send_not_verified")
     return .success(
         command: "submit",
         windowVerified: true,
@@ -4387,6 +4493,8 @@ private func execute(_ parsed: ParsedArguments) throws -> DriverReport {
         return try executeDismissModelNux(options: parsed.options)
     case .prepare:
         return try executePrepare(options: parsed.options)
+    case .selectModel:
+        return try executeSelectModel(options: parsed.options)
     case .submit:
         return try executeSubmit(options: parsed.options)
     case .relayKitProviderConfigure:

@@ -635,6 +635,13 @@ test "$("${PROOF_SCRIPT}" --test-stage-checkpoint "${usage_dir}/complete.json" "
 test "$("${PROOF_SCRIPT}" --test-stage-checkpoint "${usage_dir}/complete.json" "${usage_dir}/screenshots-markdown-split.json" provider-markdown "${provider_model}" "${usage_dir}/tool-complete.json")" = "verified"
 expect_failure "wrong active task advanced the GPT-5.5 stage" "${PROOF_SCRIPT}" --test-stage-checkpoint "${usage_dir}/complete.json" "${usage_dir}/screenshots-wrong-task.json" gpt55-response "${provider_model}" "${usage_dir}/tool-complete.json"
 test "$("${PROOF_SCRIPT}" --test-stage-checkpoint "${usage_dir}/complete.json" "${usage_dir}/screenshots-complete.json" provider-tool "${provider_model}" "${usage_dir}/tool-complete.json")" = "verified"
+jq '. + [{"role":"provider-tool","captured":true,"target_identity_verified":true,"visual_checks":{"tool_marker_visible":false,"tool_execution_visible":true,"raw_protocol_visible":false}}]' \
+  "${usage_dir}/screenshots-complete.json" >"${usage_dir}/screenshots-tool-ocr-fluctuation.json"
+test "$("${PROOF_SCRIPT}" --test-stage-checkpoint "${usage_dir}/complete.json" "${usage_dir}/screenshots-tool-ocr-fluctuation.json" provider-tool "${provider_model}" "${usage_dir}/tool-complete.json")" = "verified"
+jq '.[-1].visual_checks.raw_protocol_visible = true' \
+  "${usage_dir}/screenshots-tool-ocr-fluctuation.json" >"${usage_dir}/screenshots-tool-raw-protocol.json"
+expect_failure "tool screenshot aggregation accepted a raw protocol frame" \
+  "${PROOF_SCRIPT}" --test-stage-checkpoint "${usage_dir}/complete.json" "${usage_dir}/screenshots-tool-raw-protocol.json" provider-tool "${provider_model}" "${usage_dir}/tool-complete.json"
 cat >"${usage_dir}/tool-stale-empty.json" <<'JSON'
 {"proof_found":false,"function_call_found":false,"function_call_output_found":false,"process_exited_zero":false,"xml_leak_found":false,"raw_function_calls_found":false}
 JSON
@@ -825,6 +832,47 @@ jq -e '.tool_marker_visible == true and .tool_execution_visible == true and .raw
 
 echo "Manual proof localized completed-tool OCR test passed"
 
+marker_ocr_fixture="${tmp_dir}/marker-ocr-fixture.png"
+swift - "${marker_ocr_fixture}" <<'SWIFT'
+import AppKit
+import Foundation
+
+let output = CommandLine.arguments[1]
+let size = NSSize(width: 2000, height: 700)
+let image = NSImage(size: size)
+image.lockFocus()
+NSColor.white.setFill()
+NSRect(origin: .zero, size: size).fill()
+let attributes: [NSAttributedString.Key: Any] = [
+    .font: NSFont.monospacedSystemFont(ofSize: 18, weight: .regular),
+    .foregroundColor: NSColor.black,
+]
+let lines = [
+    "RELAYKIT_SB_20260718T152855Z_OFFICIAL_PLAIN_6C68D5BC378B",
+    "RELAYKIT_SB_20260718T152855Z_0FFICIAL_PLAIN_6C68D5BC378B",
+]
+for (index, line) in lines.enumerated() {
+    NSString(string: line).draw(at: NSPoint(x: 500, y: 500 - (index * 180)), withAttributes: attributes)
+}
+image.unlockFocus()
+guard let tiff = image.tiffRepresentation,
+      let bitmap = NSBitmapImageRep(data: tiff),
+      let png = bitmap.representation(using: .png, properties: [:]) else {
+    exit(2)
+}
+try png.write(to: URL(fileURLWithPath: output))
+SWIFT
+marker="RELAYKIT_SB_20260718T152855Z_OFFICIAL_PLAIN_6C68D5BC378B"
+"${PROOF_SCRIPT}" --test-screenshot-analysis plain "${marker_ocr_fixture}" "${marker}" >"${tmp_dir}/marker-ocr-result.json"
+jq -e '.response_marker_visible == true' "${tmp_dir}/marker-ocr-result.json" >/dev/null
+expect_failure "two-character marker drift was accepted" \
+  jq -e '.response_marker_visible == true' <(
+    "${PROOF_SCRIPT}" --test-screenshot-analysis plain "${marker_ocr_fixture}" \
+      "RELAYKIT_SB_20260718T152855Z_OFFICIAL_PLAIN_6C68D5BC37XX"
+  )
+
+echo "Manual proof bounded marker OCR tolerance test passed"
+
 for evidence_field in gpt56_gui_completed official_picker_has_spark official_picker_excludes_gpt52 markdown_render_verified raw_protocol_absent tool_gui_verified; do
   grep -Fq "${evidence_field}:" "${PROOF_SCRIPT}" ||
     fail "manual proof evidence is missing ${evidence_field}"
@@ -862,9 +910,15 @@ for assisted_stage in official-plain official-markdown provider-plain provider-m
   printf 'Reply with fixture marker for %s\n' "${assisted_stage}" >"${assisted_dir}/${assisted_stage}.txt"
   chmod 600 "${assisted_dir}/${assisted_stage}.txt"
 done
-cat >"${assisted_dir}/official-tool.txt" <<EOF
-Use the shell tool to run exactly: printf '${assisted_marker}\\n'; pwd. Then report only the exact tool output and working directory. Do not inspect any files.
-EOF
+expected_assisted_prompt="$(python3 - "${assisted_marker}" <<'PY'
+import json
+import sys
+
+marker = sys.argv[1]
+print("RELAYKIT_EXEC_COMMAND_V1 " + json.dumps({"cmd": f"printf '{marker}\\n'; pwd"}, separators=(",", ":")))
+PY
+)"
+printf '%s\n' "${expected_assisted_prompt}" >"${assisted_dir}/official-tool.txt"
 chmod 600 "${assisted_dir}/official-tool.txt"
 assisted_scenario="${assisted_dir}/scenario.json"
 cat >"${assisted_scenario}" <<JSON
@@ -975,8 +1029,9 @@ cat >"${assisted_current}" <<JSON
 JSON
 chmod 600 "${assisted_current}"
 assisted_unsigned="${assisted_state_dir}/unsigned-state.json"
+assisted_prompt_json="$(printf '%s' "${expected_assisted_prompt}" | jq -Rs .)"
 cat >"${assisted_unsigned}" <<JSON
-{"version":1,"status":"awaiting_user_action","run_id":"assisted-fixture-run","scenario_path":"${assisted_scenario}","scenario_sha256":"${assisted_scenario_sha}","artifact_path":"${assisted_artifact}","artifact_sha256":"${assisted_artifact_sha}","harness_sha256":"harness-fixture","source_snapshot_sha256":"source-fixture","global_guard":"guard-fixture","stage_evidence_path":"${assisted_ledger}","stage_evidence_sha256":"${assisted_ledger_sha}","next_query_sha256":"${assisted_query_sha}","token_sha256":"${assisted_token_sha}","supervisor":{"pid":${assisted_supervisor_pid},"identity":"${assisted_supervisor_identity}"},"desktop":{"pid":${assisted_desktop_pid},"identity":"${assisted_desktop_identity}","window_id":303},"gateway":{"pid":${assisted_gateway_pid},"identity":"${assisted_gateway_identity}","host":"127.0.0.1","port":19777,"owns_port":true},"first_five_ledger":$(cat "${assisted_ledger}"),"next_stage":{"id":"official-tool","evidence_role":"official-tool","expect":"tool","model_id":"fixture/official","query_file":"${assisted_dir}/official-tool.txt","response_marker":"${assisted_marker}","usage_baseline":5,"since_epoch":4099680000},"pause_prompt":"Use the shell tool to run exactly: printf '${assisted_marker}\\n'; pwd. Then report only the exact tool output and working directory. Do not inspect any files.","submission_count":5,"resume_used":false,"cleanup_done":false}
+{"version":1,"status":"awaiting_user_action","run_id":"assisted-fixture-run","scenario_path":"${assisted_scenario}","scenario_sha256":"${assisted_scenario_sha}","artifact_path":"${assisted_artifact}","artifact_sha256":"${assisted_artifact_sha}","harness_sha256":"harness-fixture","source_snapshot_sha256":"source-fixture","global_guard":"guard-fixture","stage_evidence_path":"${assisted_ledger}","stage_evidence_sha256":"${assisted_ledger_sha}","next_query_sha256":"${assisted_query_sha}","token_sha256":"${assisted_token_sha}","supervisor":{"pid":${assisted_supervisor_pid},"identity":"${assisted_supervisor_identity}"},"desktop":{"pid":${assisted_desktop_pid},"identity":"${assisted_desktop_identity}","window_id":303},"gateway":{"pid":${assisted_gateway_pid},"identity":"${assisted_gateway_identity}","host":"127.0.0.1","port":19777,"owns_port":true},"first_five_ledger":$(cat "${assisted_ledger}"),"next_stage":{"id":"official-tool","evidence_role":"official-tool","expect":"tool","model_id":"fixture/official","query_file":"${assisted_dir}/official-tool.txt","response_marker":"${assisted_marker}","usage_baseline":5,"since_epoch":4099680000},"pause_prompt":${assisted_prompt_json},"submission_count":5,"resume_used":false,"cleanup_done":false}
 JSON
 chmod 600 "${assisted_unsigned}"
 "${PROOF_SCRIPT}" --test-assisted-sign-state "${assisted_unsigned}" "${assisted_state}"
@@ -993,11 +1048,11 @@ mv "${assisted_state_dir}/signed-state-backup.json" "${assisted_state}"
 chmod 600 "${assisted_state}"
 
 descriptor="$(${PROOF_SCRIPT} --test-assisted-descriptor "${assisted_state}")"
-jq -e --argjson expected_desktop_pid "${assisted_desktop_pid}" '
+jq -e --argjson expected_desktop_pid "${assisted_desktop_pid}" --arg expected_prompt "${expected_assisted_prompt}" '
   keys == ["desktop_pid","desktop_window_id","gateway_endpoint","prompt","status"] and
   .status == "awaiting_user_action" and .desktop_pid == $expected_desktop_pid and .desktop_window_id == 303 and
   .gateway_endpoint == "http://127.0.0.1:19777/v1" and
-  (.prompt | startswith("Use the shell tool to run exactly:"))
+  .prompt == $expected_prompt
 ' <<<"${descriptor}" >/dev/null || fail "assisted pause descriptor escaped its strict allowlist"
 
 for assisted_mutation in \
@@ -1633,12 +1688,17 @@ expect_failure "custom tool completion accepted raw protocol" \
 
 auto_body="$(sed -n '/^run_automated_proof() {/,/^}/p' "${PROOF_SCRIPT}")"
 auto_wait_body="$(sed -n '/^wait_for_automated_stage() {/,/^}/p' "${PROOF_SCRIPT}")"
+automated_checkpoint_body="$(sed -n '/^automated_stage_checkpoint_verified() {/,/^}/p' "${PROOF_SCRIPT}")"
 submitted_binding_body="$(sed -n '/^wait_for_submitted_rollout_binding() {/,/^}/p' "${PROOF_SCRIPT}")"
 if grep -Eq 'wait_for_user_continue|read -r _|continue_file' <<<"${auto_body}"; then
   fail "automated proof must never wait for user input"
 fi
 grep -Fq 'refresh_automated_stage_evidence' <<<"${auto_wait_body}" ||
   fail "automated proof must refresh stage evidence before verification"
+grep -Fq 'any($shots[]; .visual_checks.tool_marker_visible == true and .visual_checks.tool_execution_visible == true)' <<<"${automated_checkpoint_body}" ||
+  fail "automated tool proof must tolerate later OCR misses after one exact process-bound tool frame"
+grep -Fq 'all($shots[]; .visual_checks.raw_protocol_visible != true)' <<<"${automated_checkpoint_body}" ||
+  fail "automated tool proof must reject raw protocol in every captured frame"
 grep -Fq '"${AX_DRIVER_BINARY}" reveal' <<<"${auto_wait_body}" ||
   fail "Markdown proof must reveal an exact off-screen heading through AX"
 grep -Fq 'submission_state="submitted"' <<<"${auto_body}" ||
@@ -1668,8 +1728,13 @@ grep -Fq 'codex-desktop-ax-driver.swift' <<<"${auto_body}" ||
   fail "automated proof must invoke the deterministic AX driver"
 test "$(rg -c '"\$\{AX_DRIVER_BINARY\}" submit' <<<"${auto_body}")" -eq 1 ||
   fail "the automated state machine must contain exactly one submit call site"
+test "$(rg -c '"\$\{AX_DRIVER_BINARY\}" select-model' <<<"${auto_body}")" -eq 1 ||
+  fail "the assisted state machine must contain exactly one pre-pause model-selection call site"
 if grep -Fq '"${AX_DRIVER_BINARY}" submit' <<<"${auto_wait_body}${submitted_binding_body}"; then
   fail "submitted observation paths must never resend or reopen the picker"
+fi
+if grep -Fq '"${AX_DRIVER_BINARY}" select-model' <<<"${auto_wait_body}${submitted_binding_body}"; then
+  fail "submitted observation paths must never change the selected model"
 fi
 test "$(rg -c 'verify_assisted_live_bindings' <<<"${submitted_binding_body}")" -eq 2 ||
   fail "stage-six rollout binding must guard every poll and the acceptance edge"
@@ -1712,12 +1777,17 @@ grep -Fq '"${AX_DRIVER_BINARY}" dismiss-model-nux' <<<"${nux_body}" ||
 grep -Fq '.candidate_count <= 1 and .action_count <= 1' <<<"${nux_body}" ||
   fail "model NUX handling must allow at most one exact action"
 prepare_call_line="$(grep -n '"${AX_DRIVER_BINARY}" prepare' <<<"${auto_body}" | cut -d: -f1)"
+select_model_call_line="$(grep -n '"${AX_DRIVER_BINARY}" select-model' <<<"${auto_body}" | cut -d: -f1)"
+assisted_pause_line="$(grep -n 'write_assisted_pause_state' <<<"${auto_body}" | cut -d: -f1)"
 submit_call_line="$(grep -n '"${AX_DRIVER_BINARY}" submit' <<<"${auto_body}" | cut -d: -f1)"
 activation_lines="$(grep -n 'activate_isolated_desktop' <<<"${auto_body}" | cut -d: -f1)"
 activation_before_prepare="$(awk -v target="${prepare_call_line}" '$1 < target {last=$1} END {print last}' <<<"${activation_lines}")"
+activation_before_select_model="$(awk -v lower="${prepare_call_line}" -v upper="${select_model_call_line}" '$1 > lower && $1 < upper {last=$1} END {print last}' <<<"${activation_lines}")"
 activation_before_submit="$(awk -v lower="${prepare_call_line}" -v upper="${submit_call_line}" '$1 > lower && $1 < upper {last=$1} END {print last}' <<<"${activation_lines}")"
-[[ -n "${activation_before_prepare}" && -n "${activation_before_submit}" ]] ||
-  fail "the harness must reactivate the bound Desktop PID immediately before prepare and submit"
+[[ -n "${activation_before_prepare}" && -n "${activation_before_select_model}" && -n "${activation_before_submit}" ]] ||
+  fail "the harness must reactivate the bound Desktop PID immediately before prepare, select-model, and submit"
+[[ -n "${select_model_call_line}" && -n "${assisted_pause_line}" && "${prepare_call_line}" -lt "${select_model_call_line}" && "${select_model_call_line}" -lt "${assisted_pause_line}" ]] ||
+  fail "assisted stage six must prepare a fresh task and preselect its official model before pausing"
 activation_body="$(sed -n '/^activate_isolated_desktop() {/,/^}/p' "${PROOF_SCRIPT}")"
 if grep -Fq 'guard app.activate' <<<"${activation_body}"; then
   fail "Desktop activation must not treat the immediate NSRunningApplication boolean as terminal"
