@@ -1892,6 +1892,23 @@ jq -e '
   .xml_leak_found == false
 ' "${tool_output}" >/dev/null
 
+custom_tool_codex_home="${tmp_dir}/custom-tool-codex-home"
+custom_tool_rollout_dir="${custom_tool_codex_home}/sessions/2099/07/10"
+custom_tool_output="${tmp_dir}/custom-tool-evidence.json"
+mkdir -p "${custom_tool_rollout_dir}"
+cat >"${custom_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
+{"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-custom","input":"printf '${tool_marker}\\\\n'; pwd"}}
+{"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-custom","output":"Process exited with code 0\nFinal output:\n${tool_marker}\n/tmp/relaykit-fixture\n"}}
+JSONL
+"${PROOF_SCRIPT}" --test-tool-evidence "${custom_tool_codex_home}" "${custom_tool_output}" 0 gpt-fixture-official "${tool_marker}"
+jq -e '
+  .proof_found == true and .function_call_found == true and .function_call_output_found == true and
+  .assisted_same_call_verified == true and .matched_call_ids == ["call-custom"] and
+  .exact_shell_command_found == true and .marker_output_found == true and .pwd_output_found == true and
+  .process_exited_zero == true and .raw_function_calls_found == false
+' "${custom_tool_output}" >/dev/null || fail "custom exec rollout evidence was not recognized"
+
 bad_tool_codex_home="${tmp_dir}/bad-tool-codex-home"
 bad_tool_rollout_dir="${bad_tool_codex_home}/sessions/2099/07/10"
 bad_tool_output="${tmp_dir}/bad-tool-evidence.json"

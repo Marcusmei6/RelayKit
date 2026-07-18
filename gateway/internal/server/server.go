@@ -865,47 +865,65 @@ func writeWebSocketResponseEvents(w *bufio.Writer, result map[string]any) error 
 	}
 	if output, ok := result["output"].([]map[string]any); ok {
 		for index, item := range output {
-			if item["type"] != "function_call" {
-				continue
-			}
+			itemType := stringValue(item["type"])
 			callID := stringValue(item["call_id"])
 			itemID := stringValue(item["id"])
 			if itemID == "" {
 				itemID = callID
 			}
 			name := stringValue(item["name"])
-			arguments := stringValue(item["arguments"])
-			if err := writeWebSocketJSON(w, map[string]any{
-				"type":         "response.output_item.added",
-				"output_index": index,
-				"item": map[string]any{
-					"type":      "function_call",
-					"id":        itemID,
-					"status":    "in_progress",
-					"call_id":   callID,
-					"name":      name,
-					"arguments": "",
-				},
-			}); err != nil {
-				return err
-			}
-			if err := writeWebSocketFunctionCallArguments(w, "response.function_call_arguments.delta", index, callID, arguments); err != nil {
-				return err
-			}
-			if err := writeWebSocketFunctionCallArguments(w, "response.function_call_arguments.done", index, callID, arguments); err != nil {
-				return err
+			switch itemType {
+			case "function_call":
+				arguments := stringValue(item["arguments"])
+				if err := writeWebSocketJSON(w, map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": index,
+					"item": map[string]any{
+						"type":      "function_call",
+						"id":        itemID,
+						"status":    "in_progress",
+						"call_id":   callID,
+						"name":      name,
+						"arguments": "",
+					},
+				}); err != nil {
+					return err
+				}
+				if err := writeWebSocketFunctionCallArguments(w, "response.function_call_arguments.delta", index, callID, arguments); err != nil {
+					return err
+				}
+				if err := writeWebSocketFunctionCallArguments(w, "response.function_call_arguments.done", index, callID, arguments); err != nil {
+					return err
+				}
+			case "custom_tool_call":
+				input := stringValue(item["input"])
+				if err := writeWebSocketJSON(w, map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": index,
+					"item": map[string]any{
+						"type":    "custom_tool_call",
+						"id":      itemID,
+						"status":  "in_progress",
+						"call_id": callID,
+						"name":    name,
+						"input":   "",
+					},
+				}); err != nil {
+					return err
+				}
+				if err := writeWebSocketCustomToolCallInput(w, "response.custom_tool_call_input.delta", index, callID, input); err != nil {
+					return err
+				}
+				if err := writeWebSocketCustomToolCallInput(w, "response.custom_tool_call_input.done", index, callID, input); err != nil {
+					return err
+				}
+			default:
+				continue
 			}
 			if err := writeWebSocketJSON(w, map[string]any{
 				"type":         "response.output_item.done",
 				"output_index": index,
-				"item": map[string]any{
-					"type":      "function_call",
-					"id":        itemID,
-					"status":    "completed",
-					"call_id":   callID,
-					"name":      name,
-					"arguments": arguments,
-				},
+				"item":         item,
 			}); err != nil {
 				return err
 			}
@@ -945,6 +963,28 @@ func writeSSEFunctionCallArguments(w http.ResponseWriter, event string, outputIn
 
 func writeWebSocketFunctionCallArguments(w *bufio.Writer, event string, outputIndex int, callID, arguments string) error {
 	return writeWebSocketJSON(w, functionCallArgumentsEvent(event, outputIndex, callID, arguments))
+}
+
+func customToolCallInputEvent(event string, outputIndex int, callID, input string) map[string]any {
+	payload := map[string]any{
+		"type":         event,
+		"item_id":      callID,
+		"output_index": outputIndex,
+	}
+	if strings.HasSuffix(event, ".delta") {
+		payload["delta"] = input
+	} else {
+		payload["input"] = input
+	}
+	return payload
+}
+
+func writeSSECustomToolCallInput(w http.ResponseWriter, event string, outputIndex int, callID, input string) bool {
+	return writeSSE(w, event, customToolCallInputEvent(event, outputIndex, callID, input))
+}
+
+func writeWebSocketCustomToolCallInput(w *bufio.Writer, event string, outputIndex int, callID, input string) error {
+	return writeWebSocketJSON(w, customToolCallInputEvent(event, outputIndex, callID, input))
 }
 
 func (s *Server) completeResponse(ctx context.Context, req responsesRequest, messages []chatMessage, start time.Time, transport string) (map[string]any, int, map[string]any) {
@@ -1232,28 +1272,43 @@ func writeCompletedResponsesSSE(w http.ResponseWriter, result map[string]any) {
 	}
 	if output, ok := result["output"].([]map[string]any); ok {
 		for index, item := range output {
-			if item["type"] != "function_call" {
-				continue
-			}
+			itemType := stringValue(item["type"])
 			callID := stringValue(item["call_id"])
-			arguments := stringValue(item["arguments"])
-			if !writeSSE(w, "response.output_item.added", map[string]any{
-				"type":         "response.output_item.added",
-				"output_index": index,
-				"item": map[string]any{
-					"type":      "function_call",
-					"call_id":   callID,
-					"name":      stringValue(item["name"]),
-					"arguments": "",
-				},
-			}) {
-				return
-			}
-			if !writeSSEFunctionCallArguments(w, "response.function_call_arguments.delta", index, callID, arguments) {
-				return
-			}
-			if !writeSSEFunctionCallArguments(w, "response.function_call_arguments.done", index, callID, arguments) {
-				return
+			switch itemType {
+			case "function_call":
+				arguments := stringValue(item["arguments"])
+				if !writeSSE(w, "response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": index,
+					"item": map[string]any{
+						"type":      "function_call",
+						"call_id":   callID,
+						"name":      stringValue(item["name"]),
+						"arguments": "",
+					},
+				}) ||
+					!writeSSEFunctionCallArguments(w, "response.function_call_arguments.delta", index, callID, arguments) ||
+					!writeSSEFunctionCallArguments(w, "response.function_call_arguments.done", index, callID, arguments) {
+					return
+				}
+			case "custom_tool_call":
+				input := stringValue(item["input"])
+				if !writeSSE(w, "response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
+					"output_index": index,
+					"item": map[string]any{
+						"type":    "custom_tool_call",
+						"call_id": callID,
+						"name":    stringValue(item["name"]),
+						"input":   "",
+					},
+				}) ||
+					!writeSSECustomToolCallInput(w, "response.custom_tool_call_input.delta", index, callID, input) ||
+					!writeSSECustomToolCallInput(w, "response.custom_tool_call_input.done", index, callID, input) {
+					return
+				}
+			default:
+				continue
 			}
 			if !writeSSE(w, "response.output_item.done", map[string]any{
 				"type":         "response.output_item.done",
@@ -1599,6 +1654,7 @@ const (
 )
 
 func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, req responsesRequest, messages []chatMessage) (map[string]any, error) {
+	execCapability := officialExecCommandCapability(req.Input, req.Tools)
 	command, messageOnly, err := officialExplicitExecCommand(req.Input, messages, req.Tools)
 	if err != nil {
 		return nil, &officialCodexFailure{
@@ -1608,7 +1664,7 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 		}
 	}
 	if command != "" {
-		return explicitExecCommandResponse(command, model.ID)
+		return explicitExecCommandResponse(command, model.ID, execCapability)
 	}
 
 	codexHome := strings.TrimPrefix(official.CredentialRef.Value, "~/")
@@ -1696,7 +1752,8 @@ func codexExplicitToolResultPrompt(messages []chatMessage) string {
 }
 
 func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools []responsesTool) (command string, messageOnly bool, err error) {
-	execCommandAllowed := officialExecCommandCapabilityAllowed(input, tools)
+	execCapability := officialExecCommandCapability(input, tools)
+	execCommandAllowed := execCapability != officialExecCommandUnavailable
 	var text string
 	if json.Unmarshal(input, &text) == nil {
 		command, explicit, err := parseExplicitExecCommand(text, execCommandAllowed)
@@ -1737,7 +1794,7 @@ func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools [
 	if len(items)-currentUser != 3 {
 		return "", false, fmt.Errorf("invalid explicit shell tool roundtrip")
 	}
-	if err := validateExplicitExecCommandRoundTrip(command, items[currentUser+1], items[currentUser+2]); err != nil {
+	if err := validateExplicitExecCommandRoundTrip(command, items[currentUser+1], items[currentUser+2], execCapability); err != nil {
 		return "", false, err
 	}
 	return "", true, nil
@@ -1774,20 +1831,32 @@ func parseExplicitExecCommand(text string, execCommandAllowed bool) (command str
 	return command, true, nil
 }
 
-func validateExplicitExecCommandRoundTrip(command string, call, output responsesInputItem) error {
-	if call.Type != "function_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec_command" {
-		return fmt.Errorf("invalid explicit shell function call")
+func validateExplicitExecCommandRoundTrip(command string, call, output responsesInputItem, capability officialExecCommandCapabilityKind) error {
+	var outputType string
+	switch capability {
+	case officialExecCommandFunction:
+		if call.Type != "function_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec_command" {
+			return fmt.Errorf("invalid explicit shell function call")
+		}
+		arguments, err := strictJSONObject([]byte(call.Arguments))
+		if err != nil || len(arguments) != 1 {
+			return fmt.Errorf("invalid explicit shell function arguments")
+		}
+		var calledCommand string
+		if json.Unmarshal(arguments["cmd"], &calledCommand) != nil || calledCommand != command {
+			return fmt.Errorf("explicit shell function arguments do not match")
+		}
+		outputType = "function_call_output"
+	case officialExecCommandCustom:
+		if call.Type != "custom_tool_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec" || call.Input != command {
+			return fmt.Errorf("invalid explicit shell custom tool call")
+		}
+		outputType = "custom_tool_call_output"
+	default:
+		return fmt.Errorf("explicit shell tool capability is unavailable")
 	}
-	arguments, err := strictJSONObject([]byte(call.Arguments))
-	if err != nil || len(arguments) != 1 {
-		return fmt.Errorf("invalid explicit shell function arguments")
-	}
-	var calledCommand string
-	if json.Unmarshal(arguments["cmd"], &calledCommand) != nil || calledCommand != command {
-		return fmt.Errorf("explicit shell function arguments do not match")
-	}
-	if output.Type != "function_call_output" || strings.TrimSpace(output.CallID) == "" || output.CallID != call.CallID {
-		return fmt.Errorf("invalid explicit shell function output")
+	if output.Type != outputType || strings.TrimSpace(output.CallID) == "" || output.CallID != call.CallID {
+		return fmt.Errorf("invalid explicit shell tool output")
 	}
 	if output.Output != nil && output.Content != nil {
 		return fmt.Errorf("ambiguous explicit shell function output")
@@ -1832,9 +1901,17 @@ func officialExecCommandToolAllowed(tools []responsesTool) bool {
 	return found
 }
 
-func officialExecCommandCapabilityAllowed(input json.RawMessage, tools []responsesTool) bool {
+type officialExecCommandCapabilityKind int
+
+const (
+	officialExecCommandUnavailable officialExecCommandCapabilityKind = iota
+	officialExecCommandFunction
+	officialExecCommandCustom
+)
+
+func officialExecCommandCapability(input json.RawMessage, tools []responsesTool) officialExecCommandCapabilityKind {
 	if officialExecCommandToolAllowed(tools) {
-		return true
+		return officialExecCommandFunction
 	}
 	var items []struct {
 		Type  string `json:"type"`
@@ -1845,7 +1922,7 @@ func officialExecCommandCapabilityAllowed(input json.RawMessage, tools []respons
 		} `json:"tools"`
 	}
 	if json.Unmarshal(input, &items) != nil {
-		return false
+		return officialExecCommandUnavailable
 	}
 	additionalToolsCount := 0
 	execToolCount := 0
@@ -1855,43 +1932,62 @@ func officialExecCommandCapabilityAllowed(input json.RawMessage, tools []respons
 		}
 		additionalToolsCount++
 		if item.Role != "developer" || len(item.Tools) == 0 {
-			return false
+			return officialExecCommandUnavailable
 		}
 		for _, tool := range item.Tools {
 			if tool.Name != "exec" {
 				continue
 			}
 			if tool.Type != "custom" {
-				return false
+				return officialExecCommandUnavailable
 			}
 			execToolCount++
 		}
 	}
-	return additionalToolsCount == 1 && execToolCount == 1
+	if additionalToolsCount == 1 && execToolCount == 1 {
+		return officialExecCommandCustom
+	}
+	return officialExecCommandUnavailable
 }
 
-func explicitExecCommandResponse(command, requestedModel string) (map[string]any, error) {
+func explicitExecCommandResponse(command, requestedModel string, capability officialExecCommandCapabilityKind) (map[string]any, error) {
+	var output map[string]any
 	arguments, err := json.Marshal(map[string]string{"cmd": command})
 	if err != nil {
 		return nil, err
 	}
 	response := responseID("")
 	callID := strings.Replace(response, "resp_", "call_", 1)
-	return map[string]any{
-		"id":          response,
-		"object":      "response",
-		"status":      "completed",
-		"model":       requestedModel,
-		"output_text": "",
-		"output": []map[string]any{{
+	switch capability {
+	case officialExecCommandFunction:
+		output = map[string]any{
 			"type":      "function_call",
 			"id":        callID,
 			"status":    "completed",
 			"call_id":   callID,
 			"name":      "exec_command",
 			"arguments": string(arguments),
-		}},
-		"usage": responsesUsage(nil),
+		}
+	case officialExecCommandCustom:
+		output = map[string]any{
+			"type":    "custom_tool_call",
+			"id":      callID,
+			"status":  "completed",
+			"call_id": callID,
+			"name":    "exec",
+			"input":   command,
+		}
+	default:
+		return nil, fmt.Errorf("explicit shell tool capability is unavailable")
+	}
+	return map[string]any{
+		"id":          response,
+		"object":      "response",
+		"status":      "completed",
+		"model":       requestedModel,
+		"output_text": "",
+		"output":      []map[string]any{output},
+		"usage":       responsesUsage(nil),
 	}, nil
 }
 
@@ -2156,6 +2252,7 @@ type responsesInputItem struct {
 	CallID    string          `json:"call_id"`
 	Name      string          `json:"name"`
 	Arguments string          `json:"arguments"`
+	Input     string          `json:"input"`
 	Output    *string         `json:"output"`
 }
 

@@ -916,14 +916,16 @@ printf '%s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
 	defer currentConn.Close()
 	writeTestWebSocketText(t, currentConn, string(currentRequest))
 	currentFirst := readTestWebSocketUntil(t, currentReader, "response.completed")
-	if !strings.Contains(currentFirst, `"type":"function_call"`) ||
-		!strings.Contains(currentFirst, `"name":"exec_command"`) {
+	if !strings.Contains(currentFirst, `"type":"custom_tool_call"`) ||
+		!strings.Contains(currentFirst, `"name":"exec"`) ||
+		!strings.Contains(currentFirst, `"input":"printf RELAYKIT_V1_TOOL; pwd"`) ||
+		!strings.Contains(currentFirst, `"type":"response.custom_tool_call_input.done"`) {
 		t.Fatalf("current Codex V1 first response = %s", currentFirst)
 	}
 	currentCallID := responseCallID(t, currentFirst)
 	currentOutputInput := append(append([]map[string]any{}, currentInput...),
-		map[string]any{"type": "function_call", "call_id": currentCallID, "name": "exec_command", "arguments": `{"cmd":"` + v1Command + `"}`},
-		map[string]any{"type": "function_call_output", "call_id": currentCallID, "output": "RELAYKIT_V1_TOOL\n/workspace"},
+		map[string]any{"type": "custom_tool_call", "call_id": currentCallID, "name": "exec", "input": v1Command},
+		map[string]any{"type": "custom_tool_call_output", "call_id": currentCallID, "output": "RELAYKIT_V1_TOOL\n/workspace"},
 	)
 	currentOutputRequest, err := json.Marshal(map[string]any{"model": "gpt-5.5", "input": currentOutputInput})
 	if err != nil {
@@ -933,7 +935,7 @@ printf '%s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
 	defer currentOutputConn.Close()
 	writeTestWebSocketText(t, currentOutputConn, string(currentOutputRequest))
 	currentSecond := readTestWebSocketUntil(t, currentOutputReader, "response.completed")
-	if !strings.Contains(currentSecond, `"output_text":"TOOL COMPLETE"`) || strings.Contains(currentSecond, `"type":"function_call"`) {
+	if !strings.Contains(currentSecond, `"output_text":"TOOL COMPLETE"`) || strings.Contains(currentSecond, `"type":"custom_tool_call"`) {
 		t.Fatalf("current Codex V1 second response = %s", currentSecond)
 	}
 }
@@ -1269,10 +1271,24 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 			additionalTools,
 			{"type": "message", "role": "developer", "content": "current tool metadata"},
 			{"type": "message", "role": "user", "content": exactV1},
-			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
-			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+			{"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": command},
+			{"type": "custom_tool_call_output", "call_id": "call_1", "output": "done"},
 		}, nil, "", true, false)
 	})
+	for name, call := range map[string]map[string]any{
+		"wrong custom tool name":  {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": command},
+		"wrong custom tool input": {"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": "different"},
+		"wrong custom tool type":  {"type": "function_call", "call_id": "call_1", "name": "exec", "arguments": arguments},
+	} {
+		t.Run(name+" fails closed", func(t *testing.T) {
+			check(t, []map[string]any{
+				additionalTools,
+				{"type": "message", "role": "user", "content": exactV1},
+				call,
+				{"type": "custom_tool_call_output", "call_id": "call_1", "output": "done"},
+			}, nil, "", false, true)
+		})
+	}
 	t.Run("later user makes prior explicit roundtrip historical", func(t *testing.T) {
 		check(t, []map[string]any{
 			{"type": "message", "role": "user", "content": exact},
@@ -1411,7 +1427,9 @@ func responseCallID(t *testing.T, events string) string {
 		if err := decoder.Decode(&event); err != nil {
 			break
 		}
-		if event.Type == "response.output_item.done" && event.Item.Type == "function_call" && event.Item.CallID != "" {
+		if event.Type == "response.output_item.done" &&
+			(event.Item.Type == "function_call" || event.Item.Type == "custom_tool_call") &&
+			event.Item.CallID != "" {
 			return event.Item.CallID
 		}
 	}

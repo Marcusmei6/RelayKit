@@ -3412,18 +3412,24 @@ for path in session_paths:
         if not isinstance(item, dict):
             continue
         item_type = item.get("type")
-        if item_type not in {"function_call", "function_call_output"}:
+        if item_type not in {
+            "function_call", "function_call_output",
+            "custom_tool_call", "custom_tool_call_output",
+        }:
             continue
         call_id = item.get("call_id") or payload.get("call_id") or ""
         if not call_id:
             continue
-        if item_type == "function_call":
-            arguments = item.get("arguments")
-            try:
-                parsed_args = json.loads(arguments) if isinstance(arguments, str) else arguments or {}
-            except json.JSONDecodeError:
-                parsed_args = {}
-            command = str(parsed_args.get("cmd") or parsed_args.get("command") or "")
+        if item_type in {"function_call", "custom_tool_call"}:
+            if item_type == "custom_tool_call":
+                command = str(item.get("input") or "")
+            else:
+                arguments = item.get("arguments")
+                try:
+                    parsed_args = json.loads(arguments) if isinstance(arguments, str) else arguments or {}
+                except json.JSONDecodeError:
+                    parsed_args = {}
+                command = str(parsed_args.get("cmd") or parsed_args.get("command") or "")
             marker_found = marker in command
             calls[call_id] = {
                 "model": current_model,
@@ -3433,7 +3439,7 @@ for path in session_paths:
             }
             events.append({
                 "timestamp": record.get("timestamp"),
-                "type": "function_call",
+                "type": item_type,
                 "model": current_model,
                 "tool_name": item.get("name") or "",
                 "marker_found": marker_found,
@@ -3452,7 +3458,7 @@ for path in session_paths:
             }
             events.append({
                 "timestamp": record.get("timestamp"),
-                "type": "function_call_output",
+                "type": item_type,
                 "model": current_model,
                 "marker_found": marker_found,
                 "process_exited_zero": process_exited_zero,
@@ -3461,7 +3467,7 @@ for path in session_paths:
 matched_ids = [
     call_id for call_id, call in calls.items()
     if call.get("model") == provider_model
-    and call.get("tool_name") in {"exec_command", "shell", "bash"}
+    and call.get("tool_name") in {"exec", "exec_command", "shell", "bash"}
     and call.get("marker_found")
     and outputs.get(call_id, {}).get("marker_found")
     and outputs.get(call_id, {}).get("process_exited_zero")
@@ -3469,7 +3475,7 @@ matched_ids = [
 assisted_matched_ids = [
     call_id for call_id, call in calls.items()
     if call.get("model") == provider_model
-    and call.get("tool_name") in {"exec_command", "shell", "bash"}
+    and call.get("tool_name") in {"exec", "exec_command", "shell", "bash"}
     and call.get("exact_shell_command_found")
     and outputs.get(call_id, {}).get("model") == provider_model
     and outputs.get(call_id, {}).get("marker_found")
@@ -3490,8 +3496,8 @@ pwd_output_found = any(
 )
 out_path.write_text(json.dumps({
     "proof_found": bool(matched_ids) and not xml_leak_found,
-    "function_call_found": any(event["type"] == "function_call" for event in events),
-    "function_call_output_found": any(event["type"] == "function_call_output" for event in events),
+    "function_call_found": any(event["type"] in {"function_call", "custom_tool_call"} for event in events),
+    "function_call_output_found": any(event["type"] in {"function_call_output", "custom_tool_call_output"} for event in events),
     "process_exited_zero": bool(matched_ids),
     "matched_provider_tool_count": len(matched_ids),
     "matched_call_ids": assisted_matched_ids,
