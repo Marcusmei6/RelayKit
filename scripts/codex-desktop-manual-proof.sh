@@ -71,7 +71,8 @@ PROVIDER_TOKEN_ENV="RELAYKIT_DESKTOP_PROOF_PROVIDER_TOKEN"
 PROVIDER_TOKEN_VALUE="relaykit-desktop-proof-token"
 PROOF_PROVIDER_MODEL_ID="${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID:-desktop-proof-demo/claude-haiku-4-5}"
 PROOF_SCOPE="fixture_plumbing_preflight"
-if [[ "${MODE}" == "run-auto" || "${MODE}" == "rc1-native-responses-three-stage" ]]; then
+if [[ "${MODE}" == "run-auto" || "${MODE}" == "run-auto-assisted" ||
+      "${MODE}" == "--assisted-supervisor" || "${MODE}" == "rc1-native-responses-three-stage" ]]; then
   PROOF_INPUT_MODE="${RELAYKIT_DESKTOP_PROOF_INPUT_MODE:-automated_ax}"
 else
   PROOF_INPUT_MODE="${RELAYKIT_DESKTOP_PROOF_INPUT_MODE:-manual_user_only}"
@@ -98,15 +99,25 @@ RC1_ISOLATED_AUTH_HOME=""
 RC1_ISOLATED_AUTH_SOURCE=""
 RC1_ISOLATED_AUTH_HASH_BEFORE=""
 RC1_AUTH_LINK_CREATED=false
+ASSISTED_MODE=false
+ASSISTED_STATE_PATH=""
+ASSISTED_CLEANUP_DONE=false
+ASSISTED_TERMINAL_WRITTEN=false
 
 usage() {
   cat >&2 <<'EOF'
-usage: ./scripts/codex-desktop-manual-proof.sh [run|run-auto --scenario /absolute/path/scenario.json|rc1-native-responses-three-stage --scenario /absolute/path/scenario.json|--setup-only|status|cleanup|--purge]
+usage: ./scripts/codex-desktop-manual-proof.sh [run|run-auto --scenario /absolute/path/scenario.json|run-auto-assisted --scenario /absolute/path/scenario.json --pause-before-stage official-tool|resume-auto-assisted --run-state /absolute/path/state.json|rc1-native-responses-three-stage --scenario /absolute/path/scenario.json|--setup-only|status|cleanup|--purge]
 
 run          Start an extracted RelayKit App with isolated state, verify its
              gateway/login gate, then start Codex Desktop for manual requests.
 run-auto     Run the same isolated proof with the PID/window-bound AX driver.
              It never waits for user input and fails closed on missing setup.
+run-auto-assisted
+             Run five bound stages in a persistent supervisor, then pause for
+             one manual official-tool submission. The state path is the
+             scenario path plus .assisted-state.json.
+resume-auto-assisted
+             Validate the paused run and atomically signal observation only.
 --setup-only Build/setup/verify isolated config and stop helper processes.
 status       Print the latest redacted proof evidence if present.
 cleanup      Stop isolated gateway/provider/Desktop processes.
@@ -195,6 +206,163 @@ file_hash() {
   else
     printf 'missing'
   fi
+}
+
+secure_owned_file() {
+  local path="$1"
+  python3 - "${path}" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    metadata = path.lstat()
+except OSError:
+    raise SystemExit(1)
+if not path.is_absolute() or not stat.S_ISREG(metadata.st_mode):
+    raise SystemExit(1)
+if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+    raise SystemExit(1)
+PY
+}
+
+create_assisted_token() {
+  local state_path="$1"
+  python3 - "${state_path}" <<'PY'
+import os
+import secrets
+import sys
+from pathlib import Path
+
+state = Path(sys.argv[1])
+if not state.is_absolute():
+    raise SystemExit("assisted state path must be absolute")
+token = Path(str(state) + ".token")
+sentinel = Path(str(state) + ".resume")
+for path in (state, token, sentinel):
+    if path.exists() or path.is_symlink():
+        raise SystemExit("assisted state already exists")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(token, flags, 0o600)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.write(descriptor, (secrets.token_hex(32) + "\n").encode())
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+sign_assisted_state() {
+  local unsigned_path="$1"
+  local state_path="$2"
+  secure_owned_file "${unsigned_path}"
+  secure_owned_file "${state_path}.token"
+  python3 - "${unsigned_path}" "${state_path}" <<'PY'
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+unsigned = Path(sys.argv[1])
+state = Path(sys.argv[2])
+token_path = Path(str(state) + ".token")
+if not state.is_absolute():
+    raise SystemExit("assisted state path must be absolute")
+if state.is_symlink():
+    raise SystemExit("assisted state must not be a symlink")
+if state.exists():
+    metadata = state.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise SystemExit("assisted state is not an owner-only regular file")
+try:
+    value = json.loads(unsigned.read_text())
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid assisted state: {error}")
+if not isinstance(value, dict):
+    raise SystemExit("assisted state must be an object")
+value.pop("state_mac", None)
+token = token_path.read_bytes()
+canonical = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+value["state_mac"] = hmac.new(token, canonical, hashlib.sha256).hexdigest()
+temporary = state.with_name(state.name + ".tmp-" + secrets.token_hex(8))
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(temporary, flags, 0o600)
+try:
+    data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    os.write(descriptor, data)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+os.replace(temporary, state)
+os.chmod(state, 0o600)
+unsigned.unlink()
+PY
+}
+
+verify_assisted_state_mac() {
+  local state_path="$1"
+  secure_owned_file "${state_path}"
+  secure_owned_file "${state_path}.token"
+  python3 - "${state_path}" <<'PY'
+import hashlib
+import hmac
+import json
+import sys
+from pathlib import Path
+
+state = Path(sys.argv[1])
+token = Path(str(state) + ".token").read_bytes()
+try:
+    value = json.loads(state.read_text())
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+provided = value.pop("state_mac", None)
+if not isinstance(provided, str):
+    raise SystemExit(1)
+canonical = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+expected = hmac.new(token, canonical, hashlib.sha256).hexdigest()
+if not hmac.compare_digest(provided, expected):
+    raise SystemExit(1)
+if value.get("token_sha256") != hashlib.sha256(token).hexdigest():
+    raise SystemExit(1)
+PY
+}
+
+snapshot_assisted_first_five() {
+  local source_path="$1"
+  local snapshot_path="$2"
+  secure_owned_file "${source_path}"
+  python3 - "${source_path}" "${snapshot_path}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+snapshot = Path(sys.argv[2])
+if not snapshot.is_absolute() or snapshot.exists() or snapshot.is_symlink():
+    raise SystemExit("assisted first-five snapshot already exists or is invalid")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(snapshot, flags, 0o600)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.write(descriptor, source.read_bytes())
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
 }
 
 harness_snapshot_hash() {
@@ -642,6 +810,41 @@ cleanup_automated_run() {
   exit "${exit_status}"
 }
 
+cleanup_assisted_once() {
+  if [[ "${ASSISTED_CLEANUP_DONE}" == "false" ]]; then
+    cleanup_processes
+    ASSISTED_CLEANUP_DONE=true
+  fi
+}
+
+cleanup_assisted_run() {
+  local exit_status=$?
+  trap - EXIT
+  cleanup_assisted_once
+  if [[ "${GLOBAL_GUARD_ARMED}" == "true" ]] && ! assert_global_state_unchanged; then
+    AUTO_ERROR_CODE="global_state_changed"
+    exit_status=1
+  fi
+  if [[ "${SOURCE_GUARD_ARMED}" == "true" ]] && ! assert_current_source_state_unchanged; then
+    AUTO_ERROR_CODE="source_state_changed"
+    exit_status=1
+  fi
+  if [[ -n "${ASSISTED_STATE_PATH}" && -f "${ASSISTED_STATE_PATH}" &&
+        "${ASSISTED_TERMINAL_WRITTEN}" == "false" ]]; then
+    mark_assisted_state "${ASSISTED_STATE_PATH}" "failed" \
+      "$(jq -r '.resume_used // false' "${ASSISTED_STATE_PATH}")" true "${AUTO_ERROR_CODE}" || true
+  fi
+  if [[ "${exit_status}" -ne 0 ]]; then
+    jq -n --arg error_code "${AUTO_ERROR_CODE}" '{status:"failed",error_code:$error_code}' >&2 || true
+  fi
+  exit "${exit_status}"
+}
+
+handle_assisted_signal() {
+  AUTO_ERROR_CODE="assisted_proof_interrupted"
+  exit 130
+}
+
 handle_automated_signal() {
   AUTO_ERROR_CODE="automated_proof_interrupted"
   exit 130
@@ -753,6 +956,237 @@ print(json.dumps({"version": 1, "stage_timeout_seconds": timeout, "stages": norm
 PY
 }
 
+validate_assisted_scenario() {
+  local scenario_path="$1"
+  validate_auto_scenario "${scenario_path}" >/dev/null || return 1
+  python3 - "${scenario_path}" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text())
+value["stage_timeout_seconds"] = value.get("stage_timeout_seconds", 300)
+stages = value["stages"]
+expected = [
+    ("official-plain", "plain", "official"),
+    ("official-markdown", "markdown", "official"),
+    ("provider-plain", "plain", "provider"),
+    ("provider-markdown", "markdown", "provider"),
+    ("provider-tool", "tool", "provider"),
+    ("official-tool", "tool", "official"),
+]
+if len(stages) != len(expected):
+    raise SystemExit("assisted scenario must contain exactly six stages")
+provider_models = set()
+markers = set()
+for index, (stage, (stage_id, expectation, route)) in enumerate(zip(stages, expected)):
+    if stage["id"] != stage_id or stage["evidence_role"] != stage_id or stage["expect"] != expectation:
+        raise SystemExit(f"assisted stage {index} does not match the ordered contract")
+    marker = stage["response_marker"]
+    if marker in markers:
+        raise SystemExit("assisted response markers must be unique")
+    markers.add(marker)
+    is_dynamic = stage["model_id"] == "@current-official" and stage["model_label"] == "@current-official"
+    if route == "official" and not is_dynamic:
+        raise SystemExit(f"assisted stage {index} must use the dynamic official model")
+    if route == "provider":
+        if is_dynamic:
+            raise SystemExit(f"assisted stage {index} must use the configured provider")
+        provider_models.add(stage["model_id"])
+if len(provider_models) != 1:
+    raise SystemExit("assisted provider stages must use one configured provider model")
+tool_stage = stages[-1]
+marker = tool_stage["response_marker"]
+if re.fullmatch(r"RELAYKIT_[A-Z0-9_]{16,127}", marker) is None:
+    raise SystemExit("assisted official-tool marker is not public-safe and fresh")
+expected_prompt = (
+    f"Use the shell tool to run exactly: printf '{marker}\\n'; pwd. "
+    "Then report only the exact tool output and working directory. Do not inspect any files."
+)
+try:
+    prompt = Path(tool_stage["query_file"]).read_text().strip()
+except (OSError, UnicodeDecodeError):
+    raise SystemExit("assisted official-tool query must contain UTF-8 text")
+if prompt != expected_prompt:
+    raise SystemExit("assisted official-tool query does not match the strict prompt")
+print(json.dumps(value, sort_keys=True))
+PY
+}
+
+assisted_official_tool_prompt() {
+  local marker="$1"
+  printf "Use the shell tool to run exactly: printf '%s\\\\n'; pwd. Then report only the exact tool output and working directory. Do not inspect any files.\n" "${marker}"
+}
+
+validate_assisted_state_against_bindings() {
+  local state_path="$1"
+  local current_path="$2"
+  verify_assisted_state_mac "${state_path}"
+  secure_owned_file "${current_path}"
+  python3 - "${state_path}" "${current_path}" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+current_path = Path(sys.argv[2])
+state = json.loads(state_path.read_text())
+current = json.loads(current_path.read_text())
+
+expected_ids = [
+    "official-plain",
+    "official-markdown",
+    "provider-plain",
+    "provider-markdown",
+    "provider-tool",
+]
+ledger = state.get("first_five_ledger")
+if not isinstance(ledger, list) or [item.get("id") for item in ledger] != expected_ids:
+    raise SystemExit("assisted first-five ledger is not exact")
+if [item.get("evidence_role") for item in ledger] != expected_ids:
+    raise SystemExit("assisted first-five evidence roles are not exact")
+threads = []
+for item in ledger:
+    binding = item.get("rollout_binding") or {}
+    if (item.get("state") != "evidence_verified" or item.get("submission_state") != "submitted" or
+            item.get("submission_count") != 1 or binding.get("proof_found") is not True or
+            binding.get("user_marker_count") != 1 or binding.get("assistant_marker_count") != 1 or
+            not isinstance(binding.get("thread_id"), str) or not binding["thread_id"]):
+        raise SystemExit("assisted first-five ledger is incomplete")
+    threads.append(binding["thread_id"])
+if len(set(threads)) != 5:
+    raise SystemExit("assisted first-five rollout threads are not unique")
+
+next_stage = state.get("next_stage") or {}
+if (next_stage.get("id") != "official-tool" or next_stage.get("evidence_role") != "official-tool" or
+        next_stage.get("expect") != "tool"):
+    raise SystemExit("assisted next stage is not official-tool")
+if (state.get("version") != 1 or state.get("status") != "awaiting_user_action" or
+        state.get("resume_used") is not False or state.get("cleanup_done") is not False or
+        state.get("submission_count") != 5):
+    raise SystemExit("assisted state is not resumable")
+
+stage_path = Path(state.get("stage_evidence_path", ""))
+try:
+    metadata = stage_path.lstat()
+except OSError:
+    raise SystemExit("assisted stage evidence is unavailable")
+if (not stage_path.is_absolute() or not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or
+        stat.S_IMODE(metadata.st_mode) != 0o600):
+    raise SystemExit("assisted stage evidence is not owner-only")
+stage_bytes = stage_path.read_bytes()
+if hashlib.sha256(stage_bytes).hexdigest() != state.get("stage_evidence_sha256"):
+    raise SystemExit("assisted stage evidence hash changed")
+if json.loads(stage_bytes) != ledger:
+    raise SystemExit("assisted stage evidence does not match the ledger")
+
+for field in (
+    "run_id",
+    "scenario_sha256",
+    "artifact_sha256",
+    "harness_sha256",
+    "source_snapshot_sha256",
+    "global_guard",
+    "stage_evidence_sha256",
+    "next_query_sha256",
+):
+    if state.get(field) != current.get(field):
+        raise SystemExit(f"assisted binding changed: {field}")
+for field in ("harness_snapshot_sha256", "ax_driver_sha256"):
+    if field in state or field in current:
+        if state.get(field) != current.get(field):
+            raise SystemExit(f"assisted binding changed: {field}")
+
+for process in ("supervisor", "desktop", "gateway"):
+    saved = state.get(process) or {}
+    observed = current.get(process) or {}
+    if observed.get("alive") is not True or saved.get("pid") != observed.get("pid") or saved.get("identity") != observed.get("identity"):
+        raise SystemExit(f"assisted process identity changed: {process}")
+if state["desktop"].get("window_id") != current["desktop"].get("window_id"):
+    raise SystemExit("assisted Desktop window changed")
+if (state["gateway"].get("port") != 19777 or current["gateway"].get("port") != 19777 or
+        state["gateway"].get("owns_port") is not True or
+        current["gateway"].get("owns_port") is not True):
+    raise SystemExit("assisted gateway no longer owns 19777")
+PY
+}
+
+signal_assisted_state() {
+  local state_path="$1"
+  local current_path="$2"
+  validate_assisted_state_against_bindings "${state_path}" "${current_path}"
+  python3 - "${state_path}" <<'PY'
+import hashlib
+import hmac
+import json
+import os
+import sys
+from pathlib import Path
+
+state = Path(sys.argv[1])
+token = Path(str(state) + ".token")
+sentinel = Path(str(state) + ".resume")
+if sentinel.exists() or sentinel.is_symlink():
+    raise SystemExit("assisted resume was already used")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(sentinel, flags, 0o600)
+try:
+    os.fchmod(descriptor, 0o600)
+    run_id = json.loads(state.read_text()).get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise SystemExit("assisted run id is invalid")
+    signal = hmac.new(token.read_bytes(), ("resume:" + run_id).encode(), hashlib.sha256).hexdigest()
+    os.write(descriptor, (signal + "\n").encode())
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+validate_assisted_sentinel() {
+  local state_path="$1"
+  secure_owned_file "${state_path}.token"
+  secure_owned_file "${state_path}.resume"
+  python3 - "${state_path}" <<'PY'
+import hashlib
+import hmac
+import json
+import sys
+from pathlib import Path
+
+state = Path(sys.argv[1])
+token = Path(str(state) + ".token").read_bytes()
+sentinel = Path(str(state) + ".resume").read_text()
+run_id = json.loads(state.read_text()).get("run_id")
+if not isinstance(run_id, str) or not run_id:
+    raise SystemExit(1)
+expected = hmac.new(token, ("resume:" + run_id).encode(), hashlib.sha256).hexdigest() + "\n"
+if not hmac.compare_digest(sentinel, expected):
+    raise SystemExit(1)
+PY
+}
+
+print_assisted_pause_descriptor() {
+  local state_path="$1"
+  verify_assisted_state_mac "${state_path}"
+  jq -ce '
+    select(.status == "awaiting_user_action") |
+    {
+      status,
+      desktop_pid:.desktop.pid,
+      desktop_window_id:.desktop.window_id,
+      gateway_endpoint:("http://127.0.0.1:" + (.gateway.port | tostring) + "/v1"),
+      prompt:.pause_prompt
+    }
+  ' "${state_path}"
+}
+
 validate_postbinding_query_content() {
   local query_path="$1"
   local marker="$2"
@@ -831,6 +1265,21 @@ prepare_automated_provider_inputs() {
   }
 }
 
+prepare_assisted_provider_inputs() {
+  local scenario_path="$1"
+  local scenario_provider_model default_config
+  scenario_provider_model="$(jq -er '[.stages[] | select(.id | startswith("provider-")) | .model_id] | unique | if length == 1 then .[0] else empty end' "${scenario_path}")" || return 1
+  if [[ -z "${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID:-}" ]]; then
+    RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID="${scenario_provider_model}"
+  fi
+  [[ "${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID}" == "${scenario_provider_model}" ]] || return 1
+  default_config="${PROOF_ROOT}/real-provider-input.json"
+  if [[ -z "${RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG:-}" && -f "${default_config}" ]]; then
+    RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG="${default_config}"
+  fi
+  [[ -n "${RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG:-}" ]] || return 1
+}
+
 automated_profile_for_scenario() {
   local scenario_path="$1"
   local provider_model="$2"
@@ -853,6 +1302,15 @@ automated_profile_for_scenario() {
          and ($stages[1].evidence_role == "rc1-markdown" and $stages[1].expect == "markdown")
          and ($stages[2].evidence_role == "rc1-tool" and $stages[2].expect == "tool")
       then "rc1_native_responses_three_stage"
+      elif ($stages | length) == 6
+         and ([ $stages[].id ] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool","official-tool"])
+         and ([ $stages[].evidence_role ] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool","official-tool"])
+         and ([ $stages[].expect ] == ["plain","markdown","plain","markdown","tool","tool"])
+         and ($provider_model | length) > 0
+         and all($stages[2:5][]; .model_id == $provider_model)
+         and ($stages[0].model_id == $stages[1].model_id and $stages[1].model_id == $stages[5].model_id)
+         and ($stages[0].model_id != $provider_model)
+      then "assisted_six_stage"
       elif ($stages | length) == 1
          and ($provider_model | length) > 0
          and $stages[0].expect == "tool"
@@ -1004,6 +1462,54 @@ custom_tool_scenario_complete() {
     and $shot.visual_checks.tool_marker_visible == true
     and $shot.visual_checks.tool_execution_visible == true
     and $shot.visual_checks.raw_protocol_visible == false
+  ' "${screenshot_evidence}" >/dev/null
+}
+
+assisted_scenario_complete() {
+  local state_path="$1"
+  local stages_path="$2"
+  local usage_path="$3"
+  local tool_evidence="$4"
+  local screenshot_evidence="$5"
+  local usage_baseline model_id since_epoch
+  verify_assisted_state_mac "${state_path}" || return 1
+  secure_owned_file "${stages_path}" || return 1
+  secure_owned_file "${usage_path}" || return 1
+  secure_owned_file "${tool_evidence}" || return 1
+  secure_owned_file "${screenshot_evidence}" || return 1
+  automated_stages_complete "${stages_path}" 6 || return 1
+  jq -e --slurpfile state "${state_path}" '
+    $state[0] as $state |
+    [.[].id] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool","official-tool"] and
+    [.[].evidence_role] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool","official-tool"] and
+    $state.status == "observing" and $state.resume_used == true and $state.cleanup_done == false and
+    $state.submission_count == 6 and
+    .[:5] == $state.first_five_ledger and
+    .[5].expect == "tool" and .[5].submission_count == 1 and .[5].run_id == $state.run_id and
+    .[5].model_id == $state.next_stage.model_id and .[5].usage_baseline == $state.next_stage.usage_baseline and
+    .[5].rollout_binding.candidate_count == 1 and .[5].rollout_binding.model == $state.next_stage.model_id and
+    (.[5].rollout_binding.thread_id as $final_thread |
+      ([.[0:5][].rollout_binding.thread_id] | index($final_thread)) == null)
+  ' "${stages_path}" >/dev/null || return 1
+  usage_baseline="$(jq -er '.next_stage.usage_baseline' "${state_path}")" || return 1
+  model_id="$(jq -er '.next_stage.model_id' "${state_path}")" || return 1
+  since_epoch="$(jq -er '.next_stage.since_epoch' "${state_path}")" || return 1
+  fresh_stage_usage "${usage_path}" "${usage_baseline}" "${model_id}" >/dev/null || return 1
+  jq -e --argjson since_epoch "${since_epoch}" '
+    .proof_found == true and .function_call_found == true and
+    .function_call_output_found == true and .process_exited_zero == true and
+    .matched_provider_tool_count == 1 and .since_epoch == $since_epoch and
+    .exact_shell_command_found == true and .pwd_output_found == true and
+    .xml_leak_found == false and .raw_function_calls_found == false
+  ' "${tool_evidence}" >/dev/null || return 1
+  jq -e '
+    [.[] | select(.role == "official-tool")] as $shots |
+    ($shots | length) == 1 and
+    (($shots | last) as $shot |
+      $shot.captured == true and $shot.target_identity_verified == true and
+      $shot.visual_checks.tool_marker_visible == true and
+      $shot.visual_checks.tool_execution_visible == true and
+      $shot.visual_checks.raw_protocol_visible == false)
   ' "${screenshot_evidence}" >/dev/null
 }
 
@@ -1277,6 +1783,224 @@ scenario_argument() {
     return 2
   }
   printf '%s\n' "$3"
+}
+
+assisted_scenario_argument() {
+  [[ "${2:-}" == "--scenario" && -n "${3:-}" &&
+     "${4:-}" == "--pause-before-stage" && "${5:-}" == "official-tool" && -z "${6:-}" ]] || {
+    echo "run-auto-assisted requires exactly --scenario /absolute/path/scenario.json --pause-before-stage official-tool" >&2
+    return 2
+  }
+  printf '%s\n' "$3"
+}
+
+assisted_state_argument() {
+  [[ "${2:-}" == "--run-state" && -n "${3:-}" && -z "${4:-}" ]] || {
+    echo "resume-auto-assisted requires exactly --run-state /absolute/path/state.json" >&2
+    return 2
+  }
+  printf '%s\n' "$3"
+}
+
+process_identity() {
+  local pid="$1"
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] && kill -0 "${pid}" 2>/dev/null || return 1
+  /bin/ps -p "${pid}" -o lstart= -o command= | /usr/bin/shasum -a 256 | awk '{print $1}'
+}
+
+current_global_guard_digest() {
+  printf '%s\n' \
+    "$(file_signature "${GLOBAL_CODEX_CONFIG}")" \
+    "$(file_signature "${GLOBAL_CODEX_AUTH}")" \
+    "$(file_hash "${GLOBAL_CODEX_CONFIG}")" \
+    "$(file_hash "${GLOBAL_CODEX_AUTH}")" \
+    "$(notify_line_hash "${GLOBAL_CODEX_CONFIG}")" |
+    /usr/bin/shasum -a 256 | awk '{print $1}'
+}
+
+gateway_pid_for_19777() {
+  local pids pid command
+  pids="$(/usr/sbin/lsof -nP -iTCP:19777 -sTCP:LISTEN -t 2>/dev/null | LC_ALL=C sort -u)"
+  [[ "$(wc -w <<<"${pids}" | tr -d ' ')" == "1" ]] || return 1
+  pid="${pids}"
+  command="$(/bin/ps -p "${pid}" -o command= 2>/dev/null || true)"
+  [[ "${command}" == "${BUNDLED_RELAY}"* ]] || return 1
+  printf '%s\n' "${pid}"
+}
+
+collect_assisted_current_bindings() {
+  local state_path="$1"
+  local output_path="$2"
+  verify_assisted_state_mac "${state_path}"
+  local scenario_path artifact_path supervisor_pid desktop_pid gateway_pid
+  local supervisor_identity desktop_identity gateway_identity current_window window_id
+  scenario_path="$(jq -er '.scenario_path' "${state_path}")"
+  artifact_path="$(jq -er '.artifact_path' "${state_path}")"
+  supervisor_pid="$(jq -er '.supervisor.pid | select(type == "number" and . > 0)' "${state_path}")"
+  desktop_pid="$(jq -er '.desktop.pid | select(type == "number" and . > 0)' "${state_path}")"
+  gateway_pid="$(gateway_pid_for_19777)" || return 1
+  supervisor_identity="$(process_identity "${supervisor_pid}")" || return 1
+  desktop_identity="$(process_identity "${desktop_pid}")" || return 1
+  gateway_identity="$(process_identity "${gateway_pid}")" || return 1
+  current_window="$(write_current_desktop_window_identity "${desktop_pid}")" || return 1
+  window_id="$(jq -er '.window_id | select(type == "number" and . > 0)' <<<"${current_window}")" || return 1
+  jq -n \
+    --arg run_id "$(jq -er '.run_id | select(type == "string" and length > 0)' "${state_path}")" \
+    --arg scenario_sha256 "$(file_hash "${scenario_path}")" \
+    --arg artifact_sha256 "$(file_hash "${artifact_path}")" \
+    --arg harness_sha256 "$(file_hash "${ROOT}/scripts/codex-desktop-manual-proof.sh")" \
+    --arg harness_snapshot_sha256 "$(harness_snapshot_hash "${ROOT}")" \
+    --arg ax_driver_sha256 "$(file_hash "${AX_DRIVER_SOURCE}")" \
+    --arg source_snapshot_sha256 "$(source_snapshot_hash "${ROOT}")" \
+    --arg global_guard "$(current_global_guard_digest)" \
+    --arg stage_evidence_sha256 "$(file_hash "$(jq -er '.stage_evidence_path' "${state_path}")")" \
+    --arg next_query_sha256 "$(file_hash "$(jq -er '.next_stage.query_file' "${state_path}")")" \
+    --argjson supervisor_pid "${supervisor_pid}" --arg supervisor_identity "${supervisor_identity}" \
+    --argjson desktop_pid "${desktop_pid}" --arg desktop_identity "${desktop_identity}" \
+    --argjson window_id "${window_id}" --argjson gateway_pid "${gateway_pid}" \
+    --arg gateway_identity "${gateway_identity}" \
+    '{
+      run_id:$run_id,
+      scenario_sha256:$scenario_sha256,
+      artifact_sha256:$artifact_sha256,
+      harness_sha256:$harness_sha256,
+      harness_snapshot_sha256:$harness_snapshot_sha256,
+      ax_driver_sha256:$ax_driver_sha256,
+      source_snapshot_sha256:$source_snapshot_sha256,
+      global_guard:$global_guard,
+      stage_evidence_sha256:$stage_evidence_sha256,
+      next_query_sha256:$next_query_sha256,
+      supervisor:{pid:$supervisor_pid,identity:$supervisor_identity,alive:true},
+      desktop:{pid:$desktop_pid,identity:$desktop_identity,window_id:$window_id,alive:true},
+      gateway:{pid:$gateway_pid,identity:$gateway_identity,port:19777,alive:true,owns_port:true}
+    }' >"${output_path}"
+  chmod 600 "${output_path}"
+}
+
+write_assisted_starting_state() {
+  local state_path="$1"
+  local scenario_path="$2"
+  local run_id="$3"
+  local unsigned_path="${state_path}.unsigned.$$"
+  jq -n \
+    --arg run_id "${run_id}" --arg scenario_path "${scenario_path}" \
+    --arg scenario_sha256 "$(file_hash "${scenario_path}")" \
+    --arg token_sha256 "$(file_hash "${state_path}.token")" \
+    '{version:1,status:"starting",run_id:$run_id,scenario_path:$scenario_path,scenario_sha256:$scenario_sha256,token_sha256:$token_sha256,submission_count:0,resume_used:false,cleanup_done:false}' \
+    >"${unsigned_path}"
+  chmod 600 "${unsigned_path}"
+  sign_assisted_state "${unsigned_path}" "${state_path}"
+}
+
+bind_assisted_supervisor_state() {
+  local state_path="$1"
+  local supervisor_pid="$2"
+  local supervisor_identity="$3"
+  local unsigned_path="${state_path}.unsigned.$$"
+  jq --argjson pid "${supervisor_pid}" --arg identity "${supervisor_identity}" \
+    'del(.state_mac) | .supervisor={pid:$pid,identity:$identity}' "${state_path}" >"${unsigned_path}"
+  chmod 600 "${unsigned_path}"
+  sign_assisted_state "${unsigned_path}" "${state_path}"
+}
+
+mark_assisted_state() {
+  local state_path="$1"
+  local status="$2"
+  local resume_used="$3"
+  local cleanup_done="$4"
+  local error_code="${5:-}"
+  local unsigned_path="${state_path}.unsigned.$$"
+  jq --arg status "${status}" --argjson resume_used "${resume_used}" \
+    --argjson cleanup_done "${cleanup_done}" --arg error_code "${error_code}" \
+    'del(.state_mac) | .status=$status | .resume_used=$resume_used | .cleanup_done=$cleanup_done |
+      .submission_count=(if $status == "observing" then 6 else .submission_count end) |
+      .error_code=(if $error_code == "" then null else $error_code end)' \
+    "${state_path}" >"${unsigned_path}"
+  chmod 600 "${unsigned_path}"
+  sign_assisted_state "${unsigned_path}" "${state_path}"
+}
+
+launch_auto_assisted() {
+  local scenario_path="$1"
+  validate_assisted_scenario "${scenario_path}" >/dev/null
+  local state_path="${scenario_path}.assisted-state.json"
+  local run_id="assisted-$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+  local supervisor_pid supervisor_identity status deadline
+  create_assisted_token "${state_path}"
+  write_assisted_starting_state "${state_path}" "${scenario_path}" "${run_id}"
+  umask 077
+  /usr/bin/nohup "${ROOT}/scripts/codex-desktop-manual-proof.sh" --assisted-supervisor --run-state "${state_path}" \
+    </dev/null >"${state_path}.supervisor.out" 2>"${state_path}.supervisor.err" &
+  supervisor_pid=$!
+  supervisor_identity=""
+  for _ in {1..100}; do
+    supervisor_identity="$(process_identity "${supervisor_pid}" 2>/dev/null || true)"
+    [[ -n "${supervisor_identity}" ]] && break
+    sleep 0.1
+  done
+  [[ -n "${supervisor_identity}" ]] || return 1
+  bind_assisted_supervisor_state "${state_path}" "${supervisor_pid}" "${supervisor_identity}"
+  deadline=$((SECONDS + 900))
+  while (( SECONDS < deadline )); do
+    verify_assisted_state_mac "${state_path}" || return 1
+    status="$(jq -r '.status // "invalid"' "${state_path}")"
+    case "${status}" in
+      awaiting_user_action)
+        print_assisted_pause_descriptor "${state_path}"
+        return 0
+        ;;
+      failed|complete)
+        jq -r '.error_code // "assisted_supervisor_failed"' "${state_path}" >&2
+        return 1
+        ;;
+    esac
+    [[ "$(process_identity "${supervisor_pid}" 2>/dev/null || true)" == "${supervisor_identity}" ]] || return 1
+    sleep 1
+  done
+  kill "${supervisor_pid}" >/dev/null 2>&1 || true
+  return 1
+}
+
+resume_auto_assisted() {
+  local state_path="$1"
+  local current_path="${state_path}.current.$$"
+  collect_assisted_current_bindings "${state_path}" "${current_path}" || {
+    rm -f "${current_path}"
+    return 1
+  }
+  signal_assisted_state "${state_path}" "${current_path}" || {
+    rm -f "${current_path}"
+    return 1
+  }
+  rm -f "${current_path}"
+}
+
+run_assisted_supervisor() {
+  local state_path="$1"
+  local self_identity saved_pid saved_identity scenario_path
+  verify_assisted_state_mac "${state_path}"
+  self_identity="$(process_identity "$$")" || return 1
+  for _ in {1..100}; do
+    verify_assisted_state_mac "${state_path}" || return 1
+    saved_pid="$(jq -r '.supervisor.pid // 0' "${state_path}")"
+    saved_identity="$(jq -r '.supervisor.identity // ""' "${state_path}")"
+    if [[ "${saved_pid}" == "$$" && "${saved_identity}" == "${self_identity}" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "${saved_pid}" == "$$" && "${saved_identity}" == "${self_identity}" ]] || return 1
+  scenario_path="$(jq -er '.scenario_path | select(type == "string" and startswith("/"))' "${state_path}")" || return 1
+  jq -e '
+    .version == 1 and .status == "starting" and .submission_count == 0 and
+    .resume_used == false and .cleanup_done == false
+  ' "${state_path}" >/dev/null || return 1
+  [[ "$(file_hash "${scenario_path}")" == "$(jq -er '.scenario_sha256' "${state_path}")" ]] || return 1
+  ASSISTED_MODE=true
+  ASSISTED_STATE_PATH="${state_path}"
+  trap cleanup_assisted_run EXIT
+  trap handle_assisted_signal INT TERM HUP
+  run_automated_proof "${scenario_path}"
 }
 
 start_provider() {
@@ -3517,7 +4241,11 @@ write_automated_stage_state() {
   local error_code="${8:-}"
   local binding_path="${RUN_DIR}/automated-rollout-${evidence_role}.json"
   local binding_json='null'
+  local assisted_run_id=""
   [[ -s "${binding_path}" ]] && binding_json="$(cat "${binding_path}")"
+  if [[ "${ASSISTED_MODE}" == "true" && -n "${ASSISTED_STATE_PATH}" ]]; then
+    assisted_run_id="$(jq -er '.run_id' "${ASSISTED_STATE_PATH}")"
+  fi
   local tmp="${AUTOMATED_STAGE_EVIDENCE}.tmp"
   jq \
     --arg id "${stage_id}" \
@@ -3529,6 +4257,7 @@ write_automated_stage_state() {
     --argjson usage_baseline "${usage_baseline}" \
     --arg error_code "${error_code}" \
     --argjson rollout_binding "${binding_json}" \
+    --arg run_id "${assisted_run_id}" \
     --arg updated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     'map(select(.id != $id)) + [{
       id: $id,
@@ -3542,8 +4271,99 @@ write_automated_stage_state() {
       error_code: (if $error_code == "" then null else $error_code end),
       submission_count: (if $submission_state == "submitted" then 1 else 0 end),
       updated_at: $updated_at
-    }]' "${AUTOMATED_STAGE_EVIDENCE}" >"${tmp}"
+    } | if $run_id == "" then . else . + {run_id:$run_id} end]' "${AUTOMATED_STAGE_EVIDENCE}" >"${tmp}"
   mv "${tmp}" "${AUTOMATED_STAGE_EVIDENCE}"
+  chmod 600 "${AUTOMATED_STAGE_EVIDENCE}"
+}
+
+write_assisted_pause_state() {
+  local desktop_pid="$1"
+  local model_id="$2"
+  local query_file="$3"
+  local response_marker="$4"
+  local usage_baseline="$5"
+  local since_epoch="$6"
+  local gateway_pid desktop_identity gateway_identity supervisor_pid supervisor_identity window_id
+  local unsigned_path="${ASSISTED_STATE_PATH}.unsigned.$$"
+  local pause_prompt first_five_snapshot="${ASSISTED_STATE_PATH}.first-five.json"
+  automated_stages_complete "${AUTOMATED_STAGE_EVIDENCE}" 5 || return 1
+  jq -e '
+    [.[].id] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool"] and
+    all(.[]; .submission_count == 1)
+  ' \
+    "${AUTOMATED_STAGE_EVIDENCE}" >/dev/null || return 1
+  assert_proof_state_unchanged
+  gateway_pid="$(gateway_pid_for_19777)" || return 1
+  desktop_identity="$(process_identity "${desktop_pid}")" || return 1
+  gateway_identity="$(process_identity "${gateway_pid}")" || return 1
+  supervisor_pid="$(jq -er '.supervisor.pid | select(type == "number" and . > 0)' "${ASSISTED_STATE_PATH}")" || return 1
+  supervisor_identity="$(process_identity "${supervisor_pid}")" || return 1
+  [[ "${supervisor_identity}" == "$(jq -er '.supervisor.identity' "${ASSISTED_STATE_PATH}")" ]] || return 1
+  window_id="$(jq -er '.window_id | select(type == "number" and . > 0)' "${DESKTOP_WINDOW_IDENTITY}")" || return 1
+  pause_prompt="$(assisted_official_tool_prompt "${response_marker}")"
+  snapshot_assisted_first_five "${AUTOMATED_STAGE_EVIDENCE}" "${first_five_snapshot}"
+  jq -n \
+    --arg run_id "$(jq -er '.run_id' "${ASSISTED_STATE_PATH}")" \
+    --arg scenario_path "${SCENARIO_PATH}" --arg scenario_sha256 "${SCENARIO_HASH_BEFORE}" \
+    --arg artifact_path "${ZIP_PATH}" --arg artifact_sha256 "${APP_ZIP_SHA256}" \
+    --arg harness_sha256 "${HARNESS_HASH_BEFORE}" --arg harness_snapshot_sha256 "${HARNESS_SNAPSHOT_HASH_BEFORE}" \
+    --arg ax_driver_sha256 "${AX_DRIVER_HASH_BEFORE}" --arg source_snapshot_sha256 "${SOURCE_SNAPSHOT_HASH_BEFORE}" \
+    --arg global_guard "$(current_global_guard_digest)" \
+    --arg stage_evidence_path "${first_five_snapshot}" \
+    --arg stage_evidence_sha256 "$(file_hash "${first_five_snapshot}")" \
+    --arg token_sha256 "$(file_hash "${ASSISTED_STATE_PATH}.token")" \
+    --argjson supervisor_pid "${supervisor_pid}" --arg supervisor_identity "${supervisor_identity}" \
+    --argjson desktop_pid "${desktop_pid}" --arg desktop_identity "${desktop_identity}" --argjson window_id "${window_id}" \
+    --argjson gateway_pid "${gateway_pid}" --arg gateway_identity "${gateway_identity}" \
+    --arg model_id "${model_id}" --arg query_file "${query_file}" --arg next_query_sha256 "$(file_hash "${query_file}")" \
+    --arg response_marker "${response_marker}" --arg pause_prompt "${pause_prompt}" \
+    --argjson usage_baseline "${usage_baseline}" --argjson since_epoch "${since_epoch}" \
+    --slurpfile ledger "${first_five_snapshot}" \
+    '{
+      version:1,status:"awaiting_user_action",run_id:$run_id,
+      scenario_path:$scenario_path,scenario_sha256:$scenario_sha256,
+      artifact_path:$artifact_path,artifact_sha256:$artifact_sha256,
+      harness_sha256:$harness_sha256,harness_snapshot_sha256:$harness_snapshot_sha256,
+      ax_driver_sha256:$ax_driver_sha256,source_snapshot_sha256:$source_snapshot_sha256,
+      global_guard:$global_guard,stage_evidence_path:$stage_evidence_path,
+      stage_evidence_sha256:$stage_evidence_sha256,next_query_sha256:$next_query_sha256,
+      token_sha256:$token_sha256,
+      supervisor:{pid:$supervisor_pid,identity:$supervisor_identity},
+      desktop:{pid:$desktop_pid,identity:$desktop_identity,window_id:$window_id},
+      gateway:{pid:$gateway_pid,identity:$gateway_identity,port:19777,owns_port:true},
+      first_five_ledger:$ledger[0],
+      next_stage:{id:"official-tool",evidence_role:"official-tool",expect:"tool",model_id:$model_id,query_file:$query_file,response_marker:$response_marker,usage_baseline:$usage_baseline,since_epoch:$since_epoch},
+      pause_prompt:$pause_prompt,submission_count:5,resume_used:false,cleanup_done:false,error_code:null
+    }' >"${unsigned_path}"
+  chmod 600 "${unsigned_path}"
+  sign_assisted_state "${unsigned_path}" "${ASSISTED_STATE_PATH}"
+}
+
+wait_for_assisted_resume() {
+  local current_path="${ASSISTED_STATE_PATH}.current.$$"
+  while true; do
+    collect_assisted_current_bindings "${ASSISTED_STATE_PATH}" "${current_path}" || {
+      rm -f "${current_path}"
+      AUTO_ERROR_CODE="assisted_binding_changed"
+      return 1
+    }
+    validate_assisted_state_against_bindings "${ASSISTED_STATE_PATH}" "${current_path}" || {
+      rm -f "${current_path}"
+      AUTO_ERROR_CODE="assisted_binding_changed"
+      return 1
+    }
+    rm -f "${current_path}"
+    if [[ -e "${ASSISTED_STATE_PATH}.resume" || -L "${ASSISTED_STATE_PATH}.resume" ]]; then
+      validate_assisted_sentinel "${ASSISTED_STATE_PATH}" || {
+        AUTO_ERROR_CODE="assisted_resume_sentinel_invalid"
+        return 1
+      }
+      mark_assisted_state "${ASSISTED_STATE_PATH}" "observing" true false
+      HUMAN_INTERVENTION_COUNT=1
+      return 0
+    fi
+    sleep 1
+  done
 }
 
 fresh_stage_error() {
@@ -3976,7 +4796,11 @@ run_automated_proof() {
     AUTO_ERROR_CODE="input_mode_invalid"
     return 1
   }
-  validate_auto_scenario "${scenario_path}" >"${AUTOMATED_SCENARIO_NORMALIZED}" || {
+  if [[ "${ASSISTED_MODE}" == "true" ]]; then
+    validate_assisted_scenario "${scenario_path}" >"${AUTOMATED_SCENARIO_NORMALIZED}"
+  else
+    validate_auto_scenario "${scenario_path}" >"${AUTOMATED_SCENARIO_NORMALIZED}"
+  fi || {
     AUTO_ERROR_CODE="scenario_invalid"
     return 1
   }
@@ -3986,7 +4810,11 @@ run_automated_proof() {
     AUTO_ERROR_CODE="scenario_staging_failed"
     return 1
   }
-  prepare_automated_provider_inputs "${AUTOMATED_SCENARIO_NORMALIZED}" || {
+  if [[ "${ASSISTED_MODE}" == "true" ]]; then
+    prepare_assisted_provider_inputs "${AUTOMATED_SCENARIO_NORMALIZED}"
+  else
+    prepare_automated_provider_inputs "${AUTOMATED_SCENARIO_NORMALIZED}"
+  fi || {
     AUTO_ERROR_CODE="provider_input_missing_or_invalid"
     return 1
   }
@@ -4030,6 +4858,9 @@ run_automated_proof() {
     AUTO_ERROR_CODE="scenario_profile_invalid"
     return 1
   }
+  if [[ "${AUTOMATED_PROFILE}" == "assisted_six_stage" && "${ASSISTED_MODE}" != "true" ]]; then
+    AUTOMATED_PROFILE="custom_scenario"
+  fi
   case "${AUTOMATED_PROFILE}" in
     standard_four_stage_dogfood) ;;
     single_tool_scenario)
@@ -4041,6 +4872,12 @@ run_automated_proof() {
     rc1_native_responses_three_stage)
       [[ "${RELAYKIT_RC1_ATTACH_APP_GATEWAY:-0}" == "1" && "${expected_stage_count}" == "3" ]] || {
         AUTO_ERROR_CODE="rc1_attach_contract_invalid"
+        return 1
+      }
+      ;;
+    assisted_six_stage)
+      [[ "${ASSISTED_MODE}" == "true" && "${expected_stage_count}" == "6" ]] || {
+        AUTO_ERROR_CODE="assisted_contract_invalid"
         return 1
       }
       ;;
@@ -4071,6 +4908,7 @@ run_automated_proof() {
     AUTO_ERROR_CODE="stage_evidence_init_failed"
     return 1
   }
+  chmod 600 "${AUTOMATED_STAGE_EVIDENCE}"
 
   while IFS= read -r stage; do
     index=$((index + 1))
@@ -4087,52 +4925,73 @@ run_automated_proof() {
     AUTO_ERROR_CODE="query_content_invalid"
     validate_postbinding_query_content "${query_source}" "${response_marker}" "${expectation}" || return 1
     AUTO_ERROR_CODE="query_staging_failed"
-    query_sha256="$(copy_bound_query "${query_source}" "${query_copy}")" || return 1
+    if [[ "${ASSISTED_MODE}" == "true" && "${index}" -eq 6 ]]; then
+      query_sha256="$(file_hash "${query_source}")"
+    else
+      query_sha256="$(copy_bound_query "${query_source}" "${query_copy}")" || return 1
+    fi
     [[ "${query_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 1
     AUTO_ERROR_CODE="usage_summary_failed"
     summarize_usage
     usage_baseline="$(jq -er 'length' "${OUT}/usage-events.json")" || { AUTO_ERROR_CODE="usage_baseline_failed"; return 1; }
     since_epoch="$(date +%s)"
     submission_state="not_submitted"
-    AUTO_ERROR_CODE="stage_evidence_write_failed"
-    write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "prepared" "${submission_state}" "${usage_baseline}"
+    if [[ "${ASSISTED_MODE}" == "true" && "${index}" -eq 6 ]]; then
+      AUTO_ERROR_CODE="assisted_pause_state_failed"
+      write_assisted_pause_state "${desktop_pid}" "${model_id}" "${query_source}" \
+        "${response_marker}" "${usage_baseline}" "${since_epoch}"
+      AUTO_ERROR_CODE="assisted_resume_invalid"
+      wait_for_assisted_resume
+      [[ "$(file_hash "${query_source}")" == "${query_sha256}" ]] || {
+        AUTO_ERROR_CODE="assisted_query_changed"
+        return 1
+      }
+      verify_desktop_window_identity || {
+        AUTO_ERROR_CODE="assisted_desktop_window_changed"
+        return 1
+      }
+      submission_state="submitted"
+    else
+      AUTO_ERROR_CODE="stage_evidence_write_failed"
+      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "prepared" "${submission_state}" "${usage_baseline}"
 
-    AUTO_ERROR_CODE="prepare_desktop_activation_failed"
-    activate_isolated_desktop
-    verify_desktop_window_identity
-    if ! "${AX_DRIVER_BINARY}" prepare --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --workspace "${ROOT}" >"${RUN_DIR}/ax-prepare-${index}.json"; then
-      driver_code="$(driver_failure_code "${RUN_DIR}/ax-prepare-${index}.json" "unknown")"
-      rm -f "${query_copy}"
-      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "prepare_${driver_code}" || true
-      AUTO_ERROR_CODE="prepare_${driver_code}"
-      return 1
-    fi
-    if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and (.action_count >= 1 and .action_count <= 37)' "${RUN_DIR}/ax-prepare-${index}.json" >/dev/null; then
-      rm -f "${query_copy}"
-      AUTO_ERROR_CODE="prepare_report_invalid"
-      return 1
-    fi
-    AUTO_ERROR_CODE="submit_desktop_activation_failed"
-    activate_isolated_desktop
-    verify_desktop_window_identity
-    if ! "${AX_DRIVER_BINARY}" submit --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --model-label "${model_label}" --catalog-labels-file "${catalog_labels}" --query-file "${query_copy}" >"${RUN_DIR}/ax-submit-${index}.json"; then
-      driver_code="$(driver_failure_code "${RUN_DIR}/ax-submit-${index}.json" "unknown")"
-      if [[ "${driver_code}" == "send_result_ambiguous" ]]; then
-        submission_state="unknown_after_submit_attempt"
+      AUTO_ERROR_CODE="prepare_desktop_activation_failed"
+      activate_isolated_desktop
+      verify_desktop_window_identity
+      if ! "${AX_DRIVER_BINARY}" prepare --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --workspace "${ROOT}" >"${RUN_DIR}/ax-prepare-${index}.json"; then
+        driver_code="$(driver_failure_code "${RUN_DIR}/ax-prepare-${index}.json" "unknown")"
+        rm -f "${query_copy}"
+        write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "prepare_${driver_code}" || true
+        AUTO_ERROR_CODE="prepare_${driver_code}"
+        return 1
       fi
+      if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and (.action_count >= 1 and .action_count <= 37)' "${RUN_DIR}/ax-prepare-${index}.json" >/dev/null; then
+        rm -f "${query_copy}"
+        AUTO_ERROR_CODE="prepare_report_invalid"
+        return 1
+      fi
+      AUTO_ERROR_CODE="submit_desktop_activation_failed"
+      activate_isolated_desktop
+      verify_desktop_window_identity
+      if ! "${AX_DRIVER_BINARY}" submit --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --model-label "${model_label}" --catalog-labels-file "${catalog_labels}" --query-file "${query_copy}" >"${RUN_DIR}/ax-submit-${index}.json"; then
+        driver_code="$(driver_failure_code "${RUN_DIR}/ax-submit-${index}.json" "unknown")"
+        if [[ "${driver_code}" == "send_result_ambiguous" ]]; then
+          submission_state="unknown_after_submit_attempt"
+        fi
+        rm -f "${query_copy}"
+        write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "submit_${driver_code}" || true
+        AUTO_ERROR_CODE="submit_${driver_code}"
+        return 1
+      fi
+      if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and .send_count == 1' "${RUN_DIR}/ax-submit-${index}.json" >/dev/null; then
+        rm -f "${query_copy}"
+        submission_state="unknown_after_submit_attempt"
+        AUTO_ERROR_CODE="submit_report_invalid"
+        return 1
+      fi
+      submission_state="submitted"
       rm -f "${query_copy}"
-      write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "submit_${driver_code}" || true
-      AUTO_ERROR_CODE="submit_${driver_code}"
-      return 1
     fi
-    if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and .send_count == 1' "${RUN_DIR}/ax-submit-${index}.json" >/dev/null; then
-      rm -f "${query_copy}"
-      submission_state="unknown_after_submit_attempt"
-      AUTO_ERROR_CODE="submit_report_invalid"
-      return 1
-    fi
-    submission_state="submitted"
-    rm -f "${query_copy}"
     AUTO_ERROR_CODE="stage_evidence_write_failed"
     write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "submitted" "${submission_state}" "${usage_baseline}"
     bind_status=0
@@ -4206,6 +5065,12 @@ run_automated_proof() {
       AUTO_ERROR_CODE="rc1_native_responses_evidence_incomplete"
       write_rc1_native_responses_evidence || return 1
       ;;
+    assisted_six_stage)
+      AUTO_ERROR_CODE="assisted_official_tool_evidence_incomplete"
+      summarize_usage || return 1
+      assisted_scenario_complete "${ASSISTED_STATE_PATH}" "${AUTOMATED_STAGE_EVIDENCE}" \
+        "${OUT}/usage-events.json" "${DESKTOP_TOOL_EVIDENCE}" "${SCREENSHOT_EVIDENCE}" || return 1
+      ;;
     custom_scenario) ;;
     *)
       AUTO_ERROR_CODE="scenario_profile_unknown"
@@ -4222,6 +5087,22 @@ run_automated_proof() {
       --arg profile "${AUTOMATED_PROFILE}" \
       --slurpfile stages "${AUTOMATED_STAGE_EVIDENCE}" \
 	      '{status:"complete",manual_status:"route_complete",route_proof_status:"complete",harness_exit_code:0,profile:$profile,evidence:$evidence,human_intervention_count:0,stages:$stages[0]}'
+    return 0
+  fi
+  if [[ "${AUTOMATED_PROFILE}" == "assisted_six_stage" ]]; then
+    AUTO_ERROR_CODE="assisted_cleanup_failed"
+    cleanup_assisted_once
+    AUTO_ERROR_CODE="final_evidence_failed"
+    write_evidence "route_complete" "complete" "${CONFIG_BEFORE}" "${AUTH_BEFORE}" "${CONFIG_HASH_BEFORE}" "${AUTH_HASH_BEFORE}" "${NOTIFY_HASH_BEFORE}"
+    AUTO_ERROR_CODE="evidence_preservation_failed"
+    preserve_existing_route_evidence "${OUT}" "${LAST_ROUTE_OUT}" "${LAST_COMPLETE_OUT}"
+    AUTO_ERROR_CODE="proof_state_changed"
+    assert_proof_state_unchanged
+    mark_assisted_state "${ASSISTED_STATE_PATH}" "complete" true true
+    ASSISTED_TERMINAL_WRITTEN=true
+    AUTO_ERROR_CODE="result_encoding_failed"
+    jq -n --arg evidence "${OUT}/evidence.json" --arg profile "${AUTOMATED_PROFILE}" --slurpfile stages "${AUTOMATED_STAGE_EVIDENCE}" \
+      '{status:"complete",profile:$profile,evidence:$evidence,human_intervention_count:1,stages:$stages[0]}'
     return 0
   fi
   cleanup_processes
@@ -4285,6 +5166,19 @@ EOF
 }
 
 case "${MODE}" in
+  run-auto-assisted)
+    validate_automated_input_mode || exit 2
+    AUTO_SCENARIO_PATH="$(assisted_scenario_argument "$@")" || exit 2
+    launch_auto_assisted "${AUTO_SCENARIO_PATH}"
+    ;;
+  resume-auto-assisted)
+    ASSISTED_STATE_PATH="$(assisted_state_argument "$@")" || exit 2
+    resume_auto_assisted "${ASSISTED_STATE_PATH}"
+    ;;
+  --assisted-supervisor)
+    ASSISTED_STATE_PATH="$(assisted_state_argument "$@")" || exit 2
+    run_assisted_supervisor "${ASSISTED_STATE_PATH}"
+    ;;
   rc1-native-responses-three-stage)
     configure_rc1_native_responses_paths
     mkdir -p "${PROOF_ROOT}" "${RUN_DIR}"
@@ -4536,6 +5430,58 @@ EOF
   --test-auto-scenario)
     [[ -n "${2:-}" ]] || exit 2
     validate_auto_scenario "$2"
+    ;;
+  --test-assisted-scenario)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    validate_assisted_scenario "$2"
+    ;;
+  --test-assisted-create-token)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    create_assisted_token "$2"
+    ;;
+  --test-assisted-snapshot)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    snapshot_assisted_first_five "$2" "$3"
+    ;;
+  --test-assisted-sign-state)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    sign_assisted_state "$2" "$3"
+    ;;
+  --test-assisted-validate-state)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    validate_assisted_state_against_bindings "$2" "$3"
+    ;;
+  --test-assisted-signal-state)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    signal_assisted_state "$2" "$3"
+    ;;
+  --test-assisted-sentinel)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    validate_assisted_sentinel "$2"
+    ;;
+  --test-assisted-descriptor)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    print_assisted_pause_descriptor "$2"
+    ;;
+  --test-assisted-mark-state)
+    [[ -n "${5:-}" && -z "${6:-}" ]] || exit 2
+    mark_assisted_state "$2" "$3" "$4" "$5"
+    ;;
+  --test-assisted-complete)
+    [[ -n "${6:-}" && -z "${7:-}" ]] || exit 2
+    assisted_scenario_complete "$2" "$3" "$4" "$5" "$6"
+    ;;
+  --test-assisted-cleanup-once)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    ASSISTED_CLEANUP_COUNTER_PATH="$2"
+    cleanup_processes() {
+      local count=0
+      [[ -f "${ASSISTED_CLEANUP_COUNTER_PATH}" ]] && count="$(<"${ASSISTED_CLEANUP_COUNTER_PATH}")"
+      printf '%s\n' "$((count + 1))" >"${ASSISTED_CLEANUP_COUNTER_PATH}"
+    }
+    ASSISTED_CLEANUP_DONE=false
+    cleanup_assisted_once
+    cleanup_assisted_once
     ;;
   --test-postbinding-query-content)
     [[ -n "${4:-}" && -z "${5:-}" ]] || exit 2

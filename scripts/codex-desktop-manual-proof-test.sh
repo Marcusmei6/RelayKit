@@ -262,10 +262,15 @@ tmp_dir="$(mktemp -d)"
 pid_file="${tmp_dir}/stubborn.pid"
 ready_file="${tmp_dir}/ready"
 stubborn_pid=""
+assisted_fixture_pids=()
 cleanup() {
   if [[ -n "${stubborn_pid}" ]] && kill -0 "${stubborn_pid}" 2>/dev/null; then
     kill -KILL "${stubborn_pid}" 2>/dev/null || true
   fi
+  for fixture_pid in "${assisted_fixture_pids[@]:-}"; do
+    [[ -n "${fixture_pid}" ]] || continue
+    kill "${fixture_pid}" 2>/dev/null || true
+  done
   rm -rf "${tmp_dir}"
 }
 trap cleanup EXIT
@@ -802,6 +807,232 @@ RELAYKIT_DESKTOP_PROOF_INPUT_MODE=automated_ax "${PROOF_SCRIPT}" --test-automate
 expect_failure "run-auto accepted the manual input mode" env \
   RELAYKIT_DESKTOP_PROOF_INPUT_MODE=manual_user_only \
   "${PROOF_SCRIPT}" --test-automated-input-mode
+
+assisted_dir="${tmp_dir}/assisted-proof"
+mkdir -m 700 "${assisted_dir}"
+assisted_marker="RELAYKIT_OFFICIAL_TOOL_FIXTURE_20990718"
+assisted_provider_model="public/provider-model"
+for assisted_stage in official-plain official-markdown provider-plain provider-markdown provider-tool; do
+  printf 'Reply with fixture marker for %s\n' "${assisted_stage}" >"${assisted_dir}/${assisted_stage}.txt"
+  chmod 600 "${assisted_dir}/${assisted_stage}.txt"
+done
+cat >"${assisted_dir}/official-tool.txt" <<EOF
+Use the shell tool to run exactly: printf '${assisted_marker}\\n'; pwd. Then report only the exact tool output and working directory. Do not inspect any files.
+EOF
+chmod 600 "${assisted_dir}/official-tool.txt"
+assisted_scenario="${assisted_dir}/scenario.json"
+cat >"${assisted_scenario}" <<JSON
+{"version":1,"stage_timeout_seconds":60,"stages":[
+  {"id":"official-plain","model_id":"@current-official","model_label":"@current-official","query_file":"${assisted_dir}/official-plain.txt","response_marker":"RELAYKIT_OFFICIAL_PLAIN_FIXTURE","evidence_role":"official-plain","expect":"plain"},
+  {"id":"official-markdown","model_id":"@current-official","model_label":"@current-official","query_file":"${assisted_dir}/official-markdown.txt","response_marker":"RELAYKIT_OFFICIAL_MARKDOWN_FIXTURE","evidence_role":"official-markdown","expect":"markdown"},
+  {"id":"provider-plain","model_id":"${assisted_provider_model}","model_label":"Fixture Provider","query_file":"${assisted_dir}/provider-plain.txt","response_marker":"RELAYKIT_PROVIDER_PLAIN_FIXTURE","evidence_role":"provider-plain","expect":"plain"},
+  {"id":"provider-markdown","model_id":"${assisted_provider_model}","model_label":"Fixture Provider","query_file":"${assisted_dir}/provider-markdown.txt","response_marker":"RELAYKIT_PROVIDER_MARKDOWN_FIXTURE","evidence_role":"provider-markdown","expect":"markdown"},
+  {"id":"provider-tool","model_id":"${assisted_provider_model}","model_label":"Fixture Provider","query_file":"${assisted_dir}/provider-tool.txt","response_marker":"RELAYKIT_PROVIDER_TOOL_FIXTURE","evidence_role":"provider-tool","expect":"tool"},
+  {"id":"official-tool","model_id":"@current-official","model_label":"@current-official","query_file":"${assisted_dir}/official-tool.txt","response_marker":"${assisted_marker}","evidence_role":"official-tool","expect":"tool"}
+]}
+JSON
+chmod 600 "${assisted_scenario}"
+"${PROOF_SCRIPT}" --test-assisted-scenario "${assisted_scenario}" >"${assisted_dir}/normalized.json"
+jq -e '
+  [.stages[].id] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool","official-tool"] and
+  [.stages[].evidence_role] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool","official-tool"] and
+  .stages[5].model_id == "@current-official" and .stages[5].expect == "tool"
+' "${assisted_dir}/normalized.json" >/dev/null || fail "assisted scenario normalization lost the exact six-stage contract"
+
+jq '.stages[4:6] |= reverse' "${assisted_scenario}" >"${assisted_dir}/bad-order.json"
+chmod 600 "${assisted_dir}/bad-order.json"
+expect_failure "assisted scenario accepted official-tool outside the sixth position" \
+  "${PROOF_SCRIPT}" --test-assisted-scenario "${assisted_dir}/bad-order.json"
+jq '.stages[5].evidence_role = "provider-tool"' "${assisted_scenario}" >"${assisted_dir}/bad-role.json"
+chmod 600 "${assisted_dir}/bad-role.json"
+expect_failure "assisted scenario accepted a non-official-tool final evidence role" \
+  "${PROOF_SCRIPT}" --test-assisted-scenario "${assisted_dir}/bad-role.json"
+jq '.stages[2].model_id = "@current-official" | .stages[2].model_label = "@current-official"' \
+  "${assisted_scenario}" >"${assisted_dir}/bad-provider.json"
+chmod 600 "${assisted_dir}/bad-provider.json"
+expect_failure "assisted scenario accepted a dynamic provider stage" \
+  "${PROOF_SCRIPT}" --test-assisted-scenario "${assisted_dir}/bad-provider.json"
+
+assisted_ledger="${assisted_dir}/first-five-ledger.json"
+cat >"${assisted_ledger}" <<'JSON'
+[
+  {"id":"official-plain","evidence_role":"official-plain","state":"evidence_verified","submission_state":"submitted","submission_count":1,"rollout_binding":{"proof_found":true,"thread_id":"thread-1","user_marker_count":1,"assistant_marker_count":1}},
+  {"id":"official-markdown","evidence_role":"official-markdown","state":"evidence_verified","submission_state":"submitted","submission_count":1,"rollout_binding":{"proof_found":true,"thread_id":"thread-2","user_marker_count":1,"assistant_marker_count":1}},
+  {"id":"provider-plain","evidence_role":"provider-plain","state":"evidence_verified","submission_state":"submitted","submission_count":1,"rollout_binding":{"proof_found":true,"thread_id":"thread-3","user_marker_count":1,"assistant_marker_count":1}},
+  {"id":"provider-markdown","evidence_role":"provider-markdown","state":"evidence_verified","submission_state":"submitted","submission_count":1,"rollout_binding":{"proof_found":true,"thread_id":"thread-4","user_marker_count":1,"assistant_marker_count":1}},
+  {"id":"provider-tool","evidence_role":"provider-tool","state":"evidence_verified","submission_state":"submitted","submission_count":1,"rollout_binding":{"proof_found":true,"thread_id":"thread-5","user_marker_count":1,"assistant_marker_count":1}}
+]
+JSON
+chmod 600 "${assisted_ledger}"
+assisted_ledger_snapshot="${assisted_dir}/first-five-snapshot.json"
+"${PROOF_SCRIPT}" --test-assisted-snapshot "${assisted_ledger}" "${assisted_ledger_snapshot}"
+cmp -s "${assisted_ledger}" "${assisted_ledger_snapshot}" || fail "assisted first-five ledger snapshot is not byte-identical"
+test "$(stat -f %Lp "${assisted_ledger_snapshot}")" = "600"
+assisted_ledger="${assisted_ledger_snapshot}"
+assisted_artifact="${assisted_dir}/artifact.zip"
+printf 'fixture artifact\n' >"${assisted_artifact}"
+chmod 600 "${assisted_artifact}"
+assisted_state="${assisted_dir}/run-state.json"
+"${PROOF_SCRIPT}" --test-assisted-create-token "${assisted_state}"
+assisted_token="${assisted_state}.token"
+test -f "${assisted_token}" && test ! -L "${assisted_token}"
+test "$(stat -f %Lp "${assisted_token}")" = "600"
+
+assisted_scenario_sha="$(file_hash "${assisted_scenario}")"
+assisted_artifact_sha="$(file_hash "${assisted_artifact}")"
+assisted_ledger_sha="$(file_hash "${assisted_ledger}")"
+assisted_token_sha="$(file_hash "${assisted_token}")"
+assisted_query_sha="$(file_hash "${assisted_dir}/official-tool.txt")"
+sleep 60 & assisted_supervisor_pid=$!
+sleep 60 & assisted_desktop_pid=$!
+sleep 60 & assisted_gateway_pid=$!
+assisted_fixture_pids=("${assisted_supervisor_pid}" "${assisted_desktop_pid}" "${assisted_gateway_pid}")
+assisted_supervisor_identity="$(/bin/ps -p "${assisted_supervisor_pid}" -o lstart= -o command= | /usr/bin/shasum -a 256 | awk '{print $1}')"
+assisted_desktop_identity="$(/bin/ps -p "${assisted_desktop_pid}" -o lstart= -o command= | /usr/bin/shasum -a 256 | awk '{print $1}')"
+assisted_gateway_identity="$(/bin/ps -p "${assisted_gateway_pid}" -o lstart= -o command= | /usr/bin/shasum -a 256 | awk '{print $1}')"
+assisted_current="${assisted_dir}/current-bindings.json"
+cat >"${assisted_current}" <<JSON
+{"run_id":"assisted-fixture-run","scenario_sha256":"${assisted_scenario_sha}","artifact_sha256":"${assisted_artifact_sha}","harness_sha256":"harness-fixture","source_snapshot_sha256":"source-fixture","global_guard":"guard-fixture","stage_evidence_sha256":"${assisted_ledger_sha}","next_query_sha256":"${assisted_query_sha}","supervisor":{"pid":${assisted_supervisor_pid},"identity":"${assisted_supervisor_identity}","alive":true},"desktop":{"pid":${assisted_desktop_pid},"identity":"${assisted_desktop_identity}","window_id":303,"alive":true},"gateway":{"pid":${assisted_gateway_pid},"identity":"${assisted_gateway_identity}","port":19777,"owns_port":true,"alive":true}}
+JSON
+chmod 600 "${assisted_current}"
+assisted_unsigned="${assisted_dir}/unsigned-state.json"
+cat >"${assisted_unsigned}" <<JSON
+{"version":1,"status":"awaiting_user_action","run_id":"assisted-fixture-run","scenario_path":"${assisted_scenario}","scenario_sha256":"${assisted_scenario_sha}","artifact_path":"${assisted_artifact}","artifact_sha256":"${assisted_artifact_sha}","harness_sha256":"harness-fixture","source_snapshot_sha256":"source-fixture","global_guard":"guard-fixture","stage_evidence_path":"${assisted_ledger}","stage_evidence_sha256":"${assisted_ledger_sha}","next_query_sha256":"${assisted_query_sha}","token_sha256":"${assisted_token_sha}","supervisor":{"pid":${assisted_supervisor_pid},"identity":"${assisted_supervisor_identity}"},"desktop":{"pid":${assisted_desktop_pid},"identity":"${assisted_desktop_identity}","window_id":303},"gateway":{"pid":${assisted_gateway_pid},"identity":"${assisted_gateway_identity}","port":19777,"owns_port":true},"first_five_ledger":$(cat "${assisted_ledger}"),"next_stage":{"id":"official-tool","evidence_role":"official-tool","expect":"tool","model_id":"fixture/official","query_file":"${assisted_dir}/official-tool.txt","response_marker":"${assisted_marker}","usage_baseline":5,"since_epoch":4099680000},"pause_prompt":"Use the shell tool to run exactly: printf '${assisted_marker}\\n'; pwd. Then report only the exact tool output and working directory. Do not inspect any files.","submission_count":5,"resume_used":false,"cleanup_done":false}
+JSON
+chmod 600 "${assisted_unsigned}"
+"${PROOF_SCRIPT}" --test-assisted-sign-state "${assisted_unsigned}" "${assisted_state}"
+test -f "${assisted_state}" && test ! -L "${assisted_state}"
+test "$(stat -f %Lp "${assisted_state}")" = "600"
+"${PROOF_SCRIPT}" --test-assisted-validate-state "${assisted_state}" "${assisted_current}"
+cp "${assisted_state}" "${assisted_dir}/signed-state-backup.json"
+jq '.run_id = "tampered-run"' "${assisted_state}" >"${assisted_dir}/tampered-state.json"
+chmod 600 "${assisted_dir}/tampered-state.json"
+mv "${assisted_dir}/tampered-state.json" "${assisted_state}"
+expect_failure "assisted resume accepted a state with an invalid MAC" \
+  "${PROOF_SCRIPT}" --test-assisted-validate-state "${assisted_state}" "${assisted_current}"
+mv "${assisted_dir}/signed-state-backup.json" "${assisted_state}"
+chmod 600 "${assisted_state}"
+
+descriptor="$(${PROOF_SCRIPT} --test-assisted-descriptor "${assisted_state}")"
+jq -e --argjson expected_desktop_pid "${assisted_desktop_pid}" '
+  keys == ["desktop_pid","desktop_window_id","gateway_endpoint","prompt","status"] and
+  .status == "awaiting_user_action" and .desktop_pid == $expected_desktop_pid and .desktop_window_id == 303 and
+  .gateway_endpoint == "http://127.0.0.1:19777/v1" and
+  (.prompt | startswith("Use the shell tool to run exactly:"))
+' <<<"${descriptor}" >/dev/null || fail "assisted pause descriptor escaped its strict allowlist"
+
+for assisted_mutation in \
+  '.run_id = "stale-run"' \
+  '.scenario_sha256 = "stale"' \
+  '.artifact_sha256 = "stale"' \
+  '.harness_sha256 = "stale"' \
+  '.source_snapshot_sha256 = "stale"' \
+  '.global_guard = "stale"' \
+  '.stage_evidence_sha256 = "stale"' \
+  '.next_query_sha256 = "stale"' \
+  '.supervisor.alive = false' \
+  '.desktop.alive = false' \
+  '.gateway.alive = false' \
+  '.supervisor.identity = "stale"' \
+  '.desktop.identity = "stale"' \
+  '.gateway.identity = "stale"' \
+  '.desktop.window_id = 999' \
+  '.gateway.port = 18787' \
+  '.gateway.owns_port = false'; do
+  assisted_bad_current="${assisted_dir}/bad-current-$(printf '%s' "${assisted_mutation}" | shasum -a 256 | cut -c1-12).json"
+  jq "${assisted_mutation}" "${assisted_current}" >"${assisted_bad_current}"
+  chmod 600 "${assisted_bad_current}"
+  expect_failure "assisted resume accepted mismatched binding: ${assisted_mutation}" \
+    "${PROOF_SCRIPT}" --test-assisted-validate-state "${assisted_state}" "${assisted_bad_current}"
+done
+
+jq '.desktop.window_id = 999' "${assisted_current}" >"${assisted_dir}/wrong-window.json"
+chmod 600 "${assisted_dir}/wrong-window.json"
+expect_failure "assisted resume accepted a different Desktop window" \
+  "${PROOF_SCRIPT}" --test-assisted-validate-state "${assisted_state}" "${assisted_dir}/wrong-window.json"
+chmod 640 "${assisted_state}"
+expect_failure "assisted resume accepted a non-0600 state file" \
+  "${PROOF_SCRIPT}" --test-assisted-validate-state "${assisted_state}" "${assisted_current}"
+chmod 600 "${assisted_state}"
+ln -s "${assisted_state}" "${assisted_dir}/state-link.json"
+expect_failure "assisted resume accepted a symlinked state file" \
+  "${PROOF_SCRIPT}" --test-assisted-validate-state "${assisted_dir}/state-link.json" "${assisted_current}"
+
+assisted_signal_output="$("${PROOF_SCRIPT}" --test-assisted-signal-state "${assisted_state}" "${assisted_current}")"
+test -z "${assisted_signal_output}" || fail "assisted resume printed token or private state"
+for fixture_pid in "${assisted_fixture_pids[@]}"; do
+  kill -0 "${fixture_pid}" 2>/dev/null || fail "assisted pause/resume cleaned up a parked fixture process"
+done
+assisted_sentinel="${assisted_state}.resume"
+test -f "${assisted_sentinel}" && test ! -L "${assisted_sentinel}"
+test "$(stat -f %Lp "${assisted_sentinel}")" = "600"
+test "$(file_hash "${assisted_sentinel}")" != "$(file_hash "${assisted_token}")" ||
+  fail "assisted sentinel copied the separate resume token"
+"${PROOF_SCRIPT}" --test-assisted-sentinel "${assisted_state}"
+expect_failure "assisted resume accepted a reused sentinel" \
+  "${PROOF_SCRIPT}" --test-assisted-signal-state "${assisted_state}" "${assisted_current}"
+
+"${PROOF_SCRIPT}" --test-assisted-mark-state "${assisted_state}" observing true false
+assisted_final_stages="${assisted_dir}/all-six-stages.json"
+jq --arg run_id "assisted-fixture-run" '. + [{
+  "id":"official-tool","model_id":"fixture/official","evidence_role":"official-tool","expect":"tool",
+  "state":"evidence_verified","submission_state":"submitted","submission_count":1,"usage_baseline":5,
+  "run_id":$run_id,
+  "rollout_binding":{"proof_found":true,"candidate_count":1,"thread_id":"thread-6","model":"fixture/official","user_marker_count":1,"assistant_marker_count":1}
+}]' "${assisted_ledger}" >"${assisted_final_stages}"
+chmod 600 "${assisted_final_stages}"
+assisted_usage="${assisted_dir}/usage.json"
+jq -n '[range(0;5) | {model:"prior",status:"completed",http_status:200}] + [{model:"fixture/official",status:"completed",http_status:200}]' >"${assisted_usage}"
+chmod 600 "${assisted_usage}"
+assisted_tool="${assisted_dir}/tool.json"
+cat >"${assisted_tool}" <<JSON
+{"proof_found":true,"function_call_found":true,"function_call_output_found":true,"process_exited_zero":true,"matched_provider_tool_count":1,"exact_shell_command_found":true,"pwd_output_found":true,"xml_leak_found":false,"raw_function_calls_found":false,"since_epoch":4099680000}
+JSON
+chmod 600 "${assisted_tool}"
+assisted_screenshots="${assisted_dir}/screenshots.json"
+cat >"${assisted_screenshots}" <<'JSON'
+[{"role":"official-tool","captured":true,"target_identity_verified":true,"visual_checks":{"tool_marker_visible":true,"tool_execution_visible":true,"raw_protocol_visible":false}}]
+JSON
+chmod 600 "${assisted_screenshots}"
+"${PROOF_SCRIPT}" --test-assisted-complete "${assisted_state}" "${assisted_final_stages}" "${assisted_usage}" "${assisted_tool}" "${assisted_screenshots}"
+jq '.since_epoch = 4099679999' "${assisted_tool}" >"${assisted_dir}/stale-tool.json"
+chmod 600 "${assisted_dir}/stale-tool.json"
+expect_failure "assisted completion accepted stale official-tool evidence" \
+  "${PROOF_SCRIPT}" --test-assisted-complete "${assisted_state}" "${assisted_final_stages}" "${assisted_usage}" "${assisted_dir}/stale-tool.json" "${assisted_screenshots}"
+jq '.[5].rollout_binding.thread_id = "thread-5"' "${assisted_final_stages}" >"${assisted_dir}/replayed-stage.json"
+chmod 600 "${assisted_dir}/replayed-stage.json"
+expect_failure "assisted completion replayed a first-five rollout for stage six" \
+  "${PROOF_SCRIPT}" --test-assisted-complete "${assisted_state}" "${assisted_dir}/replayed-stage.json" "${assisted_usage}" "${assisted_tool}" "${assisted_screenshots}"
+
+cleanup_counter="${assisted_dir}/cleanup-count"
+"${PROOF_SCRIPT}" --test-assisted-cleanup-once "${cleanup_counter}"
+test "$(cat "${cleanup_counter}")" = "1" || fail "assisted terminal cleanup did not run exactly once"
+
+resume_body="$(sed -n '/^resume_auto_assisted() {/,/^}/p' "${PROOF_SCRIPT}")"
+if grep -Eq 'setup_preflight|launch_desktop|run_automated_proof|AX_DRIVER_BINARY.*submit' <<<"${resume_body}"; then
+  fail "assisted resume must only validate state and create its single sentinel"
+fi
+grep -Fq 'run-auto-assisted)' "${PROOF_SCRIPT}" || fail "assisted launcher command is missing"
+grep -Fq 'resume-auto-assisted)' "${PROOF_SCRIPT}" || fail "assisted resume command is missing"
+grep -Fq -- '--assisted-supervisor)' "${PROOF_SCRIPT}" || fail "assisted background supervisor command is missing"
+grep -Fq 'assisted_six_stage)' "${PROOF_SCRIPT}" || fail "assisted final profile branch is missing"
+test "$("${PROOF_SCRIPT}" --test-automated-profile "${assisted_dir}/normalized.json" "${assisted_provider_model}")" = "assisted_six_stage"
+grep -Fq '"${AUTOMATED_PROFILE}" == "assisted_six_stage" && "${ASSISTED_MODE}" != "true"' "${PROOF_SCRIPT}" ||
+  fail "ordinary run-auto no longer preserves six-stage custom-scenario compatibility"
+launcher_body="$(sed -n '/^launch_auto_assisted() {/,/^}/p' "${PROOF_SCRIPT}")"
+grep -Fq '</dev/null' <<<"${launcher_body}" || fail "assisted launcher still depends on caller stdin"
+grep -Fq 'supervisor.out' <<<"${launcher_body}" || fail "assisted supervisor stdout is not redirected"
+grep -Fq 'supervisor.err' <<<"${launcher_body}" || fail "assisted supervisor stderr is not redirected"
+if grep -Fq 'cleanup_processes' <<<"${launcher_body}"; then
+  fail "assisted launcher cleaned up the parked supervisor runtime"
+fi
+for fixture_pid in "${assisted_fixture_pids[@]}"; do
+  kill "${fixture_pid}" 2>/dev/null || true
+  wait "${fixture_pid}" 2>/dev/null || true
+done
+assisted_fixture_pids=()
+
+echo "Manual proof resumable assisted lifecycle fixtures passed"
 
 config_home="${tmp_dir}/isolated-config-home"
 mkdir -p "${config_home}"
