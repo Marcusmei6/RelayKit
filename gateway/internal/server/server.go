@@ -1696,9 +1696,10 @@ func codexExplicitToolResultPrompt(messages []chatMessage) string {
 }
 
 func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools []responsesTool) (command string, messageOnly bool, err error) {
+	execCommandAllowed := officialExecCommandCapabilityAllowed(input, tools)
 	var text string
 	if json.Unmarshal(input, &text) == nil {
-		command, explicit, err := parseExplicitExecCommand(text, tools)
+		command, explicit, err := parseExplicitExecCommand(text, execCommandAllowed)
 		if !explicit {
 			return "", false, nil
 		}
@@ -1723,7 +1724,7 @@ func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools [
 	if !ok {
 		return "", false, nil
 	}
-	command, explicit, err := parseExplicitExecCommand(message.Content, tools)
+	command, explicit, err := parseExplicitExecCommand(message.Content, execCommandAllowed)
 	if !explicit {
 		return "", false, nil
 	}
@@ -1742,7 +1743,7 @@ func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools [
 	return "", true, nil
 }
 
-func parseExplicitExecCommand(text string, tools []responsesTool) (command string, explicit bool, err error) {
+func parseExplicitExecCommand(text string, execCommandAllowed bool) (command string, explicit bool, err error) {
 	if strings.HasPrefix(text, explicitExecCommandV1Prefix) {
 		if strings.ContainsAny(text, "\r\n\x00") {
 			return "", true, fmt.Errorf("invalid V1 explicit shell command line")
@@ -1754,7 +1755,7 @@ func parseExplicitExecCommand(text string, tools []responsesTool) (command strin
 		if json.Unmarshal(object["cmd"], &command) != nil || strings.TrimSpace(command) == "" || strings.ContainsAny(command, "\r\n\x00") {
 			return "", true, fmt.Errorf("invalid V1 explicit shell command value")
 		}
-		if !officialExecCommandToolAllowed(tools) {
+		if !execCommandAllowed {
 			return "", true, fmt.Errorf("incompatible explicit shell command")
 		}
 		return command, true, nil
@@ -1767,7 +1768,7 @@ func parseExplicitExecCommand(text string, tools []responsesTool) (command strin
 		return "", true, fmt.Errorf("malformed explicit shell command")
 	}
 	command = strings.TrimSuffix(candidate, explicitExecCommandSuffix)
-	if command == "" || strings.ContainsAny(command, "\r\n") || !officialExecCommandToolAllowed(tools) {
+	if command == "" || strings.ContainsAny(command, "\r\n") || !execCommandAllowed {
 		return "", true, fmt.Errorf("incompatible explicit shell command")
 	}
 	return command, true, nil
@@ -1829,6 +1830,44 @@ func officialExecCommandToolAllowed(tools []responsesTool) bool {
 		found = true
 	}
 	return found
+}
+
+func officialExecCommandCapabilityAllowed(input json.RawMessage, tools []responsesTool) bool {
+	if officialExecCommandToolAllowed(tools) {
+		return true
+	}
+	var items []struct {
+		Type  string `json:"type"`
+		Role  string `json:"role"`
+		Tools []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if json.Unmarshal(input, &items) != nil {
+		return false
+	}
+	additionalToolsCount := 0
+	execToolCount := 0
+	for _, item := range items {
+		if item.Type != "additional_tools" {
+			continue
+		}
+		additionalToolsCount++
+		if item.Role != "developer" || len(item.Tools) == 0 {
+			return false
+		}
+		for _, tool := range item.Tools {
+			if tool.Name != "exec" {
+				continue
+			}
+			if tool.Type != "custom" {
+				return false
+			}
+			execToolCount++
+		}
+	}
+	return additionalToolsCount == 1 && execToolCount == 1
 }
 
 func explicitExecCommandResponse(command, requestedModel string) (map[string]any, error) {

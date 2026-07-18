@@ -918,7 +918,7 @@ marker = sys.argv[1]
 print("RELAYKIT_EXEC_COMMAND_V1 " + json.dumps({"cmd": f"printf '{marker}\\n'; pwd"}, separators=(",", ":")))
 PY
 )"
-printf '%s\n' "${expected_assisted_prompt}" >"${assisted_dir}/official-tool.txt"
+printf '%s' "${expected_assisted_prompt}" >"${assisted_dir}/official-tool.txt"
 chmod 600 "${assisted_dir}/official-tool.txt"
 assisted_scenario="${assisted_dir}/scenario.json"
 cat >"${assisted_scenario}" <<JSON
@@ -938,6 +938,20 @@ jq -e '
   [.stages[].evidence_role] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool","official-tool"] and
   .stages[5].model_id == "@current-official" and .stages[5].expect == "tool"
 ' "${assisted_dir}/normalized.json" >/dev/null || fail "assisted scenario normalization lost the exact six-stage contract"
+python3 - "${assisted_dir}/official-tool.txt" "${expected_assisted_prompt}" <<'PY'
+from pathlib import Path
+import sys
+
+actual = Path(sys.argv[1]).read_bytes()
+expected = sys.argv[2].encode("utf-8")
+if actual != expected or b"\r" in actual or b"\n" in actual or b"\0" in actual:
+    raise SystemExit("assisted official-tool fixture is not an exact single physical line")
+PY
+printf '%s\n' "${expected_assisted_prompt}" >"${assisted_dir}/official-tool-trailing-newline.txt"
+jq --arg path "${assisted_dir}/official-tool-trailing-newline.txt" '.stages[5].query_file = $path' \
+  "${assisted_scenario}" >"${assisted_dir}/scenario-trailing-newline.json"
+expect_failure "assisted scenario accepted a terminal newline in the V1 tool query" \
+  "${PROOF_SCRIPT}" --test-assisted-scenario "${assisted_dir}/scenario-trailing-newline.json"
 test "$("${PROOF_SCRIPT}" --test-assisted-launch-deadline "${assisted_scenario}")" = "600" ||
   fail "assisted launcher deadline is not 5*stage_timeout + default 300"
 test "$(RELAYKIT_ASSISTED_PREFLIGHT_ALLOWANCE_SECONDS=120 "${PROOF_SCRIPT}" --test-assisted-launch-deadline "${assisted_scenario}")" = "420" ||

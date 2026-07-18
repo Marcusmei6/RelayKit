@@ -895,6 +895,47 @@ printf '%s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
 	if !strings.Contains(v1Second, `"output_text":"TOOL COMPLETE"`) || strings.Contains(v1Second, `"type":"function_call"`) {
 		t.Fatalf("V1 second response = %s", v1Second)
 	}
+
+	additionalTools := map[string]any{
+		"type": "additional_tools", "role": "developer",
+		"tools": []map[string]any{
+			{"type": "custom", "name": "exec"},
+			{"type": "function", "name": "wait", "parameters": map[string]any{"type": "object"}},
+		},
+	}
+	currentInput := []map[string]any{
+		additionalTools,
+		{"type": "message", "role": "developer", "content": []map[string]string{{"type": "input_text", "text": "current Codex tools"}}},
+		{"type": "message", "role": "user", "content": []map[string]string{{"type": "input_text", "text": v1Prompt}}},
+	}
+	currentRequest, err := json.Marshal(map[string]any{"model": "gpt-5.5", "input": currentInput})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentConn, currentReader := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer currentConn.Close()
+	writeTestWebSocketText(t, currentConn, string(currentRequest))
+	currentFirst := readTestWebSocketUntil(t, currentReader, "response.completed")
+	if !strings.Contains(currentFirst, `"type":"function_call"`) ||
+		!strings.Contains(currentFirst, `"name":"exec_command"`) {
+		t.Fatalf("current Codex V1 first response = %s", currentFirst)
+	}
+	currentCallID := responseCallID(t, currentFirst)
+	currentOutputInput := append(append([]map[string]any{}, currentInput...),
+		map[string]any{"type": "function_call", "call_id": currentCallID, "name": "exec_command", "arguments": `{"cmd":"` + v1Command + `"}`},
+		map[string]any{"type": "function_call_output", "call_id": currentCallID, "output": "RELAYKIT_V1_TOOL\n/workspace"},
+	)
+	currentOutputRequest, err := json.Marshal(map[string]any{"model": "gpt-5.5", "input": currentOutputInput})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentOutputConn, currentOutputReader := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer currentOutputConn.Close()
+	writeTestWebSocketText(t, currentOutputConn, string(currentOutputRequest))
+	currentSecond := readTestWebSocketUntil(t, currentOutputReader, "response.completed")
+	if !strings.Contains(currentSecond, `"output_text":"TOOL COMPLETE"`) || strings.Contains(currentSecond, `"type":"function_call"`) {
+		t.Fatalf("current Codex V1 second response = %s", currentSecond)
+	}
 }
 
 func TestOfficialPassthroughCodexHomeExplicitExecCommandIsDeterministic(t *testing.T) {
@@ -1161,6 +1202,10 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 	const exact = "Use the shell tool to run exactly: " + command + "\nThen report only the exact tool output."
 	const exactV1 = `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"printf explicit"}`
 	const arguments = `{"cmd":"printf explicit"}`
+	additionalTools := map[string]any{
+		"type": "additional_tools", "role": "developer",
+		"tools": []map[string]any{{"type": "custom", "name": "exec"}, {"type": "function", "name": "wait"}},
+	}
 	encodeInput := func(input any) json.RawMessage {
 		encoded, err := json.Marshal(input)
 		if err != nil {
@@ -1190,6 +1235,9 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 	t.Run("exact V1 first leg is supported", func(t *testing.T) {
 		check(t, exactV1, validTools, command, false, false)
 	})
+	t.Run("current Codex additional tools support exact V1", func(t *testing.T) {
+		check(t, []map[string]any{additionalTools, {"type": "message", "role": "user", "content": exactV1}}, nil, command, false, false)
+	})
 	t.Run("latest exact user message is executable", func(t *testing.T) {
 		check(t, []map[string]any{{"type": "message", "role": "user", "content": "history"}, {"type": "message", "role": "user", "content": exact}}, validTools, command, false, false)
 	})
@@ -1215,6 +1263,15 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
 			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
 		}, validTools, "", true, false)
+	})
+	t.Run("current Codex additional tools roundtrip is message only", func(t *testing.T) {
+		check(t, []map[string]any{
+			additionalTools,
+			{"type": "message", "role": "developer", "content": "current tool metadata"},
+			{"type": "message", "role": "user", "content": exactV1},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": arguments},
+			{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		}, nil, "", true, false)
 	})
 	t.Run("later user makes prior explicit roundtrip historical", func(t *testing.T) {
 		check(t, []map[string]any{
@@ -1319,6 +1376,25 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 	t.Run("duplicate exec command tools fail closed", func(t *testing.T) {
 		check(t, exactV1, append(validTools, validTools[0]), "", false, true)
 	})
+
+	for name, item := range map[string]map[string]any{
+		"duplicate current exec tools": {
+			"type": "additional_tools", "role": "developer",
+			"tools": []map[string]any{{"type": "custom", "name": "exec"}, {"type": "custom", "name": "exec"}},
+		},
+		"current exec tool with wrong type": {
+			"type": "additional_tools", "role": "developer",
+			"tools": []map[string]any{{"type": "function", "name": "exec"}},
+		},
+		"current exec tools with wrong role": {
+			"type": "additional_tools", "role": "user",
+			"tools": []map[string]any{{"type": "custom", "name": "exec"}},
+		},
+	} {
+		t.Run(name+" fail closed", func(t *testing.T) {
+			check(t, []map[string]any{item, {"type": "message", "role": "user", "content": exactV1}}, nil, "", false, true)
+		})
+	}
 }
 
 func responseCallID(t *testing.T, events string) string {

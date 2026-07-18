@@ -1125,7 +1125,8 @@ expected_prompt = (
     + json.dumps({"cmd": f"printf '{marker}\\n'; pwd"}, separators=(",", ":"))
 )
 try:
-    prompt = Path(tool_stage["query_file"]).read_text().strip()
+    prompt_bytes = Path(tool_stage["query_file"]).read_bytes()
+    prompt = prompt_bytes.decode("utf-8")
 except (OSError, UnicodeDecodeError):
     raise SystemExit("assisted official-tool query must contain UTF-8 text")
 if prompt != expected_prompt:
