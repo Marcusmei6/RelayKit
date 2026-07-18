@@ -6,19 +6,13 @@ RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-c
 
 ## Signed Beta v0.1.0 Current Candidate
 
-Status: **incomplete; one remediation cycle in progress**. Product freeze was commit `8c231338792d83af6579521892c43414889ae809`; harness remediations were commits `8cce29d9036afecfe5eac5deee3f153296f5324a` and `4178c51a9a3348e17a81016e16b6d19aa1cc0efb`. The previously signed, notarized, and stapled zip with SHA-256 `bd229bf98caf22bce9b0e1e9a763ad0faf8c060b713ee984e0b7af276a46da8c` is now historical and ineligible because the bundled gateway requires the bounded remediation below. It must not be reused or relabeled as the replacement candidate.
+Status: **incomplete and blocked**. The current artifact has SHA-256 `c481ae5607c813f8f907f3c7b82252e7c709f7e10b77b1176688215736f720f3`. Developer ID signing, hardened runtime, notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle passed. The artifact is nevertheless ineligible because its current six-stage Desktop route gate failed.
 
-The latest full six-stage assisted attempt used the fixed artifact and reached `evidence_verified` for all first five stages with one submission each. The final `official-tool` stage was bound to one fresh GPT-5.6-Sol Desktop thread and submitted once, but the prompt did not match the gateway's exact two-line explicit-tool contract. It ended with typed `invalid_request_error`, no assistant marker, and no function call/output. That attempt is failed and ineligible; the first-five ledger must not be combined with later focused diagnostics or relabeled as a route PASS.
+The single assigned assisted state `signed-c481-six-final-20260718T200844Z-f890e7` is bound to that artifact and to one current run. Its recorded first-five ledger hash is intact and those entries exactly match stages 1-5 in `dist/codex-desktop-manual-proof/automated-stages.json`; each is `evidence_verified` with one submission. Stage 6, `official-tool`, was submitted once in one exactly bound fresh thread and ended `observation_failed_2`.
 
-The remediation root cause is recorded in `dist/signed-beta-official-tool-blocker-20260718T165644Z/failure-analysis.json`. Source inspection and focused current-package runs established the boundary: the historical gateway accepted only an exact two-line explicit `exec_command` request; remote AX writes to the Codex Chromium composer flattened the required internal line break to a space; natural or direct-decision single-line requests completed as assistant text without a native function call. Fresh Computer Use inspection also failed closed because the platform does not allow Computer Use to target `com.openai.codex`. Failed LF, CRLF, selected-text, and AX keyboard experiments were removed rather than retained as fallback machinery.
+At the stage-6 usage baseline of 17, the run recorded three completed/200 Official WebSocket events followed by four typed 400 `invalid_request_error` events. No assistant marker or current custom tool call/output evidence is present. The available evidence does not identify an exact rejected wire shape or support a narrower root cause.
 
-The bounded replacement adds one namespaced, strict single-line `RELAYKIT_EXEC_COMMAND_V1` JSON contract to the deterministic official `exec_command` parser while preserving the two-line form. It rejects malformed JSON, duplicate or extra fields, blank or multiline commands, terminal line endings, missing or incompatible tool schemas, mismatched call IDs, ambiguous outputs, and all non-`exec_command` functions; near matches retain the ordinary nested decision path. The manual proof now emits that strict single-line contract, so exact-PID AX can submit it without Computer Use or human input. No replacement signed artifact exists yet.
-
-The current global config SHA-256 is `5962877c2f4a80924d97b79b7390030c5bd31c9bb85366851078994cdfd69506` and the current global auth SHA-256 is `2efbbf0d93ba4fd4430039315fbf2bc979d7624dac7c786f2883eeb23d3bf832`. Both hashes, the config notify hash, and the proof guards were identical before and after the current runs. RelayKit did not read, repair, restore, or rewrite either global file.
-
-After cleanup, `19777` and `18787` are free. `dist/RelayKitApp-local.zip` was restored to its pre-proof SHA-256 `c0440a025d11a8921fff158f53cfa0660ff43ee794e94e5d56e146f3d32148e6`; the historical signed zip remains byte-identical but ineligible. The tracked worktree contains the bounded gateway/harness remediation and this current-truth update; App UI source remains unchanged. Signed Beta v0.1.0 is incomplete, the public GitHub Release is not published, and the updater is not implemented. Exact remote `AXPopover` binding remains a historical blocked item and is not this release blocker.
-
-The current completion sequence is: freeze and commit the single-line remediation; build, sign, notarize, staple, and Gatekeeper-check exactly one replacement zip; run signed-App install dogfood and one fresh automated six-stage proof; clean up and derive the redacted manifest; obtain `relaykit_test` adjudication; obtain `relaykit_cr` review; then make the release decision. No second remediation cycle is available. A real-user beta starts only after all gates pass.
+Cleanup passed: the App, bundled gateway, and isolated Desktop stopped; `19777` and `18787` were free; and the global non-content guards passed unchanged. No retry, remediation, or replacement artifact is authorized. Signed Beta v0.1.0 remains incomplete and blocked, the public GitHub Release remains unpublished, and the updater is not implemented.
 
 Current product scope:
 
@@ -209,20 +203,15 @@ Historical Desktop route evidence:
 - `markdown_render_verified`, `tool_gui_verified`, and `raw_protocol_absent` are true. No bare `<function_calls>`, `<invoke>`, `<parameter>`, `<tool_call>`, raw XML, or unresolved tool JSON was accepted.
 - The completed run used the current Desktop-bundled Codex CLI, did not use mock OK, old usage, CLI fallback, or manually edited evidence, and released both protected ports.
 
-Current Signed Beta completion sequence:
+Current Signed Beta blocked state:
 
-1. Preserve the fixed SHA-256 `bd229bf98caf22bce9b0e1e9a763ad0faf8c060b713ee984e0b7af276a46da8c` artifact without repeating package, signing, notarization, or stapling work.
-2. Run one fresh six-stage proof against the current package.
-3. Clean up the proof session and generate the redacted manifest.
-4. Send the unchanged evidence to `relaykit_test` for adjudication.
-5. After Test, send the unchanged result to `relaykit_cr` for review.
-6. Make the release decision only after both gates.
+Preserve the failed current-run evidence for artifact SHA-256 `c481ae5607c813f8f907f3c7b82252e7c709f7e10b77b1176688215736f720f3`. Do not retry the route gate, start remediation, or create a replacement artifact without new Planner authorization. This run provides no route PASS or release decision.
 
 Versioning, install/uninstall instructions, privacy docs, updater policy, and the signed package script are reserved in `docs/release-readiness.md`, `docs/update-policy.md`, and `docs/updater-readiness.md`.
 
 ## Post-Gate User Feedback Loop
 
-The next milestone is the six-stage current-package proof, then `relaykit_test`, then `relaykit_cr`, and only then a release decision. If those gates approve the candidate, begin the small real-user beta using:
+The six-stage current-package proof is complete as a failed gate. No real-user beta begins from this candidate; any further gate work requires a new bounded authorization. If a future candidate passes all gates, use:
 
 - `docs/beta-test-guide.md` for install, provider setup, local verification, and cleanup.
 - `docs/feedback-template.md` for structured feedback without asking users to share keys, tokens, provider base URLs, or raw private logs.
