@@ -1898,8 +1898,8 @@ custom_tool_output="${tmp_dir}/custom-tool-evidence.json"
 mkdir -p "${custom_tool_rollout_dir}"
 cat >"${custom_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
 {"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
-{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-custom","input":"printf '${tool_marker}\\\\n'; pwd"}}
-{"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-custom","output":"Process exited with code 0\nFinal output:\n${tool_marker}\n/tmp/relaykit-fixture\n"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-custom","input":"const result = await tools.exec_command({cmd:\"printf '${tool_marker}\\\\\\\\n'; pwd\"}); text(result.output);"}}
+{"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-custom","output":[{"type":"input_text","text":"Script completed successfully"},{"type":"input_text","text":"Process exited with code 0\nFinal output:\n${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
 JSONL
 "${PROOF_SCRIPT}" --test-tool-evidence "${custom_tool_codex_home}" "${custom_tool_output}" 0 gpt-fixture-official "${tool_marker}"
 jq -e '

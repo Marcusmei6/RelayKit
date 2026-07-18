@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -916,16 +917,20 @@ printf '%s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
 	defer currentConn.Close()
 	writeTestWebSocketText(t, currentConn, string(currentRequest))
 	currentFirst := readTestWebSocketUntil(t, currentReader, "response.completed")
+	currentProgram := `const result = await tools.exec_command({cmd:"printf RELAYKIT_V1_TOOL; pwd"}); text(result.output);`
 	if !strings.Contains(currentFirst, `"type":"custom_tool_call"`) ||
 		!strings.Contains(currentFirst, `"name":"exec"`) ||
-		!strings.Contains(currentFirst, `"input":"printf RELAYKIT_V1_TOOL; pwd"`) ||
+		!strings.Contains(currentFirst, `"input":`+strconv.Quote(currentProgram)) ||
 		!strings.Contains(currentFirst, `"type":"response.custom_tool_call_input.done"`) {
 		t.Fatalf("current Codex V1 first response = %s", currentFirst)
 	}
 	currentCallID := responseCallID(t, currentFirst)
 	currentOutputInput := append(append([]map[string]any{}, currentInput...),
-		map[string]any{"type": "custom_tool_call", "call_id": currentCallID, "name": "exec", "input": v1Command},
-		map[string]any{"type": "custom_tool_call_output", "call_id": currentCallID, "output": "RELAYKIT_V1_TOOL\n/workspace"},
+		map[string]any{"type": "custom_tool_call", "call_id": currentCallID, "name": "exec", "input": currentProgram},
+		map[string]any{"type": "custom_tool_call_output", "call_id": currentCallID, "output": []map[string]any{
+			{"type": "input_text", "text": "Script completed successfully"},
+			{"type": "input_text", "text": "RELAYKIT_V1_TOOL\n/workspace"},
+		}},
 	)
 	currentOutputRequest, err := json.Marshal(map[string]any{"model": "gpt-5.5", "input": currentOutputInput})
 	if err != nil {
@@ -1204,6 +1209,7 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 	const exact = "Use the shell tool to run exactly: " + command + "\nThen report only the exact tool output."
 	const exactV1 = `RELAYKIT_EXEC_COMMAND_V1 {"cmd":"printf explicit"}`
 	const arguments = `{"cmd":"printf explicit"}`
+	const currentProgram = `const result = await tools.exec_command({cmd:"printf explicit"}); text(result.output);`
 	additionalTools := map[string]any{
 		"type": "additional_tools", "role": "developer",
 		"tools": []map[string]any{{"type": "custom", "name": "exec"}, {"type": "function", "name": "wait"}},
@@ -1271,13 +1277,17 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 			additionalTools,
 			{"type": "message", "role": "developer", "content": "current tool metadata"},
 			{"type": "message", "role": "user", "content": exactV1},
-			{"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": command},
-			{"type": "custom_tool_call_output", "call_id": "call_1", "output": "done"},
+			{"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": currentProgram},
+			{"type": "custom_tool_call_output", "call_id": "call_1", "output": []map[string]any{
+				{"type": "input_text", "text": "Script completed successfully"},
+				{"type": "input_text", "text": "done"},
+			}},
 		}, nil, "", true, false)
 	})
 	for name, call := range map[string]map[string]any{
 		"wrong custom tool name":  {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": command},
 		"wrong custom tool input": {"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": "different"},
+		"raw shell input":         {"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": command},
 		"wrong custom tool type":  {"type": "function_call", "call_id": "call_1", "name": "exec", "arguments": arguments},
 	} {
 		t.Run(name+" fails closed", func(t *testing.T) {

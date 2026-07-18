@@ -3378,6 +3378,31 @@ def parse_ts(value):
     except ValueError:
         return 0.0
 
+def custom_exec_command(value):
+    if not isinstance(value, str):
+        return ""
+    prefix = "const result = await tools.exec_command({cmd:"
+    suffix = "}); text(result.output);"
+    if not value.startswith(prefix) or not value.endswith(suffix):
+        return ""
+    try:
+        command = json.loads(value[len(prefix):-len(suffix)])
+    except json.JSONDecodeError:
+        return ""
+    return command if isinstance(command, str) else ""
+
+def tool_output_text(value):
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list) or not value:
+        return ""
+    texts = []
+    for item in value:
+        if not isinstance(item, dict) or item.get("type") != "input_text" or not isinstance(item.get("text"), str):
+            return ""
+        texts.append(item["text"])
+    return "\n".join(texts)
+
 for path in session_paths:
     current_model = ""
     try:
@@ -3422,7 +3447,7 @@ for path in session_paths:
             continue
         if item_type in {"function_call", "custom_tool_call"}:
             if item_type == "custom_tool_call":
-                command = str(item.get("input") or "")
+                command = custom_exec_command(item.get("input"))
             else:
                 arguments = item.get("arguments")
                 try:
@@ -3446,7 +3471,7 @@ for path in session_paths:
             })
         else:
             output = item.get("output")
-            output_text = output if isinstance(output, str) else json.dumps(output, separators=(",", ":"), sort_keys=True) if output is not None else ""
+            output_text = tool_output_text(output)
             output_lines = output_text.splitlines()
             marker_found = any(line.strip() == marker for line in output_lines)
             process_exited_zero = "Process exited with code 0" in output_text

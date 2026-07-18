@@ -1848,7 +1848,11 @@ func validateExplicitExecCommandRoundTrip(command string, call, output responses
 		}
 		outputType = "function_call_output"
 	case officialExecCommandCustom:
-		if call.Type != "custom_tool_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec" || call.Input != command {
+		expectedInput, err := codeModeExecProgram(command)
+		if err != nil {
+			return err
+		}
+		if call.Type != "custom_tool_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec" || call.Input != expectedInput {
 			return fmt.Errorf("invalid explicit shell custom tool call")
 		}
 		outputType = "custom_tool_call_output"
@@ -1858,16 +1862,18 @@ func validateExplicitExecCommandRoundTrip(command string, call, output responses
 	if output.Type != outputType || strings.TrimSpace(output.CallID) == "" || output.CallID != call.CallID {
 		return fmt.Errorf("invalid explicit shell tool output")
 	}
-	if output.Output != nil && output.Content != nil {
+	if rawJSONPresent(output.Output) && rawJSONPresent(output.Content) {
 		return fmt.Errorf("ambiguous explicit shell function output")
 	}
 	var result string
-	if output.Output != nil {
-		result = *output.Output
-	} else if output.Content != nil {
-		if json.Unmarshal(output.Content, &result) != nil {
-			return fmt.Errorf("invalid explicit shell function output content")
-		}
+	var err error
+	if rawJSONPresent(output.Output) {
+		result, err = responseToolOutputText(output.Output)
+	} else if rawJSONPresent(output.Content) {
+		result, err = responseToolOutputText(output.Content)
+	}
+	if err != nil {
+		return fmt.Errorf("invalid explicit shell function output content")
 	}
 	if strings.TrimSpace(result) == "" {
 		return fmt.Errorf("empty explicit shell function output")
@@ -1969,13 +1975,17 @@ func explicitExecCommandResponse(command, requestedModel string, capability offi
 			"arguments": string(arguments),
 		}
 	case officialExecCommandCustom:
+		input, err := codeModeExecProgram(command)
+		if err != nil {
+			return nil, err
+		}
 		output = map[string]any{
 			"type":    "custom_tool_call",
 			"id":      callID,
 			"status":  "completed",
 			"call_id": callID,
 			"name":    "exec",
-			"input":   command,
+			"input":   input,
 		}
 	default:
 		return nil, fmt.Errorf("explicit shell tool capability is unavailable")
@@ -1989,6 +1999,14 @@ func explicitExecCommandResponse(command, requestedModel string, capability offi
 		"output":      []map[string]any{output},
 		"usage":       responsesUsage(nil),
 	}, nil
+}
+
+func codeModeExecProgram(command string) (string, error) {
+	encoded, err := json.Marshal(command)
+	if err != nil {
+		return "", err
+	}
+	return "const result = await tools.exec_command({cmd:" + string(encoded) + "}); text(result.output);", nil
 }
 
 func codexToolDecisionPrompt(messages []chatMessage, tools []responsesTool) (string, error) {
@@ -2253,18 +2271,19 @@ type responsesInputItem struct {
 	Name      string          `json:"name"`
 	Arguments string          `json:"arguments"`
 	Input     string          `json:"input"`
-	Output    *string         `json:"output"`
+	Output    json.RawMessage `json:"output"`
 }
 
 func (i responsesInputItem) chatMessage() (chatMessage, bool) {
 	if i.Type == "function_call_output" {
 		output := ""
-		if i.Output != nil {
-			output = strings.TrimSpace(*i.Output)
+		if rawJSONPresent(i.Output) {
+			if text, err := responseToolOutputText(i.Output); err == nil {
+				output = strings.TrimSpace(text)
+			}
 		}
 		if output == "" {
-			var text string
-			if err := json.Unmarshal(i.Content, &text); err == nil {
+			if text, err := responseToolOutputText(i.Content); err == nil {
 				output = strings.TrimSpace(text)
 			}
 		}
@@ -2304,6 +2323,33 @@ func (i responsesInputItem) chatMessage() (chatMessage, bool) {
 		return chatMessage{}, false
 	}
 	return chatMessage{Role: role, Content: strings.Join(texts, "\n")}, true
+}
+
+func rawJSONPresent(value json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(value)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+}
+
+func responseToolOutputText(value json.RawMessage) (string, error) {
+	if !rawJSONPresent(value) {
+		return "", nil
+	}
+	var text string
+	if err := json.Unmarshal(value, &text); err == nil {
+		return text, nil
+	}
+	var parts []responsesInputContentPart
+	if err := json.Unmarshal(value, &parts); err != nil || len(parts) == 0 {
+		return "", fmt.Errorf("tool output must be text or input_text items")
+	}
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part.Type != "input_text" || part.Text == "" {
+			return "", fmt.Errorf("tool output contains an unsupported content item")
+		}
+		texts = append(texts, part.Text)
+	}
+	return strings.Join(texts, "\n"), nil
 }
 
 type responsesInputContentPart struct {
