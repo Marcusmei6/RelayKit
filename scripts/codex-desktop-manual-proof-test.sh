@@ -853,6 +853,12 @@ expect_failure "assisted launcher accepted a preflight allowance below 60" env \
 expect_failure "assisted launcher accepted a non-integer preflight allowance" env \
   RELAYKIT_ASSISTED_PREFLIGHT_ALLOWANCE_SECONDS=invalid \
   "${PROOF_SCRIPT}" --test-assisted-launch-deadline "${assisted_scenario}"
+assisted_help="$(${PROOF_SCRIPT} --help 2>&1 || true)"
+grep -Fq 'scenario-directory/assisted-state/state.json' <<<"${assisted_help}" ||
+  fail "assisted help does not identify the state file inside its dedicated directory"
+if grep -Fq '.assisted-state.json' <<<"${assisted_help}"; then
+  fail "assisted help still advertises the removed single-file state path"
+fi
 
 jq '.stages[4:6] |= reverse' "${assisted_scenario}" >"${assisted_dir}/bad-order.json"
 chmod 600 "${assisted_dir}/bad-order.json"
@@ -1021,6 +1027,13 @@ expect_typed_failure "assisted_gateway_binding_changed" \
   "assisted gateway drift did not fail typed after exactly one cleanup" \
   "${PROOF_SCRIPT}" --test-assisted-binding-drift-cleanup "${assisted_state}" "${assisted_state_dir}/drifted-gateway-current.json" "${drift_cleanup_counter}"
 test "$(cat "${drift_cleanup_counter}")" = "1" || fail "assisted binding drift cleanup ran more than once"
+binding_poll_counter="${assisted_state_dir}/binding-poll-cleanup-count"
+test "$("${PROOF_SCRIPT}" --test-assisted-binding-poll success "${binding_poll_counter}")" = \
+  "attempts=2 verifications=3" || fail "assisted stage-six binding poll did not guard every iteration and pre-accept"
+expect_typed_failure "assisted_gateway_binding_changed" \
+  "assisted stage-six binding poll drift was not typed and cleaned exactly once" \
+  "${PROOF_SCRIPT}" --test-assisted-binding-poll drift "${binding_poll_counter}"
+test "$(cat "${binding_poll_counter}")" = "1" || fail "assisted binding-poll drift cleanup did not run exactly once"
 assisted_final_stages="${assisted_state_dir}/all-six-stages.json"
 jq --arg run_id "assisted-fixture-run" '. + [{
   "id":"official-tool","model_id":"fixture/official","evidence_role":"official-tool","expect":"tool",
@@ -1076,10 +1089,14 @@ grep -Fq 'resume-auto-assisted)' "${PROOF_SCRIPT}" || fail "assisted resume comm
 grep -Fq -- '--assisted-supervisor)' "${PROOF_SCRIPT}" || fail "assisted background supervisor command is missing"
 grep -Fq 'assisted_six_stage)' "${PROOF_SCRIPT}" || fail "assisted final profile branch is missing"
 test "$("${PROOF_SCRIPT}" --test-automated-profile "${assisted_dir}/normalized.json" "${assisted_provider_model}")" = "assisted_six_stage"
-test "$("${PROOF_SCRIPT}" --test-assisted-canonical-status complete automated_ax 1 assisted_six_stage)" = \
-  "automated_first_five_manual_official_tool_complete" || fail "assisted proof did not emit its only canonical desktop_gui_route_proof"
-expect_failure "assisted canonical status accepted zero human intervention" \
-  "${PROOF_SCRIPT}" --test-assisted-canonical-status complete automated_ax 0 assisted_six_stage
+if grep -Eq '^assisted_canonical_route_status\(\)|--test-assisted-canonical-status\)' "${PROOF_SCRIPT}"; then
+  fail "assisted canonical status still has a disconnected helper or test hook"
+fi
+write_evidence_body="$(sed -n '/^write_evidence() {/,/^}/p' "${PROOF_SCRIPT}")"
+test "$(rg -c 'automated_first_five_manual_official_tool_complete' <<<"${write_evidence_body}")" -eq 1 ||
+  fail "production write_evidence must contain exactly one assisted canonical classification"
+grep -Fq '$human_intervention_count == 1 and $automated_profile == "assisted_six_stage" then "automated_first_five_manual_official_tool_complete"' \
+  <<<"${write_evidence_body}" || fail "production write_evidence does not bind the assisted canonical classification"
 grep -Fq '"${AUTOMATED_PROFILE}" == "assisted_six_stage" && "${ASSISTED_MODE}" != "true"' "${PROOF_SCRIPT}" ||
   fail "ordinary run-auto no longer preserves six-stage custom-scenario compatibility"
 launcher_body="$(sed -n '/^launch_auto_assisted() {/,/^}/p' "${PROOF_SCRIPT}")"
@@ -1601,6 +1618,19 @@ test "$(rg -c '"\$\{AX_DRIVER_BINARY\}" submit' <<<"${auto_body}")" -eq 1 ||
 if grep -Fq '"${AX_DRIVER_BINARY}" submit' <<<"${auto_wait_body}${submitted_binding_body}"; then
   fail "submitted observation paths must never resend or reopen the picker"
 fi
+test "$(rg -c 'verify_assisted_live_bindings' <<<"${submitted_binding_body}")" -eq 2 ||
+  fail "stage-six rollout binding must guard every poll and the acceptance edge"
+if grep -Fq 'SECONDS + timeout_seconds' <<<"${submitted_binding_body}${auto_wait_body}"; then
+  fail "binding and observation must not create independent stage deadlines"
+fi
+test "$(rg -c 'stage_deadline=\$\(\(SECONDS \+ stage_timeout\)\)' <<<"${auto_body}")" -eq 1 ||
+  fail "each stage must create exactly one absolute deadline"
+grep -Fq '"${stage_deadline}" "${evidence_role}"' <<<"${auto_body}" ||
+  fail "rollout binding must receive the stage absolute deadline and role"
+grep -Fq '"${stage_deadline}" || wait_status=$?' <<<"${auto_body}" ||
+  fail "stage observation must receive the same absolute deadline"
+grep -Fq '7) :' <<<"${auto_body}" ||
+  fail "stage-six binding drift must preserve its typed assisted failure"
 submit_line="$(grep -n '"${AX_DRIVER_BINARY}" submit' <<<"${auto_body}" | cut -d: -f1)"
 submitted_binding_line="$(grep -n 'wait_for_submitted_rollout_binding' <<<"${auto_body}" | cut -d: -f1)"
 assistant_render_wait_line="$(grep -n 'wait_for_automated_stage' <<<"${auto_body}" | cut -d: -f1)"

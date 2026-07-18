@@ -114,8 +114,8 @@ run-auto     Run the same isolated proof with the PID/window-bound AX driver.
              It never waits for user input and fails closed on missing setup.
 run-auto-assisted
              Run five bound stages in a persistent supervisor, then pause for
-             one manual official-tool submission. The state path is the
-             scenario path plus .assisted-state.json.
+             one manual official-tool submission. Resume from the owner-only
+             scenario-directory/assisted-state/state.json state file.
 resume-auto-assisted
              Validate the paused run and atomically signal observation only.
 --setup-only Build/setup/verify isolated config and stop helper processes.
@@ -1713,16 +1713,6 @@ desktop_gui_tool_ui_review_status() {
   fi
 }
 
-assisted_canonical_route_status() {
-  local route_status="$1"
-  local input_mode="$2"
-  local human_intervention_count="$3"
-  local profile="$4"
-  [[ "${route_status}" == "complete" && "${input_mode}" == "automated_ax" &&
-     "${human_intervention_count}" == "1" && "${profile}" == "assisted_six_stage" ]] || return 1
-  printf 'automated_first_five_manual_official_tool_complete\n'
-}
-
 fresh_stage_usage() {
   local usage_file="$1"
   local baseline_count="$2"
@@ -1948,11 +1938,19 @@ wait_for_submitted_rollout_binding() {
   local expected_model="$3"
   local marker="$4"
   local output="$5"
-  local timeout_seconds="$6"
-  local deadline=$((SECONDS + timeout_seconds))
+  local deadline="$6"
+  local evidence_role="${7:-}"
   local binding_status
+  [[ "${deadline}" =~ ^[0-9]+$ ]] || return 3
   while (( SECONDS < deadline )); do
+    if [[ "${ASSISTED_MODE}" == "true" && "${evidence_role}" == "official-tool" ]]; then
+      verify_assisted_live_bindings || return 7
+    fi
     if write_automated_rollout_binding "${codex_home}" "${since_epoch}" "${expected_model}" "${marker}" "${output}"; then
+      (( SECONDS < deadline )) || return 3
+      if [[ "${ASSISTED_MODE}" == "true" && "${evidence_role}" == "official-tool" ]]; then
+        verify_assisted_live_bindings || return 7
+      fi
       return 0
     fi
     binding_status="$(jq -r '.binding_status // "rollout_not_found"' "${output}" 2>/dev/null || printf 'rollout_not_found')"
@@ -4831,11 +4829,11 @@ wait_for_automated_stage() {
   local expectation="$4"
   local marker="$5"
   local since_epoch="$6"
-  local timeout_seconds="$7"
+  local deadline="$7"
   local binding_file="${RUN_DIR}/automated-rollout-${evidence_role}.json"
-  local deadline=$((SECONDS + timeout_seconds))
   local bound_model usage_status driver_code
   local nonmatching_completed_seen=false
+  [[ "${deadline}" =~ ^[0-9]+$ ]] || return 3
   bound_model="$(jq -er '.model | select(type == "string" and length > 0)' "${binding_file}")" || return 6
   while (( SECONDS < deadline )); do
     if [[ "${ASSISTED_MODE}" == "true" && "${evidence_role}" == "official-tool" ]]; then
@@ -4865,6 +4863,7 @@ wait_for_automated_stage() {
         continue
       fi
       if automated_stage_checkpoint_verified "${OUT}/usage-events.json" "${baseline_count}" "${model_id}" "${evidence_role}" "${expectation}" "${binding_file}"; then
+        (( SECONDS < deadline )) || return 3
         if [[ "${ASSISTED_MODE}" == "true" && "${evidence_role}" == "official-tool" ]]; then
           verify_assisted_live_bindings || return 7
         fi
@@ -5184,7 +5183,7 @@ run_automated_proof() {
   local catalog_labels="${AUTOMATED_CATALOG_LABELS_FILE}"
   local overall_since stage_timeout desktop_pid expected_stage_count standard_route_status gpt55_marker gpt56_marker
   local stage index=0 stage_id model_id model_label query_source query_copy response_marker evidence_role expectation
-  local usage_baseline since_epoch submission_state="not_submitted" wait_status bind_status driver_code query_sha256
+  local usage_baseline since_epoch submission_state="not_submitted" wait_status bind_status driver_code query_sha256 stage_deadline
   local resolved_scenario_tmp resolution_error_file resolution_error assisted_final_current
 
   [[ "${AX_DRIVER_SOURCE}" == "${driver_source}" ]] || {
@@ -5393,11 +5392,14 @@ run_automated_proof() {
     fi
     AUTO_ERROR_CODE="stage_evidence_write_failed"
     write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "submitted" "${submission_state}" "${usage_baseline}"
+    stage_deadline=$((SECONDS + stage_timeout))
     bind_status=0
-    wait_for_submitted_rollout_binding "${CODEX_HOME_DIR}" "${since_epoch}" "${model_id}" "${response_marker}" "${RUN_DIR}/automated-rollout-${evidence_role}.json" "${stage_timeout}" || bind_status=$?
+    wait_for_submitted_rollout_binding "${CODEX_HOME_DIR}" "${since_epoch}" "${model_id}" "${response_marker}" "${RUN_DIR}/automated-rollout-${evidence_role}.json" "${stage_deadline}" "${evidence_role}" || bind_status=$?
     if [[ "${bind_status}" -ne 0 ]]; then
-      resolution_error="$(jq -r '.binding_status // "rollout_not_found"' "${RUN_DIR}/automated-rollout-${evidence_role}.json" 2>/dev/null || printf 'rollout_not_found')"
-      AUTO_ERROR_CODE="submitted_${resolution_error}"
+      if [[ "${bind_status}" -ne 7 ]]; then
+        resolution_error="$(jq -r '.binding_status // "rollout_not_found"' "${RUN_DIR}/automated-rollout-${evidence_role}.json" 2>/dev/null || printf 'rollout_not_found')"
+        AUTO_ERROR_CODE="submitted_${resolution_error}"
+      fi
       write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "${AUTO_ERROR_CODE}" || true
       return 1
     fi
@@ -5411,7 +5413,7 @@ run_automated_proof() {
       printf '%s\n' "${since_epoch}" >"${TOOL_SINCE_FILE}" || { AUTO_ERROR_CODE="tool_marker_write_failed"; return 1; }
     fi
     wait_status=0
-    wait_for_automated_stage "${usage_baseline}" "${model_id}" "${evidence_role}" "${expectation}" "${response_marker}" "${since_epoch}" "${stage_timeout}" || wait_status=$?
+    wait_for_automated_stage "${usage_baseline}" "${model_id}" "${evidence_role}" "${expectation}" "${response_marker}" "${since_epoch}" "${stage_deadline}" || wait_status=$?
     if [[ "${wait_status}" -ne 0 ]]; then
       case "${wait_status}" in
         5) AUTO_ERROR_CODE="submitted_model_usage_mismatch" ;;
@@ -5912,13 +5914,53 @@ EOF
       exit 1
     fi
     ;;
+  --test-assisted-binding-poll)
+    [[ ( "${2:-}" == "success" || "${2:-}" == "drift" ) && -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    TEST_ASSISTED_BINDING_MODE="$2"
+    ASSISTED_CLEANUP_COUNTER_PATH="$3"
+    TEST_ASSISTED_BINDING_ATTEMPTS=0
+    TEST_ASSISTED_BINDING_VERIFICATIONS=0
+    write_automated_rollout_binding() {
+      TEST_ASSISTED_BINDING_ATTEMPTS=$((TEST_ASSISTED_BINDING_ATTEMPTS + 1))
+      if (( TEST_ASSISTED_BINDING_ATTEMPTS >= 2 )); then
+        printf '{"binding_status":"bound"}\n' >"$5"
+        return 0
+      fi
+      printf '{"binding_status":"rollout_not_found"}\n' >"$5"
+      return 1
+    }
+    verify_assisted_live_bindings() {
+      TEST_ASSISTED_BINDING_VERIFICATIONS=$((TEST_ASSISTED_BINDING_VERIFICATIONS + 1))
+      if [[ "${TEST_ASSISTED_BINDING_MODE}" == "drift" && "${TEST_ASSISTED_BINDING_VERIFICATIONS}" -eq 2 ]]; then
+        AUTO_ERROR_CODE="assisted_gateway_binding_changed"
+        return 1
+      fi
+    }
+    cleanup_processes() {
+      local count=0
+      [[ -f "${ASSISTED_CLEANUP_COUNTER_PATH}" ]] && count="$(<"${ASSISTED_CLEANUP_COUNTER_PATH}")"
+      printf '%s\n' "$((count + 1))" >"${ASSISTED_CLEANUP_COUNTER_PATH}"
+    }
+    ASSISTED_MODE=true
+    ASSISTED_CLEANUP_DONE=false
+    TEST_ASSISTED_BINDING_STATUS=0
+    TEST_ASSISTED_BINDING_OUTPUT="${ASSISTED_CLEANUP_COUNTER_PATH}.binding"
+    wait_for_submitted_rollout_binding "fixture" 0 "fixture/official" "RELAYKIT_FIXTURE" \
+      "${TEST_ASSISTED_BINDING_OUTPUT}" "$((SECONDS + 5))" "official-tool" || TEST_ASSISTED_BINDING_STATUS=$?
+    rm -f "${TEST_ASSISTED_BINDING_OUTPUT}"
+    if [[ "${TEST_ASSISTED_BINDING_STATUS}" -eq 0 ]]; then
+      printf 'attempts=%s verifications=%s\n' \
+        "${TEST_ASSISTED_BINDING_ATTEMPTS}" "${TEST_ASSISTED_BINDING_VERIFICATIONS}"
+    else
+      cleanup_assisted_once
+      cleanup_assisted_once
+      printf '%s\n' "${AUTO_ERROR_CODE}" >&2
+      exit 1
+    fi
+    ;;
   --test-assisted-complete)
     [[ -n "${7:-}" && -z "${8:-}" ]] || exit 2
     assisted_scenario_complete "$2" "$3" "$4" "$5" "$6" "$7"
-    ;;
-  --test-assisted-canonical-status)
-    [[ -n "${5:-}" && -z "${6:-}" ]] || exit 2
-    assisted_canonical_route_status "$2" "$3" "$4" "$5"
     ;;
   --test-assisted-launch-fixture)
     [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
