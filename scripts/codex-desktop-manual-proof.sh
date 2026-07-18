@@ -1203,12 +1203,52 @@ submitted_model_usage_matches() {
   local usage_file="$1"
   local baseline_count="$2"
   local binding_file="$3"
-  local usage_json usage_model bound_model
+  local usage_json bound_model matching_count
   usage_json="$(fresh_completed_stage_usage "${usage_file}" "${baseline_count}")" || return $?
-  usage_model="$(jq -r '.model // empty' <<<"${usage_json}")"
   bound_model="$(jq -er '.model | select(type == "string" and length > 0)' "${binding_file}")" || return 6
-  [[ -n "${usage_model}" && "${usage_model}" == "${bound_model}" ]] || return 5
-  printf '%s\n' "${usage_json}"
+  matching_count="$(jq -er --argjson baseline "${baseline_count}" --arg model "${bound_model}" '
+    [.[$baseline:][] | select((.model // "") == $model and (.status // "") == "completed" and (.http_status // 0) == 200)] | length
+  ' "${usage_file}")" || return 4
+  (( matching_count > 0 )) || return 5
+  jq -n --arg model "${bound_model}" --argjson event_count "${matching_count}" '{
+    model: $model,
+    event_count: $event_count,
+    status: "completed",
+    http_status: 200
+  }'
+}
+
+submitted_model_usage_wait_outcome() {
+  local usage_file="$1"
+  local baseline_count="$2"
+  local binding_file="$3"
+  local deadline_state="$4"
+  local usage_status=0
+  [[ "${deadline_state}" == "before-deadline" || "${deadline_state}" == "deadline" ]] || return 2
+  submitted_model_usage_matches "${usage_file}" "${baseline_count}" "${binding_file}" >/dev/null || usage_status=$?
+  case "${usage_status}" in
+    0) printf 'complete\n' ;;
+    5)
+      if [[ "${deadline_state}" == "before-deadline" ]]; then
+        printf 'pending\n'
+      else
+        printf 'submitted_model_usage_mismatch\n' >&2
+        return 5
+      fi
+      ;;
+    6)
+      printf 'submitted_rollout_binding_changed\n' >&2
+      return 6
+      ;;
+    *)
+      if [[ "${deadline_state}" == "before-deadline" ]]; then
+        printf 'pending\n'
+      else
+        printf 'automated_stage_timeout\n' >&2
+        return 3
+      fi
+      ;;
+  esac
 }
 
 wait_for_submitted_rollout_binding() {
@@ -3582,6 +3622,7 @@ wait_for_automated_stage() {
   local binding_file="${RUN_DIR}/automated-rollout-${evidence_role}.json"
   local deadline=$((SECONDS + timeout_seconds))
   local bound_model usage_status driver_code
+  local nonmatching_completed_seen=false
   bound_model="$(jq -er '.model | select(type == "string" and length > 0)' "${binding_file}")" || return 6
   while (( SECONDS < deadline )); do
     verify_desktop_window_identity || return 1
@@ -3592,7 +3633,7 @@ wait_for_automated_stage() {
     usage_status=0
     submitted_model_usage_matches "${OUT}/usage-events.json" "${baseline_count}" "${binding_file}" >"${RUN_DIR}/automated-stage-usage.json" 2>/dev/null || usage_status=$?
     if [[ "${usage_status}" -eq 5 ]]; then
-      return 5
+      nonmatching_completed_seen=true
     elif [[ "${usage_status}" -eq 6 ]]; then
       return 6
     elif [[ "${usage_status}" -eq 0 ]]; then
@@ -3622,6 +3663,10 @@ wait_for_automated_stage() {
     fi
     sleep 1
   done
+  if [[ "${nonmatching_completed_seen}" == "true" ]]; then
+    submitted_model_usage_wait_outcome "${OUT}/usage-events.json" "${baseline_count}" "${binding_file}" deadline >/dev/null
+    return $?
+  fi
   return 3
 }
 
@@ -4507,6 +4552,10 @@ EOF
   --test-submitted-model-usage)
     [[ -n "${4:-}" && -z "${5:-}" ]] || exit 2
     submitted_model_usage_matches "$2" "$3" "$4"
+    ;;
+  --test-submitted-model-usage-wait)
+    [[ -n "${5:-}" && -z "${6:-}" ]] || exit 2
+    submitted_model_usage_wait_outcome "$2" "$3" "$4" "$5"
     ;;
   --test-auto-rollout-binding)
     [[ -n "${6:-}" ]] || exit 2

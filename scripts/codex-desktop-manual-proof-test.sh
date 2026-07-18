@@ -1132,6 +1132,16 @@ JSON
 "${PROOF_SCRIPT}" --test-submitted-model-usage "${scenario_dir}/matching-submitted-usage.json" 1 "${scenario_dir}/binding.json" >"${scenario_dir}/matching-submitted-event.json"
 jq -e '.model == "public/model" and .event_count == 1' "${scenario_dir}/matching-submitted-event.json" >/dev/null
 
+cat >"${scenario_dir}/mixed-order-submitted-usage.json" <<'JSON'
+[
+  {"request_id":"old","model":"public/model","status":"completed","http_status":200},
+  {"request_id":"unrelated","provider_id":"openai","model":"other/official-model","status":"completed","http_status":200},
+  {"request_id":"expected","model":"public/model","status":"completed","http_status":200}
+]
+JSON
+"${PROOF_SCRIPT}" --test-submitted-model-usage "${scenario_dir}/mixed-order-submitted-usage.json" 1 "${scenario_dir}/binding.json" >"${scenario_dir}/mixed-order-submitted-event.json"
+jq -e '.model == "public/model" and .event_count == 1 and .status == "completed" and .http_status == 200' "${scenario_dir}/mixed-order-submitted-event.json" >/dev/null
+
 cat >"${scenario_dir}/mismatching-submitted-usage.json" <<'JSON'
 [
   {"request_id":"old","model":"public/model","status":"completed","http_status":200},
@@ -1140,6 +1150,9 @@ cat >"${scenario_dir}/mismatching-submitted-usage.json" <<'JSON'
 JSON
 expect_failure "usage model mismatch passed the bound rollout comparison" \
   "${PROOF_SCRIPT}" --test-submitted-model-usage "${scenario_dir}/mismatching-submitted-usage.json" 1 "${scenario_dir}/binding.json"
+test "$("${PROOF_SCRIPT}" --test-submitted-model-usage-wait "${scenario_dir}/mismatching-submitted-usage.json" 1 "${scenario_dir}/binding.json" before-deadline)" = "pending"
+expect_typed_failure "submitted_model_usage_mismatch" "nonmatching completed usage did not map to the exact deadline failure" \
+  "${PROOF_SCRIPT}" --test-submitted-model-usage-wait "${scenario_dir}/mismatching-submitted-usage.json" 1 "${scenario_dir}/binding.json" deadline
 
 cat >>"${binding_sessions}/rollout-auto.jsonl" <<'JSONL'
 {"timestamp":"2099-07-11T00:00:04Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with RELAYKIT_AUTO_BIND"}]}}
