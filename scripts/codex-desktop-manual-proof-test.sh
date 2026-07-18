@@ -504,6 +504,47 @@ expect_failure "global guard accepted changed notify line" env HOME="${global_ho
 
 echo "Manual proof global file guard test passed"
 
+assisted_guard_config="${global_home}/.codex/assisted-config.toml"
+assisted_guard_auth="${global_home}/.codex/assisted-auth.json"
+grep -Fq -- '--test-assisted-global-guard-digest)' "${PROOF_SCRIPT}" ||
+  fail "assisted opaque global guard digest fixture hook is missing"
+grep -Fq -- '--test-assisted-global-state-guard)' "${PROOF_SCRIPT}" ||
+  fail "assisted opaque global state guard fixture hook is missing"
+printf 'model = "fixture-a"\nnotify = ["opaque-fixture-a"]\n' >"${assisted_guard_config}"
+printf '{"fixture":"opaque-a"}\n' >"${assisted_guard_auth}"
+assisted_guard_before="$(${PROOF_SCRIPT} --test-assisted-global-guard-digest "${assisted_guard_config}" "${assisted_guard_auth}")"
+test "${assisted_guard_before}" = \
+  "$("${PROOF_SCRIPT}" --test-assisted-global-guard-digest "${assisted_guard_config}" "${assisted_guard_auth}")" ||
+  fail "assisted opaque global guard digest was not stable"
+"${PROOF_SCRIPT}" --test-assisted-global-state-guard \
+  "${assisted_guard_config}" "${assisted_guard_auth}" \
+  "$(file_signature "${assisted_guard_config}")" "$(file_signature "${assisted_guard_auth}")" \
+  "$(file_hash "${assisted_guard_config}")" "$(file_hash "${assisted_guard_auth}")"
+printf 'model = "fixture-b"\nnotify = ["opaque-fixture-b"]\n' >"${assisted_guard_config}"
+test "${assisted_guard_before}" != \
+  "$("${PROOF_SCRIPT}" --test-assisted-global-guard-digest "${assisted_guard_config}" "${assisted_guard_auth}")" ||
+  fail "assisted opaque global guard ignored a whole-file change"
+expect_failure "assisted opaque global guard accepted changed whole-file SHA" \
+  "${PROOF_SCRIPT}" --test-assisted-global-state-guard \
+  "${assisted_guard_config}" "${assisted_guard_auth}" \
+  "$(file_signature "${assisted_guard_config}")" "$(file_signature "${assisted_guard_auth}")" \
+  "$(printf 'stale-config-hash')" "$(file_hash "${assisted_guard_auth}")"
+assisted_guard_body="$(sed -n '/^current_global_guard_digest() {/,/^}/p' "${PROOF_SCRIPT}")"
+if grep -Eq 'notify_line_hash|grep |cat ' <<<"${assisted_guard_body}"; then
+  fail "assisted current global guard selectively parses global content"
+fi
+write_evidence_body="$(sed -n '/^write_evidence() {/,/^}/p' "${PROOF_SCRIPT}")"
+grep -Fq 'notify_hash_after="not_collected"' <<<"${write_evidence_body}" ||
+  fail "assisted evidence does not suppress selective notify collection"
+grep -Fq 'desktopproof_refs="null"' <<<"${write_evidence_body}" ||
+  fail "assisted evidence does not suppress DesktopProof content grep"
+grep -Fq 'then "not_collected" else ($notify_hash_before == $notify_hash_after) end' <<<"${write_evidence_body}" ||
+  fail "assisted evidence does not classify selective content as not collected"
+grep -Fq 'global_config_desktopproof_reference_present: $desktopproof_refs' <<<"${write_evidence_body}" ||
+  fail "assisted evidence does not encode selective DesktopProof content as null"
+
+echo "Manual proof assisted opaque global guard tests passed"
+
 sandbox_home="${tmp_dir}/sandbox-home"
 sandbox_profile="${tmp_dir}/desktop-proof.sb"
 isolated_write_path="${sandbox_home}/Library/Application Support/RelayKit/DesktopProof/isolated-home/probe"
@@ -1035,11 +1076,13 @@ expect_typed_failure "assisted_gateway_binding_changed" \
   "${PROOF_SCRIPT}" --test-assisted-binding-poll drift "${binding_poll_counter}"
 test "$(cat "${binding_poll_counter}")" = "1" || fail "assisted binding-poll drift cleanup did not run exactly once"
 assisted_final_stages="${assisted_state_dir}/all-six-stages.json"
-jq --arg run_id "assisted-fixture-run" '. + [{
+assisted_final_session="2099/07/10/rollout-official-tool.jsonl"
+assisted_final_session_sha="$(printf '%s' "${assisted_final_session}" | shasum -a 256 | awk '{print $1}')"
+jq --arg run_id "assisted-fixture-run" --arg session_file "${assisted_final_session}" --arg session_sha "${assisted_final_session_sha}" '. + [{
   "id":"official-tool","model_id":"fixture/official","evidence_role":"official-tool","expect":"tool",
   "state":"evidence_verified","submission_state":"submitted","submission_count":1,"usage_baseline":5,
   "run_id":$run_id,
-  "rollout_binding":{"proof_found":true,"candidate_count":1,"thread_id":"thread-6","model":"fixture/official","user_marker_count":1,"assistant_marker_count":1}
+  "rollout_binding":{"proof_found":true,"candidate_count":1,"thread_id":"thread-6","model":"fixture/official","user_marker_count":1,"assistant_marker_count":1,"session_file":$session_file,"session_binding_sha256":$session_sha}
 }]' "${assisted_ledger}" >"${assisted_final_stages}"
 chmod 600 "${assisted_final_stages}"
 assisted_usage="${assisted_state_dir}/usage.json"
@@ -1047,7 +1090,7 @@ jq -n '[range(0;5) | {model:"prior",status:"completed",http_status:200}] + [{mod
 chmod 600 "${assisted_usage}"
 assisted_tool="${assisted_state_dir}/tool.json"
 cat >"${assisted_tool}" <<JSON
-{"proof_found":true,"function_call_found":true,"function_call_output_found":true,"process_exited_zero":true,"matched_provider_tool_count":1,"matched_call_ids":["call-official"],"assisted_same_call_verified":true,"exact_shell_command_found":true,"marker_output_found":true,"pwd_output_found":true,"xml_leak_found":false,"raw_function_calls_found":false,"since_epoch":4099680000}
+{"proof_found":true,"function_call_found":true,"function_call_output_found":true,"process_exited_zero":true,"matched_provider_tool_count":1,"matched_call_ids":["call-official"],"assisted_same_call_verified":true,"exact_shell_command_found":true,"marker_output_found":true,"pwd_output_found":true,"xml_leak_found":false,"raw_function_calls_found":false,"since_epoch":4099680000,"exact_session_binding_verified":true,"session_binding_sha256":"${assisted_final_session_sha}"}
 JSON
 chmod 600 "${assisted_tool}"
 assisted_screenshots="${assisted_state_dir}/screenshots.json"
@@ -1067,6 +1110,10 @@ jq '.assisted_same_call_verified = false | .matched_call_ids = ["call-marker","c
 chmod 600 "${assisted_state_dir}/split-call-tool.json"
 expect_failure "assisted completion accepted split-call official-tool evidence" \
   "${PROOF_SCRIPT}" --test-assisted-complete "${assisted_state}" "${assisted_current}" "${assisted_final_stages}" "${assisted_usage}" "${assisted_state_dir}/split-call-tool.json" "${assisted_screenshots}"
+jq '.session_binding_sha256 = "stale-session-binding"' "${assisted_tool}" >"${assisted_state_dir}/stale-session-tool.json"
+chmod 600 "${assisted_state_dir}/stale-session-tool.json"
+expect_failure "assisted completion accepted a changed official-tool session binding" \
+  "${PROOF_SCRIPT}" --test-assisted-complete "${assisted_state}" "${assisted_current}" "${assisted_final_stages}" "${assisted_usage}" "${assisted_state_dir}/stale-session-tool.json" "${assisted_screenshots}"
 jq '.[0].visual_checks.raw_protocol_visible = true' "${assisted_screenshots}" >"${assisted_state_dir}/dirty-screenshots.json"
 chmod 600 "${assisted_state_dir}/dirty-screenshots.json"
 expect_failure "assisted completion accepted a dirty earlier official-tool screenshot" \
@@ -1459,7 +1506,13 @@ cat >"${binding_sessions}/rollout-auto.jsonl" <<'JSONL'
 {"timestamp":"2099-07-11T00:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with RELAYKIT_AUTO_BIND"}]}}
 JSONL
 "${PROOF_SCRIPT}" --test-auto-rollout-binding "${binding_home}" 0 "public/model" "RELAYKIT_AUTO_BIND" "${scenario_dir}/binding.json"
-jq -e '.proof_found == true and .thread_id == "thread-auto" and .model == "public/model" and .user_marker_found == true and .assistant_marker_found == false and .assistant_marker_count == 0' "${scenario_dir}/binding.json" >/dev/null
+binding_session_file="2099/07/11/rollout-auto.jsonl"
+binding_session_sha="$(printf '%s' "${binding_session_file}" | shasum -a 256 | awk '{print $1}')"
+jq -e --arg session_file "${binding_session_file}" --arg session_sha "${binding_session_sha}" '
+  .proof_found == true and .thread_id == "thread-auto" and .model == "public/model" and
+  .user_marker_found == true and .assistant_marker_found == false and .assistant_marker_count == 0 and
+  .session_file == $session_file and .session_binding_sha256 == $session_sha
+' "${scenario_dir}/binding.json" >/dev/null || fail "rollout binding did not record its redacted exact-session hash"
 "${PROOF_SCRIPT}" --test-submitted-model-selection "${scenario_dir}/binding.json" "public/model"
 expect_failure "submitted picker mismatch passed the typed selection comparison" \
   "${PROOF_SCRIPT}" --test-submitted-model-selection "${scenario_dir}/binding.json" "other/model"
@@ -1775,11 +1828,38 @@ cat >"${assisted_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
 {"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-exact","arguments":"{\"cmd\":\"printf '${tool_marker}\\\\\\\\n'; pwd\"}"}}
 {"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-exact","output":"Process exited with code 0\nFinal output:\n${tool_marker}\n/tmp/relaykit-fixture\n"}}
 JSONL
-"${PROOF_SCRIPT}" --test-tool-evidence "${assisted_tool_codex_home}" "${assisted_tool_output}" 0 gpt-fixture-official "${tool_marker}"
+assisted_tool_session="2099/07/10/rollout-current.jsonl"
+assisted_tool_session_sha="$(printf '%s' "${assisted_tool_session}" | shasum -a 256 | awk '{print $1}')"
+"${PROOF_SCRIPT}" --test-tool-evidence "${assisted_tool_codex_home}" "${assisted_tool_output}" 0 gpt-fixture-official "${tool_marker}" \
+  "${assisted_tool_session}" "${assisted_tool_session_sha}"
 jq -e '
   .assisted_same_call_verified == true and .matched_call_ids == ["call-exact"] and
-  .exact_shell_command_found == true and .marker_output_found == true and .pwd_output_found == true
+  .exact_shell_command_found == true and .marker_output_found == true and .pwd_output_found == true and
+  .exact_session_binding_verified == true and (.session_binding_sha256 | length) == 64 and
+  (.session_file? | not)
 ' "${assisted_tool_output}" >/dev/null || fail "assisted exact tool evidence did not bind command/output/pwd to one call_id"
+
+aggregate_tool_codex_home="${tmp_dir}/aggregate-tool-codex-home"
+aggregate_tool_rollout_dir="${aggregate_tool_codex_home}/sessions/2099/07/10"
+aggregate_tool_output="${tmp_dir}/aggregate-tool-evidence.json"
+mkdir -p "${aggregate_tool_rollout_dir}"
+cat >"${aggregate_tool_rollout_dir}/rollout-command.jsonl" <<JSONL
+{"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-aggregate","arguments":"{\"cmd\":\"printf '${tool_marker}\\\\\\\\n'; pwd\"}"}}
+JSONL
+cat >"${aggregate_tool_rollout_dir}/rollout-output.jsonl" <<JSONL
+{"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
+{"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-aggregate","output":"Process exited with code 0\nFinal output:\n${tool_marker}\n/tmp/relaykit-fixture\n"}}
+JSONL
+aggregate_tool_session="2099/07/10/rollout-command.jsonl"
+aggregate_tool_session_sha="$(printf '%s' "${aggregate_tool_session}" | shasum -a 256 | awk '{print $1}')"
+"${PROOF_SCRIPT}" --test-tool-evidence "${aggregate_tool_codex_home}" "${aggregate_tool_output}" 0 gpt-fixture-official "${tool_marker}" \
+  "${aggregate_tool_session}" "${aggregate_tool_session_sha}"
+jq -e --arg expected "${aggregate_tool_session_sha}" '
+  .proof_found == false and .assisted_same_call_verified == false and .matched_call_ids == [] and
+  .exact_session_binding_verified == true and .session_binding_sha256 == $expected
+' "${aggregate_tool_output}" >/dev/null ||
+  fail "assisted tool evidence aggregated command/output across sibling rollouts"
 
 split_tool_codex_home="${tmp_dir}/split-tool-codex-home"
 split_tool_rollout_dir="${split_tool_codex_home}/sessions/2099/07/10"

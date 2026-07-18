@@ -852,7 +852,11 @@ capture_global_state() {
   AUTH_BEFORE="$(file_signature "${GLOBAL_CODEX_AUTH}")"
   CONFIG_HASH_BEFORE="$(file_hash "${GLOBAL_CODEX_CONFIG}")"
   AUTH_HASH_BEFORE="$(file_hash "${GLOBAL_CODEX_AUTH}")"
-  NOTIFY_HASH_BEFORE="$(notify_line_hash "${GLOBAL_CODEX_CONFIG}")"
+  if [[ "${ASSISTED_MODE}" == "true" ]]; then
+    NOTIFY_HASH_BEFORE="not_collected"
+  else
+    NOTIFY_HASH_BEFORE="$(notify_line_hash "${GLOBAL_CODEX_CONFIG}")"
+  fi
   GLOBAL_GUARD_ARMED=true
 }
 
@@ -862,7 +866,10 @@ assert_global_state_unchanged() {
   auth_after="$(file_signature "${GLOBAL_CODEX_AUTH}")"
   config_hash_after="$(file_hash "${GLOBAL_CODEX_CONFIG}")"
   auth_hash_after="$(file_hash "${GLOBAL_CODEX_AUTH}")"
-  notify_hash_after="$(notify_line_hash "${GLOBAL_CODEX_CONFIG}")"
+  notify_hash_after="not_collected"
+  if [[ "${ASSISTED_MODE}" != "true" ]]; then
+    notify_hash_after="$(notify_line_hash "${GLOBAL_CODEX_CONFIG}")"
+  fi
 
   local changed=false
   if [[ "${CONFIG_BEFORE}" != "${config_after}" ]]; then
@@ -881,7 +888,7 @@ assert_global_state_unchanged() {
     echo "manual proof detected a global Codex auth content change" >&2
     changed=true
   fi
-  if [[ "${NOTIFY_HASH_BEFORE}" != "${notify_hash_after}" ]]; then
+  if [[ "${ASSISTED_MODE}" != "true" && "${NOTIFY_HASH_BEFORE}" != "${notify_hash_after}" ]]; then
     echo "manual proof detected a global Codex notify change" >&2
     changed=true
   fi
@@ -1643,7 +1650,7 @@ assisted_scenario_complete() {
   local usage_path="$4"
   local tool_evidence="$5"
   local screenshot_evidence="$6"
-  local usage_baseline model_id since_epoch
+  local usage_baseline model_id since_epoch session_binding_sha256
   verify_assisted_state_mac "${state_path}" || return 1
   assert_assisted_binding_snapshot "${state_path}" "${current_path}" "observing" || return 1
   secure_owned_file "${stages_path}" || return 1
@@ -1661,18 +1668,22 @@ assisted_scenario_complete() {
     .[5].expect == "tool" and .[5].submission_count == 1 and .[5].run_id == $state.run_id and
     .[5].model_id == $state.next_stage.model_id and .[5].usage_baseline == $state.next_stage.usage_baseline and
     .[5].rollout_binding.candidate_count == 1 and .[5].rollout_binding.model == $state.next_stage.model_id and
+    (.[5].rollout_binding.session_file | type) == "string" and (.[5].rollout_binding.session_file | length) > 0 and
+    (.[5].rollout_binding.session_binding_sha256 | test("^[0-9a-f]{64}$")) and
     (.[5].rollout_binding.thread_id as $final_thread |
       ([.[0:5][].rollout_binding.thread_id] | index($final_thread)) == null)
   ' "${stages_path}" >/dev/null || return 1
   usage_baseline="$(jq -er '.next_stage.usage_baseline' "${state_path}")" || return 1
   model_id="$(jq -er '.next_stage.model_id' "${state_path}")" || return 1
   since_epoch="$(jq -er '.next_stage.since_epoch' "${state_path}")" || return 1
+  session_binding_sha256="$(jq -er '.[5].rollout_binding.session_binding_sha256' "${stages_path}")" || return 1
   fresh_stage_usage "${usage_path}" "${usage_baseline}" "${model_id}" >/dev/null || return 1
-  jq -e --argjson since_epoch "${since_epoch}" '
+  jq -e --argjson since_epoch "${since_epoch}" --arg session_binding_sha256 "${session_binding_sha256}" '
     .proof_found == true and .function_call_found == true and
     .function_call_output_found == true and .process_exited_zero == true and
     .matched_provider_tool_count == 1 and (.matched_call_ids | length) == 1 and
     .assisted_same_call_verified == true and .since_epoch == $since_epoch and
+    .exact_session_binding_verified == true and .session_binding_sha256 == $session_binding_sha256 and
     .exact_shell_command_found == true and .marker_output_found == true and .pwd_output_found == true and
     .xml_leak_found == false and .raw_function_calls_found == false
   ' "${tool_evidence}" >/dev/null || return 1
@@ -1742,6 +1753,7 @@ write_automated_rollout_binding() {
   local marker="$4"
   local output="$5"
   python3 - "${codex_home}" "${since_epoch}" "${model_id}" "${marker}" "${output}" <<'PY'
+import hashlib
 import json
 import sys
 from datetime import datetime
@@ -1829,11 +1841,16 @@ for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
         })
 
 proof_found = len(candidates) == 1
+session_binding_sha256 = (
+    hashlib.sha256(candidates[0]["session_file"].encode()).hexdigest()
+    if proof_found else None
+)
 result = {
     "proof_found": proof_found,
     "candidate_count": len(candidates),
     "binding_status": "bound" if proof_found else ("rollout_not_found" if len(candidates) == 0 else "rollout_not_unique"),
     "session_file": candidates[0]["session_file"] if proof_found else None,
+    "session_binding_sha256": session_binding_sha256,
     "thread_id": candidates[0]["thread_id"] if proof_found else None,
     "model": candidates[0]["model"] if proof_found else None,
     "expected_model": expected_model,
@@ -1996,8 +2013,7 @@ current_global_guard_digest() {
     "$(file_signature "${GLOBAL_CODEX_CONFIG}")" \
     "$(file_signature "${GLOBAL_CODEX_AUTH}")" \
     "$(file_hash "${GLOBAL_CODEX_CONFIG}")" \
-    "$(file_hash "${GLOBAL_CODEX_AUTH}")" \
-    "$(notify_line_hash "${GLOBAL_CODEX_CONFIG}")" |
+    "$(file_hash "${GLOBAL_CODEX_AUTH}")" |
     /usr/bin/shasum -a 256 | awk '{print $1}'
 }
 
@@ -3297,21 +3313,54 @@ write_desktop_tool_evidence() {
   local since_epoch="$1"
   local provider_model="$2"
   local marker="$3"
-  python3 - "${CODEX_HOME_DIR}" "${DESKTOP_TOOL_EVIDENCE}" "${since_epoch}" "${provider_model}" "${marker}" <<'PY'
+  local exact_session_file="${4:-}"
+  local expected_session_binding_sha256="${5:-}"
+  python3 - "${CODEX_HOME_DIR}" "${DESKTOP_TOOL_EVIDENCE}" "${since_epoch}" "${provider_model}" "${marker}" \
+    "${exact_session_file}" "${expected_session_binding_sha256}" <<'PY'
+import hashlib
+import hmac
 import json
+import os
+import stat
 import sys
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sessions_root = Path(sys.argv[1]) / "sessions"
 out_path = Path(sys.argv[2])
 since_epoch = float(sys.argv[3] or 0)
 provider_model = sys.argv[4]
 marker = sys.argv[5]
+exact_session_file = sys.argv[6]
+expected_session_binding_sha256 = sys.argv[7]
 events = []
 xml_leak_records = []
 calls = {}
 outputs = {}
+
+session_binding_sha256 = None
+exact_session_binding_verified = False
+if exact_session_file:
+    relative = PurePosixPath(exact_session_file)
+    if relative.is_absolute() or ".." in relative.parts or relative.name != exact_session_file.split("/")[-1]:
+        raise SystemExit("assisted tool session binding is invalid")
+    if not relative.name.startswith("rollout-") or not relative.name.endswith(".jsonl"):
+        raise SystemExit("assisted tool session file is invalid")
+    sessions_root_resolved = sessions_root.resolve(strict=True)
+    path = sessions_root_resolved.joinpath(*relative.parts)
+    metadata = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise SystemExit("assisted tool session is not an owned regular file")
+    resolved_path = path.resolve(strict=True)
+    if not resolved_path.is_relative_to(sessions_root_resolved):
+        raise SystemExit("assisted tool session escaped isolated sessions")
+    session_binding_sha256 = hashlib.sha256(relative.as_posix().encode()).hexdigest()
+    if not hmac.compare_digest(session_binding_sha256, expected_session_binding_sha256):
+        raise SystemExit("assisted tool session binding hash changed")
+    exact_session_binding_verified = True
+    session_paths = [path]
+else:
+    session_paths = sorted(sessions_root.glob("**/rollout-*.jsonl"))
 
 def parse_ts(value):
     if not value:
@@ -3321,7 +3370,7 @@ def parse_ts(value):
     except ValueError:
         return 0.0
 
-for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
+for path in session_paths:
     current_model = ""
     try:
         lines = path.read_text(errors="replace").splitlines()
@@ -3439,6 +3488,8 @@ out_path.write_text(json.dumps({
     "matched_provider_tool_count": len(matched_ids),
     "matched_call_ids": assisted_matched_ids,
     "assisted_same_call_verified": len(assisted_matched_ids) == 1,
+    "exact_session_binding_verified": exact_session_binding_verified,
+    "session_binding_sha256": session_binding_sha256,
     "xml_leak_found": xml_leak_found,
     "raw_function_calls_found": xml_leak_found,
     "exact_shell_command_found": exact_shell_command_found,
@@ -3747,7 +3798,12 @@ write_evidence() {
   auth_after="$(file_signature "${GLOBAL_CODEX_AUTH}")"
   config_hash_after="$(file_hash "${GLOBAL_CODEX_CONFIG}")"
   auth_hash_after="$(file_hash "${GLOBAL_CODEX_AUTH}")"
-  notify_hash_after="$(notify_line_hash "${GLOBAL_CODEX_CONFIG}")"
+  notify_hash_after="not_collected"
+  if [[ "${ASSISTED_MODE}" != "true" ]]; then
+    notify_hash_after="$(notify_line_hash "${GLOBAL_CODEX_CONFIG}")"
+  else
+    notify_hash_before="not_collected"
+  fi
   source_snapshot_hash_after="$(source_snapshot_hash "${ROOT}")"
   harness_hash_after="$(file_hash "${ROOT}/scripts/codex-desktop-manual-proof.sh")"
   ax_driver_hash_after="$(file_hash "${AX_DRIVER_SOURCE}")"
@@ -3777,12 +3833,16 @@ write_evidence() {
   sandbox_status="$(cat "${DESKTOP_SANDBOX_STATUS_FILE}" 2>/dev/null || printf disabled)"
   app_screenshot_sha=""
   [[ -s "${APP_SCREENSHOT}" ]] && app_screenshot_sha="$(/usr/bin/shasum -a 256 "${APP_SCREENSHOT}" | awk '{print $1}')"
-  desktopproof_refs=false
-  if [[ -f "${GLOBAL_CODEX_CONFIG}" ]] && grep -Fq "${CODEX_HOME_DIR}/computer-use/" "${GLOBAL_CODEX_CONFIG}"; then
-    desktopproof_refs=true
+  desktopproof_refs="null"
+  if [[ "${ASSISTED_MODE}" != "true" ]]; then
+    desktopproof_refs=false
+    if [[ -f "${GLOBAL_CODEX_CONFIG}" ]] && grep -Fq "${CODEX_HOME_DIR}/computer-use/" "${GLOBAL_CODEX_CONFIG}"; then
+      desktopproof_refs=true
+    fi
   fi
   global_guard_passed=false
-  if [[ "${config_before}" == "${config_after}" && "${auth_before}" == "${auth_after}" && "${config_hash_before}" == "${config_hash_after}" && "${auth_hash_before}" == "${auth_hash_after}" && "${notify_hash_before}" == "${notify_hash_after}" ]]; then
+  if [[ "${config_before}" == "${config_after}" && "${auth_before}" == "${auth_after}" && "${config_hash_before}" == "${config_hash_after}" && "${auth_hash_before}" == "${auth_hash_after}" &&
+        ( "${ASSISTED_MODE}" == "true" || "${notify_hash_before}" == "${notify_hash_after}" ) ]]; then
     global_guard_passed=true
   fi
   port18787=false
@@ -3976,9 +4036,9 @@ write_evidence() {
       global_auth_sha256_after: $auth_hash_after,
       global_config_content_unchanged: ($config_hash_before == $config_hash_after),
       global_auth_content_unchanged: ($auth_hash_before == $auth_hash_after),
-      global_config_notify_sha256_before: $notify_hash_before,
-      global_config_notify_sha256_after: $notify_hash_after,
-      global_config_notify_unchanged: ($notify_hash_before == $notify_hash_after),
+      global_config_notify_sha256_before: (if $notify_hash_before == "not_collected" then null else $notify_hash_before end),
+      global_config_notify_sha256_after: (if $notify_hash_after == "not_collected" then null else $notify_hash_after end),
+      global_config_notify_unchanged: (if $notify_hash_before == "not_collected" then "not_collected" else ($notify_hash_before == $notify_hash_after) end),
       global_state_guard_passed: $global_guard_passed,
       desktop_sandbox_profile: $sandbox_status,
       global_config_write_repair_attempted: false,
@@ -4773,8 +4833,18 @@ refresh_automated_stage_evidence() {
   local since_epoch="$2"
   local model_id="$3"
   local marker="$4"
+  local evidence_role="$5"
   if [[ "${expectation}" == "tool" ]]; then
-    write_desktop_tool_evidence "${since_epoch}" "${model_id}" "${marker}" || return 1
+    if [[ "${ASSISTED_MODE}" == "true" && "${evidence_role}" == "official-tool" ]]; then
+      local binding_file="${RUN_DIR}/automated-rollout-${evidence_role}.json"
+      local session_file session_binding_sha256
+      session_file="$(jq -er '.session_file | select(type == "string" and length > 0)' "${binding_file}")" || return 1
+      session_binding_sha256="$(jq -er '.session_binding_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "${binding_file}")" || return 1
+      write_desktop_tool_evidence "${since_epoch}" "${model_id}" "${marker}" \
+        "${session_file}" "${session_binding_sha256}" || return 1
+    else
+      write_desktop_tool_evidence "${since_epoch}" "${model_id}" "${marker}" || return 1
+    fi
   fi
   write_desktop_render_evidence "${since_epoch}" "${model_id}" "${SCREENSHOT_EVIDENCE}"
 }
@@ -4858,7 +4928,7 @@ wait_for_automated_stage() {
         sleep 1
         continue
       fi
-      if ! refresh_automated_stage_evidence "${expectation}" "${since_epoch}" "${model_id}" "${marker}"; then
+      if ! refresh_automated_stage_evidence "${expectation}" "${since_epoch}" "${model_id}" "${marker}" "${evidence_role}"; then
         sleep 1
         continue
       fi
@@ -5781,6 +5851,24 @@ EOF
     NOTIFY_HASH_BEFORE="$6"
     assert_global_state_unchanged
     ;;
+  --test-assisted-global-guard-digest)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    GLOBAL_CODEX_CONFIG="$2"
+    GLOBAL_CODEX_AUTH="$3"
+    current_global_guard_digest
+    ;;
+  --test-assisted-global-state-guard)
+    [[ -n "${7:-}" && -z "${8:-}" ]] || exit 2
+    GLOBAL_CODEX_CONFIG="$2"
+    GLOBAL_CODEX_AUTH="$3"
+    CONFIG_BEFORE="$4"
+    AUTH_BEFORE="$5"
+    CONFIG_HASH_BEFORE="$6"
+    AUTH_HASH_BEFORE="$7"
+    NOTIFY_HASH_BEFORE="not_collected"
+    ASSISTED_MODE=true
+    assert_global_state_unchanged
+    ;;
   --test-source-snapshot-hash)
     [[ -n "${2:-}" ]] || exit 2
     source_snapshot_hash "$2"
@@ -6087,7 +6175,7 @@ EOF
     [[ -n "${6:-}" ]] || exit 2
     CODEX_HOME_DIR="$2"
     DESKTOP_TOOL_EVIDENCE="$3"
-    write_desktop_tool_evidence "$4" "$5" "$6"
+    write_desktop_tool_evidence "$4" "$5" "$6" "${7:-}" "${8:-}"
     ;;
   --test-render-evidence)
     [[ -n "${8:-}" ]] || exit 2
