@@ -228,19 +228,125 @@ if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
 PY
 }
 
-create_assisted_token() {
+create_assisted_state_dir() {
+  local state_dir="$1"
+  python3 - "${state_dir}" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+state_dir = Path(sys.argv[1])
+if not state_dir.is_absolute() or state_dir.exists() or state_dir.is_symlink():
+    raise SystemExit("assisted state directory is unsafe or already exists")
+os.mkdir(state_dir, 0o700)
+os.chmod(state_dir, 0o700)
+metadata = state_dir.lstat()
+if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+    raise SystemExit("assisted state directory is not owner-only")
+PY
+}
+
+assisted_state_dir() {
   local state_path="$1"
   python3 - "${state_path}" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+state = Path(sys.argv[1])
+directory = state.parent
+if not state.is_absolute() or state.name != "state.json":
+    raise SystemExit(1)
+try:
+    metadata = directory.lstat()
+except OSError:
+    raise SystemExit(1)
+if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+    raise SystemExit(1)
+print(directory)
+PY
+}
+
+assisted_sidecar_path() {
+  local state_path="$1"
+  local name="$2"
+  local state_dir
+  [[ "${name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  state_dir="$(assisted_state_dir "${state_path}")" || return 1
+  printf '%s/%s\n' "${state_dir}" "${name}"
+}
+
+secure_assisted_sidecar() {
+  local state_path="$1"
+  local path="$2"
+  local state_dir
+  state_dir="$(assisted_state_dir "${state_path}")" || return 1
+  [[ "$(dirname "${path}")" == "${state_dir}" ]] || return 1
+  secure_owned_file "${path}"
+}
+
+create_assisted_sidecar() {
+  local state_path="$1"
+  local name="$2"
+  local path
+  path="$(assisted_sidecar_path "${state_path}" "${name}")" || return 1
+  python3 - "${path}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.exists() or path.is_symlink():
+    raise SystemExit("assisted sidecar collision")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(path, flags, 0o600)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+print(path)
+PY
+}
+
+create_assisted_temp() {
+  local state_path="$1"
+  local prefix="$2"
+  local state_dir
+  state_dir="$(assisted_state_dir "${state_path}")" || return 1
+  python3 - "${state_dir}" "${prefix}" <<'PY'
+import os
+import sys
+import tempfile
+
+directory, prefix = sys.argv[1:]
+descriptor, path = tempfile.mkstemp(prefix=f".{prefix}-", dir=directory)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+print(path)
+PY
+}
+
+create_assisted_token() {
+  local state_path="$1"
+  local state_dir token sentinel
+  state_dir="$(assisted_state_dir "${state_path}")" || return 1
+  token="${state_dir}/token"
+  sentinel="${state_dir}/resume"
+  python3 - "${state_path}" "${token}" "${sentinel}" <<'PY'
 import os
 import secrets
 import sys
 from pathlib import Path
 
-state = Path(sys.argv[1])
-if not state.is_absolute():
-    raise SystemExit("assisted state path must be absolute")
-token = Path(str(state) + ".token")
-sentinel = Path(str(state) + ".resume")
+state, token, sentinel = map(Path, sys.argv[1:])
 for path in (state, token, sentinel):
     if path.exists() or path.is_symlink():
         raise SystemExit("assisted state already exists")
@@ -260,9 +366,11 @@ PY
 sign_assisted_state() {
   local unsigned_path="$1"
   local state_path="$2"
-  secure_owned_file "${unsigned_path}"
-  secure_owned_file "${state_path}.token"
-  python3 - "${unsigned_path}" "${state_path}" <<'PY'
+  local token_path
+  token_path="$(assisted_sidecar_path "${state_path}" token)" || return 1
+  secure_assisted_sidecar "${state_path}" "${unsigned_path}"
+  secure_assisted_sidecar "${state_path}" "${token_path}"
+  python3 - "${unsigned_path}" "${state_path}" "${token_path}" <<'PY'
 import hashlib
 import hmac
 import json
@@ -274,9 +382,7 @@ from pathlib import Path
 
 unsigned = Path(sys.argv[1])
 state = Path(sys.argv[2])
-token_path = Path(str(state) + ".token")
-if not state.is_absolute():
-    raise SystemExit("assisted state path must be absolute")
+token_path = Path(sys.argv[3])
 if state.is_symlink():
     raise SystemExit("assisted state must not be a symlink")
 if state.exists():
@@ -299,6 +405,7 @@ if hasattr(os, "O_NOFOLLOW"):
     flags |= os.O_NOFOLLOW
 descriptor = os.open(temporary, flags, 0o600)
 try:
+    os.fchmod(descriptor, 0o600)
     data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
     os.write(descriptor, data)
     os.fsync(descriptor)
@@ -312,9 +419,11 @@ PY
 
 verify_assisted_state_mac() {
   local state_path="$1"
-  secure_owned_file "${state_path}"
-  secure_owned_file "${state_path}.token"
-  python3 - "${state_path}" <<'PY'
+  local token_path
+  token_path="$(assisted_sidecar_path "${state_path}" token)" || return 1
+  secure_assisted_sidecar "${state_path}" "${state_path}"
+  secure_assisted_sidecar "${state_path}" "${token_path}"
+  python3 - "${state_path}" "${token_path}" <<'PY'
 import hashlib
 import hmac
 import json
@@ -322,7 +431,7 @@ import sys
 from pathlib import Path
 
 state = Path(sys.argv[1])
-token = Path(str(state) + ".token").read_bytes()
+token = Path(sys.argv[2]).read_bytes()
 try:
     value = json.loads(state.read_text())
 except (OSError, json.JSONDecodeError):
@@ -343,6 +452,9 @@ snapshot_assisted_first_five() {
   local source_path="$1"
   local snapshot_path="$2"
   secure_owned_file "${source_path}"
+  local snapshot_dir
+  snapshot_dir="$(dirname "${snapshot_path}")"
+  [[ -n "$(assisted_state_dir "${snapshot_dir}/state.json")" ]] || return 1
   python3 - "${source_path}" "${snapshot_path}" <<'PY'
 import os
 import sys
@@ -639,7 +751,8 @@ preserve_existing_route_evidence() {
   desktop_gui_route_proof="$(jq -r '.desktop_gui_route_proof // ""' "${current_out}/evidence.json" 2>/dev/null || true)"
   if [[ "${route_status}" == "complete" &&
         ( "${desktop_gui_route_proof}" == "manual_user_assisted_complete" ||
-          "${desktop_gui_route_proof}" == "automated_gui_complete" ) ]]; then
+          "${desktop_gui_route_proof}" == "automated_gui_complete" ||
+          "${desktop_gui_route_proof}" == "automated_first_five_manual_official_tool_complete" ) ]]; then
     copy_route_evidence "${current_out}" "${last_complete_out}"
   fi
 }
@@ -1022,9 +1135,10 @@ assisted_official_tool_prompt() {
 validate_assisted_state_against_bindings() {
   local state_path="$1"
   local current_path="$2"
+  local expected_status="${3:-awaiting_user_action}"
   verify_assisted_state_mac "${state_path}"
-  secure_owned_file "${current_path}"
-  python3 - "${state_path}" "${current_path}" <<'PY'
+  secure_assisted_sidecar "${state_path}" "${current_path}"
+  python3 - "${state_path}" "${current_path}" "${expected_status}" <<'PY'
 import hashlib
 import json
 import os
@@ -1034,6 +1148,7 @@ from pathlib import Path
 
 state_path = Path(sys.argv[1])
 current_path = Path(sys.argv[2])
+expected_status = sys.argv[3]
 state = json.loads(state_path.read_text())
 current = json.loads(current_path.read_text())
 
@@ -1065,9 +1180,15 @@ next_stage = state.get("next_stage") or {}
 if (next_stage.get("id") != "official-tool" or next_stage.get("evidence_role") != "official-tool" or
         next_stage.get("expect") != "tool"):
     raise SystemExit("assisted next stage is not official-tool")
-if (state.get("version") != 1 or state.get("status") != "awaiting_user_action" or
-        state.get("resume_used") is not False or state.get("cleanup_done") is not False or
-        state.get("submission_count") != 5):
+if expected_status == "awaiting_user_action":
+    status_valid = (state.get("status") == expected_status and state.get("resume_used") is False and
+                    state.get("submission_count") == 5)
+elif expected_status == "observing":
+    status_valid = (state.get("status") == expected_status and state.get("resume_used") is True and
+                    state.get("submission_count") == 6)
+else:
+    raise SystemExit("assisted expected status is invalid")
+if state.get("version") != 1 or not status_valid or state.get("cleanup_done") is not False:
     raise SystemExit("assisted state is not resumable")
 
 stage_path = Path(state.get("stage_evidence_path", ""))
@@ -1108,18 +1229,65 @@ for process in ("supervisor", "desktop", "gateway"):
         raise SystemExit(f"assisted process identity changed: {process}")
 if state["desktop"].get("window_id") != current["desktop"].get("window_id"):
     raise SystemExit("assisted Desktop window changed")
-if (state["gateway"].get("port") != 19777 or current["gateway"].get("port") != 19777 or
+if (state["gateway"].get("host") != "127.0.0.1" or current["gateway"].get("host") != "127.0.0.1" or
+        state["gateway"].get("port") != 19777 or current["gateway"].get("port") != 19777 or
         state["gateway"].get("owns_port") is not True or
         current["gateway"].get("owns_port") is not True):
     raise SystemExit("assisted gateway no longer owns 19777")
 PY
 }
 
+assert_assisted_binding_snapshot() {
+  local state_path="$1"
+  local current_path="$2"
+  local expected_status="$3"
+  if ! jq -e --slurpfile current "${current_path}" \
+    '.next_query_sha256 == $current[0].next_query_sha256' "${state_path}" >/dev/null 2>&1; then
+    AUTO_ERROR_CODE="assisted_sixth_query_binding_changed"
+    return 1
+  fi
+  if ! jq -e --slurpfile current "${current_path}" '
+    .gateway as $saved | $current[0].gateway as $observed |
+    $saved.host == "127.0.0.1" and $observed.host == "127.0.0.1" and
+    $saved.port == 19777 and $observed.port == 19777 and
+    $saved.pid == $observed.pid and $saved.identity == $observed.identity and
+    $saved.owns_port == true and $observed.owns_port == true and $observed.alive == true
+  ' "${state_path}" >/dev/null 2>&1; then
+    AUTO_ERROR_CODE="assisted_gateway_binding_changed"
+    return 1
+  fi
+  if ! validate_assisted_state_against_bindings "${state_path}" "${current_path}" "${expected_status}" 2>/dev/null; then
+    AUTO_ERROR_CODE="assisted_runtime_binding_changed"
+    return 1
+  fi
+}
+
+verify_assisted_live_bindings() {
+  local current_path
+  current_path="$(create_assisted_temp "${ASSISTED_STATE_PATH}" current)" || {
+    AUTO_ERROR_CODE="assisted_runtime_binding_changed"
+    return 1
+  }
+  if ! collect_assisted_current_bindings "${ASSISTED_STATE_PATH}" "${current_path}"; then
+    rm -f "${current_path}"
+    AUTO_ERROR_CODE="assisted_gateway_binding_changed"
+    return 1
+  fi
+  if ! assert_assisted_binding_snapshot "${ASSISTED_STATE_PATH}" "${current_path}" "observing"; then
+    rm -f "${current_path}"
+    return 1
+  fi
+  rm -f "${current_path}"
+}
+
 signal_assisted_state() {
   local state_path="$1"
   local current_path="$2"
-  validate_assisted_state_against_bindings "${state_path}" "${current_path}"
-  python3 - "${state_path}" <<'PY'
+  local token_path sentinel_path
+  assert_assisted_binding_snapshot "${state_path}" "${current_path}" "awaiting_user_action" || return 1
+  token_path="$(assisted_sidecar_path "${state_path}" token)" || return 1
+  sentinel_path="$(assisted_sidecar_path "${state_path}" resume)" || return 1
+  python3 - "${state_path}" "${token_path}" "${sentinel_path}" <<'PY'
 import hashlib
 import hmac
 import json
@@ -1128,8 +1296,8 @@ import sys
 from pathlib import Path
 
 state = Path(sys.argv[1])
-token = Path(str(state) + ".token")
-sentinel = Path(str(state) + ".resume")
+token = Path(sys.argv[2])
+sentinel = Path(sys.argv[3])
 if sentinel.exists() or sentinel.is_symlink():
     raise SystemExit("assisted resume was already used")
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -1151,9 +1319,12 @@ PY
 
 validate_assisted_sentinel() {
   local state_path="$1"
-  secure_owned_file "${state_path}.token"
-  secure_owned_file "${state_path}.resume"
-  python3 - "${state_path}" <<'PY'
+  local token_path sentinel_path
+  token_path="$(assisted_sidecar_path "${state_path}" token)" || return 1
+  sentinel_path="$(assisted_sidecar_path "${state_path}" resume)" || return 1
+  secure_assisted_sidecar "${state_path}" "${token_path}"
+  secure_assisted_sidecar "${state_path}" "${sentinel_path}"
+  python3 - "${state_path}" "${token_path}" "${sentinel_path}" <<'PY'
 import hashlib
 import hmac
 import json
@@ -1161,8 +1332,8 @@ import sys
 from pathlib import Path
 
 state = Path(sys.argv[1])
-token = Path(str(state) + ".token").read_bytes()
-sentinel = Path(str(state) + ".resume").read_text()
+token = Path(sys.argv[2]).read_bytes()
+sentinel = Path(sys.argv[3]).read_text()
 run_id = json.loads(state.read_text()).get("run_id")
 if not isinstance(run_id, str) or not run_id:
     raise SystemExit(1)
@@ -1467,12 +1638,14 @@ custom_tool_scenario_complete() {
 
 assisted_scenario_complete() {
   local state_path="$1"
-  local stages_path="$2"
-  local usage_path="$3"
-  local tool_evidence="$4"
-  local screenshot_evidence="$5"
+  local current_path="$2"
+  local stages_path="$3"
+  local usage_path="$4"
+  local tool_evidence="$5"
+  local screenshot_evidence="$6"
   local usage_baseline model_id since_epoch
   verify_assisted_state_mac "${state_path}" || return 1
+  assert_assisted_binding_snapshot "${state_path}" "${current_path}" "observing" || return 1
   secure_owned_file "${stages_path}" || return 1
   secure_owned_file "${usage_path}" || return 1
   secure_owned_file "${tool_evidence}" || return 1
@@ -1498,18 +1671,20 @@ assisted_scenario_complete() {
   jq -e --argjson since_epoch "${since_epoch}" '
     .proof_found == true and .function_call_found == true and
     .function_call_output_found == true and .process_exited_zero == true and
-    .matched_provider_tool_count == 1 and .since_epoch == $since_epoch and
-    .exact_shell_command_found == true and .pwd_output_found == true and
+    .matched_provider_tool_count == 1 and (.matched_call_ids | length) == 1 and
+    .assisted_same_call_verified == true and .since_epoch == $since_epoch and
+    .exact_shell_command_found == true and .marker_output_found == true and .pwd_output_found == true and
     .xml_leak_found == false and .raw_function_calls_found == false
   ' "${tool_evidence}" >/dev/null || return 1
   jq -e '
     [.[] | select(.role == "official-tool")] as $shots |
-    ($shots | length) == 1 and
+    ($shots | length) >= 1 and
+    all($shots[];
+      .captured == true and .target_identity_verified == true and
+      .visual_checks.raw_protocol_visible == false) and
     (($shots | last) as $shot |
-      $shot.captured == true and $shot.target_identity_verified == true and
       $shot.visual_checks.tool_marker_visible == true and
-      $shot.visual_checks.tool_execution_visible == true and
-      $shot.visual_checks.raw_protocol_visible == false)
+      $shot.visual_checks.tool_execution_visible == true)
   ' "${screenshot_evidence}" >/dev/null
 }
 
@@ -1536,6 +1711,16 @@ desktop_gui_tool_ui_review_status() {
   else
     printf 'rollout_verified_gui_display_not_verified\n'
   fi
+}
+
+assisted_canonical_route_status() {
+  local route_status="$1"
+  local input_mode="$2"
+  local human_intervention_count="$3"
+  local profile="$4"
+  [[ "${route_status}" == "complete" && "${input_mode}" == "automated_ax" &&
+     "${human_intervention_count}" == "1" && "${profile}" == "assisted_six_stage" ]] || return 1
+  printf 'automated_first_five_manual_official_tool_complete\n'
 }
 
 fresh_stage_usage() {
@@ -1832,6 +2017,7 @@ collect_assisted_current_bindings() {
   local state_path="$1"
   local output_path="$2"
   verify_assisted_state_mac "${state_path}"
+  secure_assisted_sidecar "${state_path}" "${output_path}"
   local scenario_path artifact_path supervisor_pid desktop_pid gateway_pid
   local supervisor_identity desktop_identity gateway_identity current_window window_id
   scenario_path="$(jq -er '.scenario_path' "${state_path}")"
@@ -1872,23 +2058,23 @@ collect_assisted_current_bindings() {
       next_query_sha256:$next_query_sha256,
       supervisor:{pid:$supervisor_pid,identity:$supervisor_identity,alive:true},
       desktop:{pid:$desktop_pid,identity:$desktop_identity,window_id:$window_id,alive:true},
-      gateway:{pid:$gateway_pid,identity:$gateway_identity,port:19777,alive:true,owns_port:true}
+      gateway:{pid:$gateway_pid,identity:$gateway_identity,host:"127.0.0.1",port:19777,alive:true,owns_port:true}
     }' >"${output_path}"
-  chmod 600 "${output_path}"
 }
 
 write_assisted_starting_state() {
   local state_path="$1"
   local scenario_path="$2"
   local run_id="$3"
-  local unsigned_path="${state_path}.unsigned.$$"
+  local unsigned_path token_path
+  unsigned_path="$(create_assisted_temp "${state_path}" unsigned)" || return 1
+  token_path="$(assisted_sidecar_path "${state_path}" token)" || return 1
   jq -n \
     --arg run_id "${run_id}" --arg scenario_path "${scenario_path}" \
     --arg scenario_sha256 "$(file_hash "${scenario_path}")" \
-    --arg token_sha256 "$(file_hash "${state_path}.token")" \
+    --arg token_sha256 "$(file_hash "${token_path}")" \
     '{version:1,status:"starting",run_id:$run_id,scenario_path:$scenario_path,scenario_sha256:$scenario_sha256,token_sha256:$token_sha256,submission_count:0,resume_used:false,cleanup_done:false}' \
     >"${unsigned_path}"
-  chmod 600 "${unsigned_path}"
   sign_assisted_state "${unsigned_path}" "${state_path}"
 }
 
@@ -1896,10 +2082,10 @@ bind_assisted_supervisor_state() {
   local state_path="$1"
   local supervisor_pid="$2"
   local supervisor_identity="$3"
-  local unsigned_path="${state_path}.unsigned.$$"
+  local unsigned_path
+  unsigned_path="$(create_assisted_temp "${state_path}" unsigned)" || return 1
   jq --argjson pid "${supervisor_pid}" --arg identity "${supervisor_identity}" \
     'del(.state_mac) | .supervisor={pid:$pid,identity:$identity}' "${state_path}" >"${unsigned_path}"
-  chmod 600 "${unsigned_path}"
   sign_assisted_state "${unsigned_path}" "${state_path}"
 }
 
@@ -1909,29 +2095,86 @@ mark_assisted_state() {
   local resume_used="$3"
   local cleanup_done="$4"
   local error_code="${5:-}"
-  local unsigned_path="${state_path}.unsigned.$$"
+  local unsigned_path
+  unsigned_path="$(create_assisted_temp "${state_path}" unsigned)" || return 1
   jq --arg status "${status}" --argjson resume_used "${resume_used}" \
     --argjson cleanup_done "${cleanup_done}" --arg error_code "${error_code}" \
     'del(.state_mac) | .status=$status | .resume_used=$resume_used | .cleanup_done=$cleanup_done |
       .submission_count=(if $status == "observing" then 6 else .submission_count end) |
       .error_code=(if $error_code == "" then null else $error_code end)' \
     "${state_path}" >"${unsigned_path}"
-  chmod 600 "${unsigned_path}"
   sign_assisted_state "${unsigned_path}" "${state_path}"
+}
+
+assisted_launcher_deadline_seconds() {
+  local scenario_path="$1"
+  local allowance="${RELAYKIT_ASSISTED_PREFLIGHT_ALLOWANCE_SECONDS:-300}"
+  local stage_timeout
+  [[ "${allowance}" =~ ^[0-9]+$ ]] && (( allowance >= 60 && allowance <= 900 )) || return 1
+  stage_timeout="$(validate_assisted_scenario "${scenario_path}" | jq -er '.stage_timeout_seconds')" || return 1
+  printf '%s\n' "$((5 * stage_timeout + allowance))"
+}
+
+launch_assisted_supervisor_process() {
+  local state_path="$1"
+  local supervisor_mode="$2"
+  local state_dir
+  state_dir="$(assisted_state_dir "${state_path}")" || return 1
+  python3 - "${ROOT}/scripts/codex-desktop-manual-proof.sh" "${supervisor_mode}" "${state_path}" "${state_dir}" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+script, mode, state, state_dir = sys.argv[1:]
+directory = Path(state_dir)
+stdout_path = directory / "supervisor.out"
+stderr_path = directory / "supervisor.err"
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+stdout_fd = os.open(stdout_path, flags, 0o600)
+try:
+    stderr_fd = os.open(stderr_path, flags, 0o600)
+except BaseException:
+    os.close(stdout_fd)
+    raise
+try:
+    os.fchmod(stdout_fd, 0o600)
+    os.fchmod(stderr_fd, 0o600)
+    with open("/dev/null", "rb") as stdin, os.fdopen(stdout_fd, "wb", closefd=True) as stdout, os.fdopen(stderr_fd, "wb", closefd=True) as stderr:
+        process = subprocess.Popen(
+            [script, mode, "--run-state", state],
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            close_fds=True,
+            start_new_session=True,
+        )
+except BaseException:
+    for descriptor in (stdout_fd, stderr_fd):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    raise
+print(process.pid)
+PY
 }
 
 launch_auto_assisted() {
   local scenario_path="$1"
+  local supervisor_mode="${2:---assisted-supervisor}"
   validate_assisted_scenario "${scenario_path}" >/dev/null
-  local state_path="${scenario_path}.assisted-state.json"
+  [[ "${supervisor_mode}" == "--assisted-supervisor" || "${supervisor_mode}" == "--assisted-fixture-supervisor" ]] || return 1
+  local state_dir="${scenario_path}.assisted-state"
+  local state_path="${state_dir}/state.json"
   local run_id="assisted-$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
-  local supervisor_pid supervisor_identity status deadline
+  local supervisor_pid supervisor_identity status deadline deadline_seconds
+  create_assisted_state_dir "${state_dir}"
   create_assisted_token "${state_path}"
   write_assisted_starting_state "${state_path}" "${scenario_path}" "${run_id}"
-  umask 077
-  /usr/bin/nohup "${ROOT}/scripts/codex-desktop-manual-proof.sh" --assisted-supervisor --run-state "${state_path}" \
-    </dev/null >"${state_path}.supervisor.out" 2>"${state_path}.supervisor.err" &
-  supervisor_pid=$!
+  supervisor_pid="$(launch_assisted_supervisor_process "${state_path}" "${supervisor_mode}")" || return 1
   supervisor_identity=""
   for _ in {1..100}; do
     supervisor_identity="$(process_identity "${supervisor_pid}" 2>/dev/null || true)"
@@ -1940,7 +2183,8 @@ launch_auto_assisted() {
   done
   [[ -n "${supervisor_identity}" ]] || return 1
   bind_assisted_supervisor_state "${state_path}" "${supervisor_pid}" "${supervisor_identity}"
-  deadline=$((SECONDS + 900))
+  deadline_seconds="$(assisted_launcher_deadline_seconds "${scenario_path}")" || return 1
+  deadline=$((SECONDS + deadline_seconds))
   while (( SECONDS < deadline )); do
     verify_assisted_state_mac "${state_path}" || return 1
     status="$(jq -r '.status // "invalid"' "${state_path}")"
@@ -1963,16 +2207,28 @@ launch_auto_assisted() {
 
 resume_auto_assisted() {
   local state_path="$1"
-  local current_path="${state_path}.current.$$"
-  collect_assisted_current_bindings "${state_path}" "${current_path}" || {
+  local current_path="${2:-}"
+  local remove_current=false
+  if [[ -z "${current_path}" ]]; then
+    current_path="$(create_assisted_temp "${state_path}" current)" || return 1
+    remove_current=true
+  fi
+  if [[ "${remove_current}" == "true" ]] && ! collect_assisted_current_bindings "${state_path}" "${current_path}" 2>/dev/null; then
     rm -f "${current_path}"
+    AUTO_ERROR_CODE="assisted_gateway_binding_changed"
+    printf '%s\n' "${AUTO_ERROR_CODE}" >&2
     return 1
-  }
-  signal_assisted_state "${state_path}" "${current_path}" || {
+  fi
+  if ! signal_assisted_state "${state_path}" "${current_path}" 2>/dev/null; then
+    if [[ "${remove_current}" == "true" ]]; then
+      rm -f "${current_path}"
+    fi
+    printf '%s\n' "${AUTO_ERROR_CODE}" >&2
+    return 1
+  fi
+  if [[ "${remove_current}" == "true" ]]; then
     rm -f "${current_path}"
-    return 1
-  }
-  rm -f "${current_path}"
+  fi
 }
 
 run_assisted_supervisor() {
@@ -2001,6 +2257,122 @@ run_assisted_supervisor() {
   trap cleanup_assisted_run EXIT
   trap handle_assisted_signal INT TERM HUP
   run_automated_proof "${scenario_path}"
+}
+
+ASSISTED_FIXTURE_DESKTOP_PID=""
+ASSISTED_FIXTURE_GATEWAY_PID=""
+ASSISTED_FIXTURE_STATE_PATH=""
+ASSISTED_FIXTURE_CLEANED=false
+
+cleanup_assisted_fixture_once() {
+  [[ "${ASSISTED_FIXTURE_CLEANED}" == "false" ]] || return 0
+  local pid cleanup_path
+  for pid in "${ASSISTED_FIXTURE_DESKTOP_PID}" "${ASSISTED_FIXTURE_GATEWAY_PID}"; do
+    if [[ "${pid}" =~ ^[1-9][0-9]*$ ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+  if [[ -n "${ASSISTED_FIXTURE_STATE_PATH}" ]]; then
+    cleanup_path="$(assisted_sidecar_path "${ASSISTED_FIXTURE_STATE_PATH}" cleanup-count)" || return 1
+    if [[ ! -e "${cleanup_path}" && ! -L "${cleanup_path}" ]]; then
+      create_assisted_sidecar "${ASSISTED_FIXTURE_STATE_PATH}" cleanup-count >/dev/null
+      printf '1\n' >"${cleanup_path}"
+    fi
+  fi
+  ASSISTED_FIXTURE_CLEANED=true
+}
+
+run_assisted_fixture_supervisor() {
+  local state_path="$1"
+  local self_identity saved_pid saved_identity scenario_path state_dir
+  local ledger_path artifact_path current_path actions_path unsigned_path sentinel_path query_path marker run_id
+  local desktop_identity gateway_identity token_path actions_tmp
+  ASSISTED_FIXTURE_STATE_PATH="${state_path}"
+  state_dir="$(assisted_state_dir "${state_path}")" || return 1
+  verify_assisted_state_mac "${state_path}"
+  self_identity="$(process_identity "$$")" || return 1
+  for _ in {1..100}; do
+    verify_assisted_state_mac "${state_path}" || return 1
+    saved_pid="$(jq -r '.supervisor.pid // 0' "${state_path}")"
+    saved_identity="$(jq -r '.supervisor.identity // ""' "${state_path}")"
+    [[ "${saved_pid}" == "$$" && "${saved_identity}" == "${self_identity}" ]] && break
+    sleep 0.05
+  done
+  [[ "${saved_pid}" == "$$" && "${saved_identity}" == "${self_identity}" ]] || return 1
+  scenario_path="$(jq -er '.scenario_path' "${state_path}")" || return 1
+  run_id="$(jq -er '.run_id' "${state_path}")" || return 1
+  query_path="$(jq -er '.stages[5].query_file' "${scenario_path}")" || return 1
+  marker="$(jq -er '.stages[5].response_marker' "${scenario_path}")" || return 1
+  /bin/sleep 60 & ASSISTED_FIXTURE_DESKTOP_PID=$!
+  /bin/sleep 60 & ASSISTED_FIXTURE_GATEWAY_PID=$!
+  desktop_identity="$(process_identity "${ASSISTED_FIXTURE_DESKTOP_PID}")" || return 1
+  gateway_identity="$(process_identity "${ASSISTED_FIXTURE_GATEWAY_PID}")" || return 1
+  trap cleanup_assisted_fixture_once EXIT INT TERM HUP
+
+  ledger_path="$(create_assisted_sidecar "${state_path}" first-five.json)" || return 1
+  artifact_path="$(create_assisted_sidecar "${state_path}" artifact.fixture)" || return 1
+  current_path="$(create_assisted_sidecar "${state_path}" current.json)" || return 1
+  actions_path="$(create_assisted_sidecar "${state_path}" actions.json)" || return 1
+  printf 'fixture artifact\n' >"${artifact_path}"
+  jq -n --arg run_id "${run_id}" '[
+    ["official-plain","thread-1"],
+    ["official-markdown","thread-2"],
+    ["provider-plain","thread-3"],
+    ["provider-markdown","thread-4"],
+    ["provider-tool","thread-5"]
+  ] | map({id:.[0],evidence_role:.[0],state:"evidence_verified",submission_state:"submitted",submission_count:1,run_id:$run_id,rollout_binding:{proof_found:true,thread_id:.[1],user_marker_count:1,assistant_marker_count:1}})' >"${ledger_path}"
+  jq -n '{first_five_submissions:5,official_tool_ax_submissions:0,official_tool_observations:0}' >"${actions_path}"
+  token_path="$(assisted_sidecar_path "${state_path}" token)" || return 1
+  unsigned_path="$(create_assisted_temp "${state_path}" unsigned)" || return 1
+  jq -n \
+    --arg run_id "${run_id}" --arg scenario_path "${scenario_path}" --arg scenario_sha256 "$(file_hash "${scenario_path}")" \
+    --arg artifact_path "${artifact_path}" --arg artifact_sha256 "$(file_hash "${artifact_path}")" \
+    --arg stage_evidence_path "${ledger_path}" --arg stage_evidence_sha256 "$(file_hash "${ledger_path}")" \
+    --arg next_query_sha256 "$(file_hash "${query_path}")" --arg token_sha256 "$(file_hash "${token_path}")" \
+    --arg supervisor_identity "${self_identity}" --arg desktop_identity "${desktop_identity}" --arg gateway_identity "${gateway_identity}" \
+    --arg query_path "${query_path}" --arg marker "${marker}" --arg pause_prompt "$(assisted_official_tool_prompt "${marker}")" \
+    --argjson supervisor_pid "$$" --argjson desktop_pid "${ASSISTED_FIXTURE_DESKTOP_PID}" --argjson gateway_pid "${ASSISTED_FIXTURE_GATEWAY_PID}" \
+    --slurpfile ledger "${ledger_path}" '
+    {version:1,status:"awaiting_user_action",run_id:$run_id,
+     scenario_path:$scenario_path,scenario_sha256:$scenario_sha256,
+     artifact_path:$artifact_path,artifact_sha256:$artifact_sha256,
+     harness_sha256:"fixture",source_snapshot_sha256:"fixture",global_guard:"fixture",
+     stage_evidence_path:$stage_evidence_path,stage_evidence_sha256:$stage_evidence_sha256,
+     next_query_sha256:$next_query_sha256,token_sha256:$token_sha256,
+     supervisor:{pid:$supervisor_pid,identity:$supervisor_identity},
+     desktop:{pid:$desktop_pid,identity:$desktop_identity,window_id:303},
+     gateway:{pid:$gateway_pid,identity:$gateway_identity,host:"127.0.0.1",port:19777,owns_port:true},
+     first_five_ledger:$ledger[0],
+     next_stage:{id:"official-tool",evidence_role:"official-tool",expect:"tool",model_id:"fixture/official",query_file:$query_path,response_marker:$marker,usage_baseline:5,since_epoch:1},
+     pause_prompt:$pause_prompt,submission_count:5,resume_used:false,cleanup_done:false,error_code:null}' >"${unsigned_path}"
+  jq -n \
+    --arg run_id "${run_id}" --arg scenario_sha256 "$(file_hash "${scenario_path}")" --arg artifact_sha256 "$(file_hash "${artifact_path}")" \
+    --arg stage_evidence_sha256 "$(file_hash "${ledger_path}")" --arg next_query_sha256 "$(file_hash "${query_path}")" \
+    --arg supervisor_identity "${self_identity}" --arg desktop_identity "${desktop_identity}" --arg gateway_identity "${gateway_identity}" \
+    --argjson supervisor_pid "$$" --argjson desktop_pid "${ASSISTED_FIXTURE_DESKTOP_PID}" --argjson gateway_pid "${ASSISTED_FIXTURE_GATEWAY_PID}" '
+    {run_id:$run_id,scenario_sha256:$scenario_sha256,artifact_sha256:$artifact_sha256,
+     harness_sha256:"fixture",source_snapshot_sha256:"fixture",global_guard:"fixture",
+     stage_evidence_sha256:$stage_evidence_sha256,next_query_sha256:$next_query_sha256,
+     supervisor:{pid:$supervisor_pid,identity:$supervisor_identity,alive:true},
+     desktop:{pid:$desktop_pid,identity:$desktop_identity,window_id:303,alive:true},
+     gateway:{pid:$gateway_pid,identity:$gateway_identity,host:"127.0.0.1",port:19777,owns_port:true,alive:true}}' >"${current_path}"
+  sign_assisted_state "${unsigned_path}" "${state_path}"
+
+  sentinel_path="$(assisted_sidecar_path "${state_path}" resume)" || return 1
+  while [[ ! -e "${sentinel_path}" && ! -L "${sentinel_path}" ]]; do
+    kill -0 "${ASSISTED_FIXTURE_DESKTOP_PID}" 2>/dev/null || return 1
+    kill -0 "${ASSISTED_FIXTURE_GATEWAY_PID}" 2>/dev/null || return 1
+    sleep 0.05
+  done
+  validate_assisted_sentinel "${state_path}" || return 1
+  mark_assisted_state "${state_path}" observing true false
+  assert_assisted_binding_snapshot "${state_path}" "${current_path}" observing || return 1
+  actions_tmp="$(create_assisted_temp "${state_path}" actions)" || return 1
+  jq '.official_tool_observations = 1' "${actions_path}" >"${actions_tmp}"
+  mv "${actions_tmp}" "${actions_path}"
+  cleanup_assisted_fixture_once
+  mark_assisted_state "${state_path}" complete true true
 }
 
 start_provider() {
@@ -3014,13 +3386,14 @@ for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
         else:
             output = item.get("output")
             output_text = output if isinstance(output, str) else json.dumps(output, separators=(",", ":"), sort_keys=True) if output is not None else ""
-            marker_found = marker in output_text
+            output_lines = output_text.splitlines()
+            marker_found = any(line.strip() == marker for line in output_lines)
             process_exited_zero = "Process exited with code 0" in output_text
             outputs[call_id] = {
                 "model": current_model,
                 "marker_found": marker_found,
                 "process_exited_zero": process_exited_zero,
-                "pwd_output_found": any(line.startswith("/") for line in output_text.splitlines()),
+                "pwd_output_found": any(line.startswith("/") for line in output_lines),
             }
             events.append({
                 "timestamp": record.get("timestamp"),
@@ -3036,6 +3409,16 @@ matched_ids = [
     and call.get("tool_name") in {"exec_command", "shell", "bash"}
     and call.get("marker_found")
     and outputs.get(call_id, {}).get("marker_found")
+    and outputs.get(call_id, {}).get("process_exited_zero")
+]
+assisted_matched_ids = [
+    call_id for call_id, call in calls.items()
+    if call.get("model") == provider_model
+    and call.get("tool_name") in {"exec_command", "shell", "bash"}
+    and call.get("exact_shell_command_found")
+    and outputs.get(call_id, {}).get("model") == provider_model
+    and outputs.get(call_id, {}).get("marker_found")
+    and outputs.get(call_id, {}).get("pwd_output_found")
     and outputs.get(call_id, {}).get("process_exited_zero")
 ]
 xml_leak_found = bool(xml_leak_records)
@@ -3056,9 +3439,15 @@ out_path.write_text(json.dumps({
     "function_call_output_found": any(event["type"] == "function_call_output" for event in events),
     "process_exited_zero": bool(matched_ids),
     "matched_provider_tool_count": len(matched_ids),
+    "matched_call_ids": assisted_matched_ids,
+    "assisted_same_call_verified": len(assisted_matched_ids) == 1,
     "xml_leak_found": xml_leak_found,
     "raw_function_calls_found": xml_leak_found,
     "exact_shell_command_found": exact_shell_command_found,
+    "marker_output_found": any(
+        output.get("model") == provider_model and output.get("marker_found")
+        for output in outputs.values()
+    ),
     "pwd_output_found": pwd_output_found,
     "xml_leak_records": xml_leak_records,
     "since_epoch": since_epoch,
@@ -3556,7 +3945,8 @@ write_evidence() {
       ),
       fresh_current_run_usage_event: (($usage[0] | length) > 0),
       desktop_gui_route_proof: (
-        if $route_status == "complete" and $input_mode == "automated_ax" and $human_intervention_count == 0 and $automated_profile == "standard_four_stage_dogfood" then "automated_gui_complete"
+        if $route_status == "complete" and $input_mode == "automated_ax" and $human_intervention_count == 1 and $automated_profile == "assisted_six_stage" then "automated_first_five_manual_official_tool_complete"
+        elif $route_status == "complete" and $input_mode == "automated_ax" and $human_intervention_count == 0 and $automated_profile == "standard_four_stage_dogfood" then "automated_gui_complete"
         elif $route_status == "complete" and $input_mode == "automated_ax" and $human_intervention_count == 0 and ($automated_profile == "single_tool_scenario" or $automated_profile == "custom_scenario") then "automated_custom_scenario_complete"
         elif $route_status == "complete" and $input_mode == "manual_user_only" then "manual_user_assisted_complete"
         elif $route_status == "same_profile_cli_route_complete" then "not_complete_cli_fallback"
@@ -4284,8 +4674,10 @@ write_assisted_pause_state() {
   local usage_baseline="$5"
   local since_epoch="$6"
   local gateway_pid desktop_identity gateway_identity supervisor_pid supervisor_identity window_id
-  local unsigned_path="${ASSISTED_STATE_PATH}.unsigned.$$"
-  local pause_prompt first_five_snapshot="${ASSISTED_STATE_PATH}.first-five.json"
+  local unsigned_path pause_prompt first_five_snapshot token_path
+  unsigned_path="$(create_assisted_temp "${ASSISTED_STATE_PATH}" unsigned)" || return 1
+  first_five_snapshot="$(assisted_sidecar_path "${ASSISTED_STATE_PATH}" first-five.json)" || return 1
+  token_path="$(assisted_sidecar_path "${ASSISTED_STATE_PATH}" token)" || return 1
   automated_stages_complete "${AUTOMATED_STAGE_EVIDENCE}" 5 || return 1
   jq -e '
     [.[].id] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool"] and
@@ -4311,7 +4703,7 @@ write_assisted_pause_state() {
     --arg global_guard "$(current_global_guard_digest)" \
     --arg stage_evidence_path "${first_five_snapshot}" \
     --arg stage_evidence_sha256 "$(file_hash "${first_five_snapshot}")" \
-    --arg token_sha256 "$(file_hash "${ASSISTED_STATE_PATH}.token")" \
+    --arg token_sha256 "$(file_hash "${token_path}")" \
     --argjson supervisor_pid "${supervisor_pid}" --arg supervisor_identity "${supervisor_identity}" \
     --argjson desktop_pid "${desktop_pid}" --arg desktop_identity "${desktop_identity}" --argjson window_id "${window_id}" \
     --argjson gateway_pid "${gateway_pid}" --arg gateway_identity "${gateway_identity}" \
@@ -4330,35 +4722,36 @@ write_assisted_pause_state() {
       token_sha256:$token_sha256,
       supervisor:{pid:$supervisor_pid,identity:$supervisor_identity},
       desktop:{pid:$desktop_pid,identity:$desktop_identity,window_id:$window_id},
-      gateway:{pid:$gateway_pid,identity:$gateway_identity,port:19777,owns_port:true},
+      gateway:{pid:$gateway_pid,identity:$gateway_identity,host:"127.0.0.1",port:19777,owns_port:true},
       first_five_ledger:$ledger[0],
       next_stage:{id:"official-tool",evidence_role:"official-tool",expect:"tool",model_id:$model_id,query_file:$query_file,response_marker:$response_marker,usage_baseline:$usage_baseline,since_epoch:$since_epoch},
       pause_prompt:$pause_prompt,submission_count:5,resume_used:false,cleanup_done:false,error_code:null
     }' >"${unsigned_path}"
-  chmod 600 "${unsigned_path}"
   sign_assisted_state "${unsigned_path}" "${ASSISTED_STATE_PATH}"
 }
 
 wait_for_assisted_resume() {
-  local current_path="${ASSISTED_STATE_PATH}.current.$$"
+  local current_path sentinel_path
+  current_path="$(create_assisted_temp "${ASSISTED_STATE_PATH}" current)" || return 1
+  sentinel_path="$(assisted_sidecar_path "${ASSISTED_STATE_PATH}" resume)" || return 1
   while true; do
     collect_assisted_current_bindings "${ASSISTED_STATE_PATH}" "${current_path}" || {
       rm -f "${current_path}"
-      AUTO_ERROR_CODE="assisted_binding_changed"
+      AUTO_ERROR_CODE="assisted_gateway_binding_changed"
       return 1
     }
-    validate_assisted_state_against_bindings "${ASSISTED_STATE_PATH}" "${current_path}" || {
+    assert_assisted_binding_snapshot "${ASSISTED_STATE_PATH}" "${current_path}" "awaiting_user_action" || {
       rm -f "${current_path}"
-      AUTO_ERROR_CODE="assisted_binding_changed"
       return 1
     }
-    rm -f "${current_path}"
-    if [[ -e "${ASSISTED_STATE_PATH}.resume" || -L "${ASSISTED_STATE_PATH}.resume" ]]; then
+    if [[ -e "${sentinel_path}" || -L "${sentinel_path}" ]]; then
       validate_assisted_sentinel "${ASSISTED_STATE_PATH}" || {
+        rm -f "${current_path}"
         AUTO_ERROR_CODE="assisted_resume_sentinel_invalid"
         return 1
       }
       mark_assisted_state "${ASSISTED_STATE_PATH}" "observing" true false
+      rm -f "${current_path}"
       HUMAN_INTERVENTION_COUNT=1
       return 0
     fi
@@ -4445,6 +4838,9 @@ wait_for_automated_stage() {
   local nonmatching_completed_seen=false
   bound_model="$(jq -er '.model | select(type == "string" and length > 0)' "${binding_file}")" || return 6
   while (( SECONDS < deadline )); do
+    if [[ "${ASSISTED_MODE}" == "true" && "${evidence_role}" == "official-tool" ]]; then
+      verify_assisted_live_bindings || return 7
+    fi
     verify_desktop_window_identity || return 1
     summarize_usage || return 4
     if fresh_stage_error "${OUT}/usage-events.json" "${baseline_count}" "${bound_model}" >"${RUN_DIR}/automated-stage-error.json" 2>/dev/null; then
@@ -4469,6 +4865,9 @@ wait_for_automated_stage() {
         continue
       fi
       if automated_stage_checkpoint_verified "${OUT}/usage-events.json" "${baseline_count}" "${model_id}" "${evidence_role}" "${expectation}" "${binding_file}"; then
+        if [[ "${ASSISTED_MODE}" == "true" && "${evidence_role}" == "official-tool" ]]; then
+          verify_assisted_live_bindings || return 7
+        fi
         return 0
       fi
       if [[ "${expectation}" == "markdown" ]]; then
@@ -4786,7 +5185,7 @@ run_automated_proof() {
   local overall_since stage_timeout desktop_pid expected_stage_count standard_route_status gpt55_marker gpt56_marker
   local stage index=0 stage_id model_id model_label query_source query_copy response_marker evidence_role expectation
   local usage_baseline since_epoch submission_state="not_submitted" wait_status bind_status driver_code query_sha256
-  local resolved_scenario_tmp resolution_error_file resolution_error
+  local resolved_scenario_tmp resolution_error_file resolution_error assisted_final_current
 
   [[ "${AX_DRIVER_SOURCE}" == "${driver_source}" ]] || {
     AUTO_ERROR_CODE="ax_driver_path_invalid"
@@ -5017,6 +5416,7 @@ run_automated_proof() {
       case "${wait_status}" in
         5) AUTO_ERROR_CODE="submitted_model_usage_mismatch" ;;
         6) AUTO_ERROR_CODE="submitted_rollout_binding_changed" ;;
+        7) : ;;
         *) AUTO_ERROR_CODE="observation_failed_${wait_status}" ;;
       esac
       write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "${AUTO_ERROR_CODE}"
@@ -5068,8 +5468,18 @@ run_automated_proof() {
     assisted_six_stage)
       AUTO_ERROR_CODE="assisted_official_tool_evidence_incomplete"
       summarize_usage || return 1
-      assisted_scenario_complete "${ASSISTED_STATE_PATH}" "${AUTOMATED_STAGE_EVIDENCE}" \
-        "${OUT}/usage-events.json" "${DESKTOP_TOOL_EVIDENCE}" "${SCREENSHOT_EVIDENCE}" || return 1
+      assisted_final_current="$(create_assisted_temp "${ASSISTED_STATE_PATH}" current-final)" || return 1
+      if ! collect_assisted_current_bindings "${ASSISTED_STATE_PATH}" "${assisted_final_current}"; then
+        rm -f "${assisted_final_current}"
+        AUTO_ERROR_CODE="assisted_gateway_binding_changed"
+        return 1
+      fi
+      if ! assisted_scenario_complete "${ASSISTED_STATE_PATH}" "${assisted_final_current}" \
+        "${AUTOMATED_STAGE_EVIDENCE}" "${OUT}/usage-events.json" "${DESKTOP_TOOL_EVIDENCE}" "${SCREENSHOT_EVIDENCE}"; then
+        rm -f "${assisted_final_current}"
+        return 1
+      fi
+      rm -f "${assisted_final_current}"
       ;;
     custom_scenario) ;;
     *)
@@ -5178,6 +5588,10 @@ case "${MODE}" in
   --assisted-supervisor)
     ASSISTED_STATE_PATH="$(assisted_state_argument "$@")" || exit 2
     run_assisted_supervisor "${ASSISTED_STATE_PATH}"
+    ;;
+  --assisted-fixture-supervisor)
+    ASSISTED_STATE_PATH="$(assisted_state_argument "$@")" || exit 2
+    run_assisted_fixture_supervisor "${ASSISTED_STATE_PATH}"
     ;;
   rc1-native-responses-three-stage)
     configure_rc1_native_responses_paths
@@ -5435,6 +5849,14 @@ EOF
     [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
     validate_assisted_scenario "$2"
     ;;
+  --test-assisted-create-state-dir)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    create_assisted_state_dir "$2"
+    ;;
+  --test-assisted-launch-deadline)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    assisted_launcher_deadline_seconds "$2"
+    ;;
   --test-assisted-create-token)
     [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
     create_assisted_token "$2"
@@ -5467,9 +5889,44 @@ EOF
     [[ -n "${5:-}" && -z "${6:-}" ]] || exit 2
     mark_assisted_state "$2" "$3" "$4" "$5"
     ;;
+  --test-assisted-continuous-binding)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    if ! assert_assisted_binding_snapshot "$2" "$3" observing; then
+      printf '%s\n' "${AUTO_ERROR_CODE}" >&2
+      exit 1
+    fi
+    ;;
+  --test-assisted-binding-drift-cleanup)
+    [[ -n "${4:-}" && -z "${5:-}" ]] || exit 2
+    ASSISTED_CLEANUP_COUNTER_PATH="$4"
+    cleanup_processes() {
+      local count=0
+      [[ -f "${ASSISTED_CLEANUP_COUNTER_PATH}" ]] && count="$(<"${ASSISTED_CLEANUP_COUNTER_PATH}")"
+      printf '%s\n' "$((count + 1))" >"${ASSISTED_CLEANUP_COUNTER_PATH}"
+    }
+    ASSISTED_CLEANUP_DONE=false
+    if ! assert_assisted_binding_snapshot "$2" "$3" observing; then
+      cleanup_assisted_once
+      cleanup_assisted_once
+      printf '%s\n' "${AUTO_ERROR_CODE}" >&2
+      exit 1
+    fi
+    ;;
   --test-assisted-complete)
-    [[ -n "${6:-}" && -z "${7:-}" ]] || exit 2
-    assisted_scenario_complete "$2" "$3" "$4" "$5" "$6"
+    [[ -n "${7:-}" && -z "${8:-}" ]] || exit 2
+    assisted_scenario_complete "$2" "$3" "$4" "$5" "$6" "$7"
+    ;;
+  --test-assisted-canonical-status)
+    [[ -n "${5:-}" && -z "${6:-}" ]] || exit 2
+    assisted_canonical_route_status "$2" "$3" "$4" "$5"
+    ;;
+  --test-assisted-launch-fixture)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    launch_auto_assisted "$2" --assisted-fixture-supervisor
+    ;;
+  --test-assisted-resume-fixture)
+    [[ -n "${3:-}" && -z "${4:-}" ]] || exit 2
+    resume_auto_assisted "$2" "$3"
     ;;
   --test-assisted-cleanup-once)
     [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
