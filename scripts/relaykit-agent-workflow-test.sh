@@ -109,6 +109,21 @@ fast_path_closeout_contract = (
     "test-assertion-only fix, rerun only the corresponding test and minimal CR recheck without repeating passed runtime "
     "metadata. Nonblocking Medium/Low findings become backlog evidence without scope expansion."
 )
+signed_beta_exception_contract = (
+    "Signed Beta live-gate exception: `execution_allowed=false` from the signed-beta plan means plan-only and forbids "
+    "selector-driven automatic execution; it does not deny a separately user-authorized, Planner-bounded one-time live gate."
+)
+signed_beta_bounds_contract = (
+    "Ordinary Tier 2/3 validation retains the selector path. For this exception, Planner must bind one exact isolated "
+    "session, artifact, scenario, and command allowlist: one run, at most six commands, each command exactly once, with no "
+    "retry. The allowlist must encode redaction, no global config/auth or shared-service/LaunchAgent access, no port `18787`, "
+    "exact cleanup, and current run-bound evidence."
+)
+signed_beta_execution_contract = (
+    "`relaykit_test` directly executes only that exact allowlist and must not rerun or reinterpret the selector, plan, "
+    "scenario, or author inputs. Main/root performs mechanical dispatch only. This exception does not expand or replace "
+    "the ordinary 1-3 test-message approval rule."
+)
 
 contract_sources = {
     "planner": agents["relaykit_planner"]["developer_instructions"],
@@ -128,6 +143,11 @@ for name, source in contract_sources.items():
     assert fast_path_contract in source, name
     assert fast_path_execution_contract in source, name
     assert fast_path_closeout_contract in source, name
+for name in ("planner", "test", "agents-doc"):
+    source = contract_sources[name]
+    assert signed_beta_exception_contract in source, name
+    assert signed_beta_bounds_contract in source, name
+    assert signed_beta_execution_contract in source, name
 
 print("RelayKit agent workflow contract tests passed")
 PY
