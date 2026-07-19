@@ -33,6 +33,7 @@ type Server struct {
 	usageLogPath             string
 	keychainCredentials      map[string]string
 	allowKeychainCLIFallback bool
+	officialStructuralTrace  *officialStructuralTrace
 }
 
 const maximumResponsesRequestBytes = 16 << 20
@@ -97,6 +98,11 @@ func newServer(configPath, usageLogPath string, credentials map[string]string, a
 			}},
 		}
 	}
+	trace, err := newOfficialStructuralTraceFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	s.officialStructuralTrace = trace
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -1374,6 +1380,7 @@ func decodeResponsesRequest(body io.Reader) (map[string]json.RawMessage, respons
 			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
 		}
 	}
+	req.raw = raw
 	return raw, req, nil
 }
 
@@ -1657,6 +1664,7 @@ func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.
 	execCapability := officialExecCommandCapability(req.Input, req.Tools)
 	command, messageOnly, err := officialExplicitExecCommand(req.Input, messages, req.Tools)
 	if err != nil {
+		s.officialStructuralTrace.recordRejectedOfficialRequest(req.raw, req.Input, officialStructuralRejectionForError(err))
 		return nil, &officialCodexFailure{
 			status:    http.StatusBadRequest,
 			errorType: "invalid_request_error",
@@ -1792,7 +1800,7 @@ func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools [
 		return command, false, nil
 	}
 	if len(items)-currentUser != 3 {
-		return "", false, fmt.Errorf("invalid explicit shell tool roundtrip")
+		return "", false, newOfficialStructuralRejectionError("roundtrip", "malformed", "invalid explicit shell tool roundtrip")
 	}
 	if err := validateExplicitExecCommandRoundTrip(command, items[currentUser+1], items[currentUser+2], execCapability); err != nil {
 		return "", false, err
@@ -1803,17 +1811,17 @@ func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools [
 func parseExplicitExecCommand(text string, execCommandAllowed bool) (command string, explicit bool, err error) {
 	if strings.HasPrefix(text, explicitExecCommandV1Prefix) {
 		if strings.ContainsAny(text, "\r\n\x00") {
-			return "", true, fmt.Errorf("invalid V1 explicit shell command line")
+			return "", true, newOfficialStructuralRejectionError("command", "malformed", "invalid V1 explicit shell command line")
 		}
 		object, err := strictJSONObject([]byte(strings.TrimPrefix(text, explicitExecCommandV1Prefix)))
 		if err != nil || len(object) != 1 {
-			return "", true, fmt.Errorf("invalid V1 explicit shell command")
+			return "", true, newOfficialStructuralRejectionError("command", "malformed", "invalid V1 explicit shell command")
 		}
 		if json.Unmarshal(object["cmd"], &command) != nil || strings.TrimSpace(command) == "" || strings.ContainsAny(command, "\r\n\x00") {
-			return "", true, fmt.Errorf("invalid V1 explicit shell command value")
+			return "", true, newOfficialStructuralRejectionError("command", "malformed", "invalid V1 explicit shell command value")
 		}
 		if !execCommandAllowed {
-			return "", true, fmt.Errorf("incompatible explicit shell command")
+			return "", true, newOfficialStructuralRejectionError("command", "incompatible", "incompatible explicit shell command")
 		}
 		return command, true, nil
 	}
@@ -1822,11 +1830,11 @@ func parseExplicitExecCommand(text string, execCommandAllowed bool) (command str
 	}
 	candidate := strings.TrimPrefix(text, explicitExecCommandPrefix)
 	if !strings.HasSuffix(candidate, explicitExecCommandSuffix) {
-		return "", true, fmt.Errorf("malformed explicit shell command")
+		return "", true, newOfficialStructuralRejectionError("command", "malformed", "malformed explicit shell command")
 	}
 	command = strings.TrimSuffix(candidate, explicitExecCommandSuffix)
 	if command == "" || strings.ContainsAny(command, "\r\n") || !execCommandAllowed {
-		return "", true, fmt.Errorf("incompatible explicit shell command")
+		return "", true, newOfficialStructuralRejectionError("command", "incompatible", "incompatible explicit shell command")
 	}
 	return command, true, nil
 }
@@ -1836,15 +1844,15 @@ func validateExplicitExecCommandRoundTrip(command string, call, output responses
 	switch capability {
 	case officialExecCommandFunction:
 		if call.Type != "function_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec_command" {
-			return fmt.Errorf("invalid explicit shell function call")
+			return newOfficialStructuralRejectionError("tool_call", "malformed", "invalid explicit shell function call")
 		}
 		arguments, err := strictJSONObject([]byte(call.Arguments))
 		if err != nil || len(arguments) != 1 {
-			return fmt.Errorf("invalid explicit shell function arguments")
+			return newOfficialStructuralRejectionError("call_arguments", "malformed", "invalid explicit shell function arguments")
 		}
 		var calledCommand string
 		if json.Unmarshal(arguments["cmd"], &calledCommand) != nil || calledCommand != command {
-			return fmt.Errorf("explicit shell function arguments do not match")
+			return newOfficialStructuralRejectionError("call_arguments", "mismatch", "explicit shell function arguments do not match")
 		}
 		outputType = "function_call_output"
 	case officialExecCommandCustom:
@@ -1853,17 +1861,17 @@ func validateExplicitExecCommandRoundTrip(command string, call, output responses
 			return err
 		}
 		if call.Type != "custom_tool_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec" || call.Input != expectedInput {
-			return fmt.Errorf("invalid explicit shell custom tool call")
+			return newOfficialStructuralRejectionError("call_input", "mismatch", "invalid explicit shell custom tool call")
 		}
 		outputType = "custom_tool_call_output"
 	default:
-		return fmt.Errorf("explicit shell tool capability is unavailable")
+		return newOfficialStructuralRejectionError("tool_capability", "unavailable", "explicit shell tool capability is unavailable")
 	}
 	if output.Type != outputType || strings.TrimSpace(output.CallID) == "" || output.CallID != call.CallID {
-		return fmt.Errorf("invalid explicit shell tool output")
+		return newOfficialStructuralRejectionError("tool_output", "malformed", "invalid explicit shell tool output")
 	}
 	if rawJSONPresent(output.Output) && rawJSONPresent(output.Content) {
-		return fmt.Errorf("ambiguous explicit shell function output")
+		return newOfficialStructuralRejectionError("tool_output", "ambiguous", "ambiguous explicit shell function output")
 	}
 	var result string
 	var err error
@@ -1873,10 +1881,10 @@ func validateExplicitExecCommandRoundTrip(command string, call, output responses
 		result, err = responseToolOutputText(output.Content)
 	}
 	if err != nil {
-		return fmt.Errorf("invalid explicit shell function output content")
+		return newOfficialStructuralRejectionError("tool_output", "unsupported", "invalid explicit shell function output content")
 	}
 	if strings.TrimSpace(result) == "" {
-		return fmt.Errorf("empty explicit shell function output")
+		return newOfficialStructuralRejectionError("tool_output", "empty", "empty explicit shell function output")
 	}
 	return nil
 }
@@ -2210,6 +2218,7 @@ type responsesRequest struct {
 	Input  json.RawMessage `json:"input"`
 	Stream bool            `json:"stream"`
 	Tools  []responsesTool `json:"tools,omitempty"`
+	raw    map[string]json.RawMessage
 }
 
 type responsesTool struct {
