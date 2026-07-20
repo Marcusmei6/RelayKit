@@ -31,11 +31,15 @@ struct GatewayClient {
     }
 
     func modelList() async throws -> ModelListResponse {
+        try JSONDecoder().decode(ModelListResponse.self, from: try await modelListData())
+    }
+
+    func modelListData() async throws -> Data {
         let (data, response) = try await URLSession.shared.data(from: baseURL.appending(path: "v1/models"))
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
-        return try JSONDecoder().decode(ModelListResponse.self, from: data)
+        return data
     }
 
     func testProvider(providerID: String, modelID: String) async throws -> ProviderTestResponse {

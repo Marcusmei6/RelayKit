@@ -14,6 +14,8 @@ struct ContentView: View {
     @State private var showingDeveloperDiagnostics = false
     @State private var showingUsagePath = false
     @State private var usageActivityRange = UsageActivityRange.sevenDays
+    @State private var showingCodexConfigConfirmation = false
+    @State private var pendingCodexEnable = true
     private let smokeOpensProviderFromAddStrip: Bool
     private let showCatalogDetail: Bool
     private let showImportCandidate: Bool
@@ -156,6 +158,24 @@ struct ContentView: View {
         }
         .task(id: tab) {
             await runUsageAutoRefreshIfNeeded()
+        }
+        .confirmationDialog(
+            pendingCodexEnable ? "Enable RelayKit for Codex?" : "Disable RelayKit for Codex?",
+            isPresented: $showingCodexConfigConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(pendingCodexEnable ? "Enable RelayKit" : "Disable RelayKit", role: pendingCodexEnable ? nil : .destructive) {
+                Task {
+                    if pendingCodexEnable {
+                        await model.enableCodexForDesktop()
+                    } else {
+                        await model.disableCodexForDesktop()
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(codexConfigConfirmationMessage)
         }
     }
 
@@ -363,11 +383,33 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(secondaryText)
                 .lineLimit(1)
+            Button(model.codexIntegrationHasManagedState ? "Disable RelayKit" : "Enable RelayKit") {
+                pendingCodexEnable = !model.codexIntegrationHasManagedState
+                showingCodexConfigConfirmation = true
+            }
+            .buttonStyle(ControlButtonStyle(prominent: !model.codexConnectionIsConfigured))
+            .accessibilityIdentifier("codex-relaykit-toggle")
+            .smokeRecordOnly("codex-relaykit-toggle", recorder: smokeSectionRecorder)
+            if model.codexConnectionIsConfigured {
+                Text("Enabled · restart Codex to apply changes")
+                    .font(.caption2)
+                    .foregroundStyle(secondaryText)
+                    .lineLimit(1)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(hex: 0x78D8FF).opacity(0.11), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color(hex: 0x78D8FF).opacity(0.42)))
+    }
+
+    private var codexConfigConfirmationMessage: String {
+        let target = RelayKitPaths.defaultCodexConfigPath()
+        let state = RelayKitPaths.codexConfigStatePath()
+        if pendingCodexEnable {
+            return "Target: \(target)\n\nManaged fields: openai_base_url and model_catalog_json. If the target exists, RelayKit creates \(target).bak.<timestamp>; rollback state is stored at \(state). Disable restores pre-existing values that RelayKit replaced, while a later user edit is left untouched. RelayKit never reads or writes auth.json and does not change model or model_provider. Restart Codex after enabling."
+        }
+        return "Target: \(target)\n\nRelayKit removes unchanged managed fields or restores their pre-existing values. Later user edits remain untouched; the timestamped backup remains beside the target for explicit rollback. RelayKit never reads or writes auth.json and does not change model or model_provider. Restart Codex after disabling."
     }
 
     @ViewBuilder
@@ -1325,8 +1367,8 @@ struct ContentView: View {
                         labeledField("Gateway binary", text: $model.gatewayBinaryPath)
                         labeledField("Provider config", text: $model.providerConfigPath)
                         labeledField("Usage log", text: $model.usageLogPath)
-                        labeledField("Codex source example", text: $model.codexSourcePath)
-                        labeledField("Codex target", text: $model.codexTargetPath)
+                        settingsInfoRow(title: "Codex target (managed)", subtitle: shortPath(RelayKitPaths.defaultCodexConfigPath()))
+                        settingsInfoRow(title: "Codex catalog", subtitle: shortPath(RelayKitPaths.codexCatalogPath()))
                     }
                     Text("Evidence path: \(shortPath(RelayKitPaths.officialRouteEvidencePath()))")
                         .font(.caption.monospaced())

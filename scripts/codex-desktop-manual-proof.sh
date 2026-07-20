@@ -71,7 +71,7 @@ PROVIDER_TOKEN_ENV="RELAYKIT_DESKTOP_PROOF_PROVIDER_TOKEN"
 PROVIDER_TOKEN_VALUE="relaykit-desktop-proof-token"
 PROOF_PROVIDER_MODEL_ID="${RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID:-desktop-proof-demo/claude-haiku-4-5}"
 PROOF_SCOPE="fixture_plumbing_preflight"
-if [[ "${MODE}" == "run-auto" || "${MODE}" == "run-auto-assisted" ||
+if [[ "${MODE}" == "run-auto" || "${MODE}" == "run-auto-same-thread" || "${MODE}" == "run-auto-assisted" ||
       "${MODE}" == "--assisted-supervisor" || "${MODE}" == "rc1-native-responses-three-stage" ]]; then
   PROOF_INPUT_MODE="${RELAYKIT_DESKTOP_PROOF_INPUT_MODE:-automated_ax}"
 else
@@ -103,15 +103,19 @@ ASSISTED_MODE=false
 ASSISTED_STATE_PATH=""
 ASSISTED_CLEANUP_DONE=false
 ASSISTED_TERMINAL_WRITTEN=false
+THREAD_CONTRACT="distinct"
 
 usage() {
   cat >&2 <<'EOF'
-usage: ./scripts/codex-desktop-manual-proof.sh [run|run-auto --scenario /absolute/path/scenario.json|run-auto-assisted --scenario /absolute/path/scenario.json --pause-before-stage official-tool|resume-auto-assisted --run-state /absolute/path/state.json|rc1-native-responses-three-stage --scenario /absolute/path/scenario.json|--setup-only|status|cleanup|--purge]
+usage: ./scripts/codex-desktop-manual-proof.sh [run|run-auto --scenario /absolute/path/scenario.json|run-auto-same-thread --scenario /absolute/path/scenario.json|run-auto-assisted --scenario /absolute/path/scenario.json --pause-before-stage official-tool|resume-auto-assisted --run-state /absolute/path/state.json|rc1-native-responses-three-stage --scenario /absolute/path/scenario.json|--setup-only|status|cleanup|--purge]
 
 run          Start an extracted RelayKit App with isolated state, verify its
              gateway/login gate, then start Codex Desktop for manual requests.
 run-auto     Run the same isolated proof with the PID/window-bound AX driver.
              It never waits for user input and fails closed on missing setup.
+run-auto-same-thread
+             Run the four delivery stages in one Desktop thread. Only the
+             first stage creates a task; later stages reuse its composer.
 run-auto-assisted
              Run five bound stages in a persistent supervisor, then pause for
              one manual official-tool submission. Resume from the owner-only
@@ -1607,7 +1611,9 @@ PY
 automated_stages_complete() {
   local stages_path="$1"
   local expected_count="$2"
-  jq -e --argjson expected "${expected_count}" '
+  local thread_contract="${3:-distinct}"
+  [[ "${thread_contract}" == "distinct" || "${thread_contract}" == "same" ]] || return 2
+  jq -e --argjson expected "${expected_count}" --arg thread_contract "${thread_contract}" '
     length == $expected
     and all(.[];
       .state == "evidence_verified"
@@ -1620,8 +1626,31 @@ automated_stages_complete() {
     )
     and ([.[].id] | unique | length) == $expected
     and ([.[].evidence_role] | unique | length) == $expected
-    and ([.[].rollout_binding.thread_id] | unique | length) == $expected
+    and (if $thread_contract == "same"
+         then ([.[].rollout_binding.thread_id] | unique | length) == 1
+         else ([.[].rollout_binding.thread_id] | unique | length) == $expected
+         end)
   ' "${stages_path}" >/dev/null
+}
+
+validate_same_thread_delivery_scenario() {
+  local scenario_path="$1"
+  validate_auto_scenario "${scenario_path}" | jq -e --arg provider_model "${PROOF_PROVIDER_MODEL_ID}" '
+    . as $scenario
+    | .stages as $stages
+    | select(
+        ($stages | length) == 4
+        and [$stages[].id] == ["official-plain","provider-markdown","provider-tool","official-tool"]
+        and [$stages[].evidence_role] == ["official-plain","provider-markdown","provider-tool","official-tool"]
+        and [$stages[].expect] == ["plain","markdown","tool","tool"]
+        and ($provider_model | length) > 0
+        and $stages[1].model_id == $provider_model
+        and $stages[2].model_id == $provider_model
+        and $stages[0].model_id == $stages[3].model_id
+        and $stages[0].model_id != $provider_model
+      )
+    | $scenario
+  '
 }
 
 custom_tool_scenario_complete() {
@@ -5395,6 +5424,8 @@ run_automated_proof() {
   }
   if [[ "${ASSISTED_MODE}" == "true" ]]; then
     validate_assisted_scenario "${scenario_path}" >"${AUTOMATED_SCENARIO_NORMALIZED}"
+  elif [[ "${THREAD_CONTRACT}" == "same" ]]; then
+    validate_same_thread_delivery_scenario "${scenario_path}" >"${AUTOMATED_SCENARIO_NORMALIZED}"
   else
     validate_auto_scenario "${scenario_path}" >"${AUTOMATED_SCENARIO_NORMALIZED}"
   fi || {
@@ -5407,7 +5438,7 @@ run_automated_proof() {
     AUTO_ERROR_CODE="scenario_staging_failed"
     return 1
   }
-  if [[ "${ASSISTED_MODE}" == "true" ]]; then
+  if [[ "${ASSISTED_MODE}" == "true" || "${THREAD_CONTRACT}" == "same" ]]; then
     prepare_assisted_provider_inputs "${AUTOMATED_SCENARIO_NORMALIZED}"
   else
     prepare_automated_provider_inputs "${AUTOMATED_SCENARIO_NORMALIZED}"
@@ -5538,22 +5569,24 @@ run_automated_proof() {
       write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "prepared" "${submission_state}" "${usage_baseline}"
     fi
 
-    AUTO_ERROR_CODE="prepare_desktop_activation_failed"
-    activate_isolated_desktop
-    verify_desktop_window_identity
-    if ! "${AX_DRIVER_BINARY}" prepare --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --workspace "${ROOT}" >"${RUN_DIR}/ax-prepare-${index}.json"; then
-      driver_code="$(driver_failure_code "${RUN_DIR}/ax-prepare-${index}.json" "unknown")"
-      rm -f "${query_copy}"
-      if [[ "${ASSISTED_MODE}" != "true" || "${index}" -ne 6 ]]; then
-        write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "prepare_${driver_code}" || true
+    if [[ "${THREAD_CONTRACT}" == "distinct" || "${index}" -eq 1 ]]; then
+      AUTO_ERROR_CODE="prepare_desktop_activation_failed"
+      activate_isolated_desktop
+      verify_desktop_window_identity
+      if ! "${AX_DRIVER_BINARY}" prepare --pid "${desktop_pid}" --window-identity "${DESKTOP_WINDOW_IDENTITY}" --workspace "${ROOT}" >"${RUN_DIR}/ax-prepare-${index}.json"; then
+        driver_code="$(driver_failure_code "${RUN_DIR}/ax-prepare-${index}.json" "unknown")"
+        rm -f "${query_copy}"
+        if [[ "${ASSISTED_MODE}" != "true" || "${index}" -ne 6 ]]; then
+          write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "failed" "${submission_state}" "${usage_baseline}" "prepare_${driver_code}" || true
+        fi
+        AUTO_ERROR_CODE="prepare_${driver_code}"
+        return 1
       fi
-      AUTO_ERROR_CODE="prepare_${driver_code}"
-      return 1
-    fi
-    if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and (.action_count >= 1 and .action_count <= 37)' "${RUN_DIR}/ax-prepare-${index}.json" >/dev/null; then
-      rm -f "${query_copy}"
-      AUTO_ERROR_CODE="prepare_report_invalid"
-      return 1
+      if ! jq -e '.status == "ok" and .code == "ok" and .window_verified == true and .composer_count == 1 and (.action_count >= 1 and .action_count <= 37)' "${RUN_DIR}/ax-prepare-${index}.json" >/dev/null; then
+        rm -f "${query_copy}"
+        AUTO_ERROR_CODE="prepare_report_invalid"
+        return 1
+      fi
     fi
 
     if [[ "${ASSISTED_MODE}" == "true" && "${index}" -eq 6 ]]; then
@@ -5642,13 +5675,13 @@ run_automated_proof() {
     fi
     AUTO_ERROR_CODE="stage_evidence_write_failed"
     write_automated_stage_state "${stage_id}" "${model_id}" "${evidence_role}" "${expectation}" "evidence_verified" "${submission_state}" "${usage_baseline}"
-    automated_stages_complete "${AUTOMATED_STAGE_EVIDENCE}" "${index}" || {
+    automated_stages_complete "${AUTOMATED_STAGE_EVIDENCE}" "${index}" "${THREAD_CONTRACT}" || {
       AUTO_ERROR_CODE="stage_thread_or_evidence_not_unique"
       return 1
     }
   done < <(jq -c '.stages[]' "${AUTOMATED_SCENARIO_NORMALIZED}")
 
-  if [[ "${index}" -ne "${expected_stage_count}" ]] || ! automated_stages_complete "${AUTOMATED_STAGE_EVIDENCE}" "${expected_stage_count}"; then
+  if [[ "${index}" -ne "${expected_stage_count}" ]] || ! automated_stages_complete "${AUTOMATED_STAGE_EVIDENCE}" "${expected_stage_count}" "${THREAD_CONTRACT}"; then
     AUTO_ERROR_CODE="scenario_stage_completion_mismatch"
     return 1
   fi
@@ -5870,6 +5903,21 @@ case "${MODE}" in
       AUTO_ERROR_CODE="scenario_argument_invalid"
       exit 2
     }
+    run_automated_proof "${AUTO_SCENARIO_PATH}"
+    exit 0
+    ;;
+  run-auto-same-thread)
+    trap cleanup_automated_run EXIT
+    trap handle_automated_signal INT TERM HUP
+    validate_automated_input_mode || {
+      AUTO_ERROR_CODE="input_mode_invalid"
+      exit 2
+    }
+    AUTO_SCENARIO_PATH="$(scenario_argument "$@")" || {
+      AUTO_ERROR_CODE="scenario_argument_invalid"
+      exit 2
+    }
+    THREAD_CONTRACT="same"
     run_automated_proof "${AUTO_SCENARIO_PATH}"
     exit 0
     ;;
@@ -6291,7 +6339,11 @@ EOF
     ;;
   --test-automated-stages-complete)
     [[ -n "${3:-}" ]] || exit 2
-    automated_stages_complete "$2" "$3"
+    automated_stages_complete "$2" "$3" "${4:-distinct}"
+    ;;
+  --test-same-thread-scenario)
+    [[ -n "${2:-}" && -z "${3:-}" ]] || exit 2
+    validate_same_thread_delivery_scenario "$2"
     ;;
   --test-custom-tool-scenario-complete)
     [[ -n "${5:-}" && -z "${6:-}" ]] || exit 2

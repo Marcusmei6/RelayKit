@@ -61,6 +61,9 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         if let smokeCatalogURL, let url = URL(string: smokeCatalogURL) {
             model.setLocalCatalogURL(url)
         }
+        if !CommandLine.arguments.contains("--ui-smoke") {
+            model.startGatewayOnOrdinaryLaunch()
+        }
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "bolt.horizontal.circle", accessibilityDescription: "RelayKit")
         statusItem.button?.imagePosition = .imageOnly

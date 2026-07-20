@@ -1,10 +1,14 @@
 package codexconfig
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml"
 )
 
 func TestActivateRequiresExplicitTarget(t *testing.T) {
@@ -78,5 +82,361 @@ func TestRestoreRequiresExistingBackup(t *testing.T) {
 	err := Restore(filepath.Join(t.TempDir(), "config.toml"), "missing.toml")
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestEnableStructurallyMergesOnlyManagedRootValues(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "relaykit-state.json")
+	catalogPath := filepath.Join(dir, "catalog.json")
+	original := []byte(`# existing Codex configuration
+model = "keep-this-model"
+model_provider = "keep-this-provider"
+approval_policy = "on-request"
+features = ["one", "two"]
+
+[mcp_servers.docs]
+command = "docs-server"
+args = ["--stdio"]
+
+[[profiles]]
+name = "existing"
+enabled = true
+`)
+	if err := os.WriteFile(target, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Enable(EnableOptions{TargetPath: target, CatalogPath: catalogPath, StatePath: statePath})
+	if err != nil {
+		t.Fatalf("Enable err = %v", err)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("expected backup")
+	}
+	assertMode(t, result.BackupPath, 0600)
+	assertMode(t, statePath, 0600)
+	assertMode(t, target, 0600)
+	backup, err := os.ReadFile(result.BackupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backup) != string(original) {
+		t.Fatalf("backup differs from original: %q", backup)
+	}
+
+	merged := loadTOML(t, target)
+	if got := merged.Get("model"); got != "keep-this-model" {
+		t.Fatalf("model = %#v", got)
+	}
+	if got := merged.Get("model_provider"); got != "keep-this-provider" {
+		t.Fatalf("model_provider = %#v", got)
+	}
+	if got := merged.Get("approval_policy"); got != "on-request" {
+		t.Fatalf("approval_policy = %#v", got)
+	}
+	if got := merged.Get("openai_base_url"); got != managedOpenAIBaseURL {
+		t.Fatalf("openai_base_url = %#v", got)
+	}
+	if got := merged.Get("model_catalog_json"); got != catalogPath {
+		t.Fatalf("model_catalog_json = %#v", got)
+	}
+	if got := merged.Get("mcp_servers.docs.command"); got != "docs-server" {
+		t.Fatalf("mcp table was not preserved: %#v", got)
+	}
+	profiles, ok := merged.Get("profiles").([]*toml.Tree)
+	if !ok || len(profiles) != 1 || profiles[0].Get("name") != "existing" {
+		t.Fatalf("profiles array was not preserved: %#v", merged.Get("profiles"))
+	}
+
+	stateBody, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stateBody), "keep-this-model") {
+		t.Fatalf("state contains target config data: %s", stateBody)
+	}
+	var state managedState
+	if err := json.Unmarshal(stateBody, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Target != target || state.Backup != result.BackupPath || state.Managed.ModelCatalogJSON != catalogPath {
+		t.Fatalf("state = %+v", state)
+	}
+}
+
+func TestEnableRejectsRelativeCatalogAndInvalidTOMLWithoutWrites(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "state.json")
+	original := []byte("model = [\n")
+	if err := os.WriteFile(target, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Enable(EnableOptions{TargetPath: target, CatalogPath: "catalog.json", StatePath: statePath})
+	if err == nil || !strings.Contains(err.Error(), "catalog path must be absolute") {
+		t.Fatalf("relative catalog error = %v", err)
+	}
+	_, err = Enable(EnableOptions{TargetPath: target, CatalogPath: filepath.Join(dir, "catalog.json"), StatePath: statePath})
+	if err == nil || err.Error() != "invalid target TOML" {
+		t.Fatalf("invalid TOML error = %v", err)
+	}
+	body, readErr := os.ReadFile(target)
+	if readErr != nil || string(body) != string(original) {
+		t.Fatalf("target changed after failed enable: %q, %v", body, readErr)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("state should not exist, stat err = %v", err)
+	}
+}
+
+func TestEnableCreatesMissingTargetWithoutClaimingBackup(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "missing-config.toml")
+	statePath := filepath.Join(dir, "state.json")
+	result, err := Enable(EnableOptions{TargetPath: target, CatalogPath: filepath.Join(dir, "catalog.json"), StatePath: statePath})
+	if err != nil {
+		t.Fatalf("Enable error = %v", err)
+	}
+	if result.BackupPath != "" {
+		t.Fatalf("new target must not claim backup %q", result.BackupPath)
+	}
+	if status, err := IntegrationStatus(target, statePath); err != nil || status != StatusEnabled {
+		t.Fatalf("status = %q, %v", status, err)
+	}
+}
+
+func TestEnableLeavesTargetUnchangedIfStateDirectoryCannotBeCreated(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	original := []byte("model = \"keep\"\n")
+	if err := os.WriteFile(target, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Enable(EnableOptions{
+		TargetPath:  target,
+		CatalogPath: filepath.Join(dir, "catalog.json"),
+		StatePath:   filepath.Join(blocker, "state.json"),
+	})
+	if err == nil {
+		t.Fatalf("Enable error = %v", err)
+	}
+	body, readErr := os.ReadFile(target)
+	if readErr != nil || string(body) != string(original) {
+		t.Fatalf("target was not restored: %q, %v", body, readErr)
+	}
+	assertMode(t, target, 0644)
+}
+
+func TestIntegrationStatusDistinguishesEnabledDriftedAndDisabled(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "state.json")
+	catalogPath := filepath.Join(dir, "catalog.json")
+	if status, err := IntegrationStatus(target, statePath); err != nil || status != StatusDisabled {
+		t.Fatalf("initial status = %q, %v", status, err)
+	}
+	if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: catalogPath, StatePath: statePath}); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := IntegrationStatus(target, statePath); err != nil || status != StatusEnabled {
+		t.Fatalf("enabled status = %q, %v", status, err)
+	}
+	tree := loadTOML(t, target)
+	tree.Set("openai_base_url", "http://127.0.0.1:19999/v1")
+	changed, err := tree.ToTomlString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := IntegrationStatus(target, statePath); err != nil || status != StatusDrifted {
+		t.Fatalf("drifted status = %q, %v", status, err)
+	}
+}
+
+func TestEnableRefusesAuthJSONPathsWithoutReadingOrWritingThem(t *testing.T) {
+	dir := t.TempDir()
+	authPath := filepath.Join(dir, "auth.json")
+	original := []byte(`{"token":"RELAYKIT_FAKE_SENTINEL_DO_NOT_USE"}`)
+	if err := os.WriteFile(authPath, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Enable(EnableOptions{
+		TargetPath:  authPath,
+		CatalogPath: filepath.Join(dir, "catalog.json"),
+		StatePath:   filepath.Join(dir, "state.json"),
+	})
+	if err == nil || err.Error() != "auth.json paths are not allowed" {
+		t.Fatalf("Enable error = %v", err)
+	}
+	body, readErr := os.ReadFile(authPath)
+	if readErr != nil || string(body) != string(original) {
+		t.Fatalf("auth.json was changed: %q, %v", body, readErr)
+	}
+}
+
+func TestManagedConfigCommandsRejectSymlinksWithoutReadingAuthTarget(t *testing.T) {
+	dir := t.TempDir()
+	authPath := filepath.Join(dir, "auth.json")
+	targetLink := filepath.Join(dir, "config.toml")
+	stateLink := filepath.Join(dir, "state.json")
+	catalog := filepath.Join(dir, "catalog.json")
+	secret := []byte("fixture-auth-must-remain-unread-and-unchanged")
+	if err := os.WriteFile(authPath, secret, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(authPath, targetLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: targetLink, CatalogPath: catalog, StatePath: filepath.Join(dir, "managed.json")}); err == nil || !strings.Contains(err.Error(), "must not be a symbolic link") {
+		t.Fatalf("Enable symlink error = %v", err)
+	}
+	if err := os.Symlink(authPath, stateLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := IntegrationStatus(filepath.Join(dir, "missing-config.toml"), stateLink); err == nil || !strings.Contains(err.Error(), "must not be a symbolic link") {
+		t.Fatalf("IntegrationStatus symlink error = %v", err)
+	}
+	body, err := os.ReadFile(authPath)
+	if err != nil || string(body) != string(secret) {
+		t.Fatalf("auth target changed: %q, %v", body, err)
+	}
+}
+
+func TestDisableRemovesOnlyUnchangedManagedValues(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "state.json")
+	catalogPath := filepath.Join(dir, "catalog.json")
+	if err := os.WriteFile(target, []byte("model = \"keep\"\nmodel_provider = \"official\"\n[table]\narray = [1, 2]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: catalogPath, StatePath: statePath}); err != nil {
+		t.Fatal(err)
+	}
+	changed := loadTOML(t, target)
+	changed.Set("openai_base_url", "http://127.0.0.1:29999/v1")
+	body, err := changed.ToTomlString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Disable(target, statePath)
+	if err != nil {
+		t.Fatalf("Disable err = %v", err)
+	}
+	if strings.Join(result.Removed, ",") != "model_catalog_json" || strings.Join(result.Preserved, ",") != "openai_base_url" {
+		t.Fatalf("result = %+v", result)
+	}
+	disabled := loadTOML(t, target)
+	if got := disabled.Get("openai_base_url"); got != "http://127.0.0.1:29999/v1" {
+		t.Fatalf("later user change was removed: %#v", got)
+	}
+	if got := disabled.Get("model_catalog_json"); got != nil {
+		t.Fatalf("managed catalog was not removed: %#v", got)
+	}
+	if disabled.Get("model") != "keep" || disabled.Get("model_provider") != "official" || disabled.Get("table.array") == nil {
+		t.Fatalf("unrelated config changed: %#v", disabled.ToMap())
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("state should be removed, stat err = %v", err)
+	}
+}
+
+func TestDisableRestoresPreexistingManagedFieldsAfterRepeatedEnable(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "state.json")
+	firstCatalog := filepath.Join(dir, "catalog-1.json")
+	secondCatalog := filepath.Join(dir, "catalog-2.json")
+	originalBaseURL := "http://127.0.0.1:11434/v1"
+	originalCatalog := filepath.Join(dir, "original-catalog.json")
+	original := fmt.Sprintf("model = \"keep\"\nopenai_base_url = %q\nmodel_catalog_json = %q\n", originalBaseURL, originalCatalog)
+	if err := os.WriteFile(target, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: firstCatalog, StatePath: statePath}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: secondCatalog, StatePath: statePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Disable(target, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.Restored, ",") != "openai_base_url,model_catalog_json" || len(result.Removed) != 0 || len(result.Preserved) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	disabled := loadTOML(t, target)
+	if disabled.Get("openai_base_url") != originalBaseURL || disabled.Get("model_catalog_json") != originalCatalog || disabled.Get("model") != "keep" {
+		t.Fatalf("preexisting values were not restored: %#v", disabled.ToMap())
+	}
+}
+
+func TestDisableRejectsMismatchedOrInvalidStateWithoutChangingTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "state.json")
+	original := []byte("model = \"keep\"\n")
+	if err := os.WriteFile(target, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	state := managedState{Version: stateVersion, Target: filepath.Join(dir, "other.toml"), Backup: filepath.Join(dir, "config.toml.bak.20260721T000000.000000000Z"), Managed: managedValues{OpenAIBaseURL: managedOpenAIBaseURL, ModelCatalogJSON: filepath.Join(dir, "catalog.json")}}
+	body, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Disable(target, statePath)
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("Disable error = %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != string(original) {
+		t.Fatalf("target changed: %q, %v", got, err)
+	}
+}
+
+func loadTOML(t *testing.T, path string) *toml.Tree {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := toml.LoadBytes(body)
+	if err != nil {
+		t.Fatalf("load TOML: %v\n%s", err, body)
+	}
+	return tree
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %04o, want %04o", path, got, want)
 	}
 }

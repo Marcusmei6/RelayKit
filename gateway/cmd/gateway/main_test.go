@@ -100,6 +100,109 @@ func TestActivateCodexConfigWritesExplicitTargetAndPrintsRollback(t *testing.T) 
 	}
 }
 
+func TestEnableAndDisableCodexConfigUseExplicitManagedState(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	catalog := filepath.Join(dir, "catalog.json")
+	state := filepath.Join(dir, "state.json")
+	const privateValue = "do-not-print-this-config-value"
+	if err := os.WriteFile(target, []byte("model = \"keep\"\nsecret_note = \""+privateValue+"\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"enable-codex-config", "-target", target, "-catalog", catalog, "-state", state}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("enable code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Codex config enabled") || strings.Contains(stdout.String(), privateValue) {
+		t.Fatalf("enable output = %q", stdout.String())
+	}
+	configured, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configured), "model = \"keep\"") || !strings.Contains(string(configured), "openai_base_url") {
+		t.Fatalf("configured target = %q", configured)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"disable-codex-config", "-target", target, "-state", state}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("disable code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "removed: openai_base_url, model_catalog_json") || strings.Contains(stdout.String(), privateValue) {
+		t.Fatalf("disable output = %q", stdout.String())
+	}
+}
+
+func TestDisableCodexConfigReportsRestoredPreviousValues(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	catalog := filepath.Join(dir, "catalog.json")
+	state := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(target, []byte("openai_base_url = \"http://127.0.0.1:11434/v1\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"enable-codex-config", "-target", target, "-catalog", catalog, "-state", state}, &stdout, &stderr); code != 0 {
+		t.Fatalf("enable code=%d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"disable-codex-config", "-target", target, "-state", state}, &stdout, &stderr); code != 0 {
+		t.Fatalf("disable code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "restored previous values: openai_base_url") {
+		t.Fatalf("disable output = %q", stdout.String())
+	}
+}
+
+func TestEnableCodexConfigRequiresExplicitArguments(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"enable-codex-config", "-target", "config.toml"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "target, catalog, and state are required") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestCodexConfigStatusCommandReportsManagedState(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	state := filepath.Join(dir, "state.json")
+	catalog := filepath.Join(dir, "catalog.json")
+	if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"enable-codex-config", "-target", target, "-catalog", catalog, "-state", state}, &stdout, &stderr); code != 0 {
+		t.Fatalf("enable failed: %s", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"codex-config-status", "-target", target, "-state", state}, &stdout, &stderr); code != 0 || strings.TrimSpace(stdout.String()) != "enabled" {
+		t.Fatalf("status code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestActivateCodexConfigRefusesAuthJSONSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "auth.json")
+	target := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(source, []byte(`{"token":"RELAYKIT_FAKE_SENTINEL_DO_NOT_USE"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"activate-codex-config", "-source", source, "-target", target}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "auth.json paths are not allowed") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("target should not exist, stat err = %v", err)
+	}
+}
+
 func TestReadCredentialHandoff(t *testing.T) {
 	credentials, err := readCredentialHandoff(strings.NewReader(`{"version":1,"credentials":{"relaykit.provider.one":"fixture-secret"}}`))
 	if err != nil {

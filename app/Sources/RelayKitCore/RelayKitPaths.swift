@@ -43,9 +43,41 @@ public enum RelayKitPaths {
     }
 
     public static func userProviderConfigPath() -> String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/RelayKit/providers.json")
+        applicationSupportDirectory()
+            .appendingPathComponent("providers.json")
             .path
+    }
+
+    public static func gatewayRuntimeConfigPath() -> String {
+        applicationSupportDirectory()
+            .appendingPathComponent("gateway-runtime.json")
+            .path
+    }
+
+    public static func codexCatalogPath() -> String {
+        applicationSupportDirectory()
+            .appendingPathComponent("codex-model-catalog.json")
+            .path
+    }
+
+    public static func codexConfigStatePath() -> String {
+        applicationSupportDirectory()
+            .appendingPathComponent("codex-config-state.json")
+            .path
+    }
+
+    public static func defaultCodexConfigPath(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> String {
+        homeDirectory.appendingPathComponent(".codex/config.toml").path
+    }
+
+    public static func applicationSupportDirectory(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        homeDirectory
+            .appendingPathComponent("Library/Application Support/RelayKit", isDirectory: true)
+            .standardizedFileURL
     }
 
     public static func officialProofRoot(

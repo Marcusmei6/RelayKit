@@ -1674,6 +1674,32 @@ JSON
 test "$("${PROOF_SCRIPT}" --test-automated-profile "${scenario_dir}/custom-tool-profile.json" "public/provider-model")" = "single_tool_scenario"
 test "$("${PROOF_SCRIPT}" --test-automated-profile "${scenario_file}" "public/provider-model")" = "custom_scenario"
 
+same_thread_dir="${scenario_dir}/same-thread"
+mkdir -m 700 "${same_thread_dir}"
+for stage in official-plain provider-markdown provider-tool official-tool; do
+  printf 'fixture %s marker\n' "${stage}" >"${same_thread_dir}/${stage}.txt"
+  chmod 600 "${same_thread_dir}/${stage}.txt"
+done
+cat >"${same_thread_dir}/scenario.json" <<JSON
+{"version":1,"stage_timeout_seconds":60,"stages":[
+  {"id":"official-plain","model_id":"@current-official","model_label":"@current-official","query_file":"${same_thread_dir}/official-plain.txt","response_marker":"SAME_THREAD_OFFICIAL_PLAIN","evidence_role":"official-plain","expect":"plain"},
+  {"id":"provider-markdown","model_id":"public/provider-model","model_label":"Provider","query_file":"${same_thread_dir}/provider-markdown.txt","response_marker":"SAME_THREAD_PROVIDER_MARKDOWN","evidence_role":"provider-markdown","expect":"markdown"},
+  {"id":"provider-tool","model_id":"public/provider-model","model_label":"Provider","query_file":"${same_thread_dir}/provider-tool.txt","response_marker":"SAME_THREAD_PROVIDER_TOOL","evidence_role":"provider-tool","expect":"tool"},
+  {"id":"official-tool","model_id":"@current-official","model_label":"@current-official","query_file":"${same_thread_dir}/official-tool.txt","response_marker":"SAME_THREAD_OFFICIAL_TOOL","evidence_role":"official-tool","expect":"tool"}
+]}
+JSON
+chmod 600 "${same_thread_dir}/scenario.json"
+RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID=public/provider-model \
+  "${PROOF_SCRIPT}" --test-same-thread-scenario "${same_thread_dir}/scenario.json" >"${same_thread_dir}/normalized.json"
+jq -e '[.stages[].id] == ["official-plain","provider-markdown","provider-tool","official-tool"]' \
+  "${same_thread_dir}/normalized.json" >/dev/null || fail "same-thread scenario normalization lost its delivery order"
+jq '.stages[3].model_id = "gpt-5.5" | .stages[3].model_label = "GPT-5.5"' \
+  "${same_thread_dir}/scenario.json" >"${same_thread_dir}/wrong-official.json"
+chmod 600 "${same_thread_dir}/wrong-official.json"
+expect_failure "same-thread scenario accepted a final official model that differs from stage one" env \
+  RELAYKIT_DESKTOP_PROOF_PUBLIC_MODEL_ID=public/provider-model \
+  "${PROOF_SCRIPT}" --test-same-thread-scenario "${same_thread_dir}/wrong-official.json"
+
 cat >"${scenario_dir}/complete-stages.json" <<'JSON'
 [
   {"id":"one","evidence_role":"role-one","state":"evidence_verified","submission_state":"submitted","rollout_binding":{"proof_found":true,"thread_id":"thread-one","user_marker_count":1,"assistant_marker_count":1}},
@@ -1684,6 +1710,9 @@ JSON
 jq '.[1].rollout_binding.thread_id = "thread-one"' "${scenario_dir}/complete-stages.json" >"${scenario_dir}/duplicate-thread-stages.json"
 expect_failure "automated stages accepted a reused rollout thread" \
   "${PROOF_SCRIPT}" --test-automated-stages-complete "${scenario_dir}/duplicate-thread-stages.json" 2
+"${PROOF_SCRIPT}" --test-automated-stages-complete "${scenario_dir}/duplicate-thread-stages.json" 2 same
+expect_failure "same-thread stages accepted distinct rollout threads" \
+  "${PROOF_SCRIPT}" --test-automated-stages-complete "${scenario_dir}/complete-stages.json" 2 same
 jq '.[1].state = "submitted"' "${scenario_dir}/complete-stages.json" >"${scenario_dir}/incomplete-stages.json"
 expect_failure "automated stages accepted an incomplete stage" \
   "${PROOF_SCRIPT}" --test-automated-stages-complete "${scenario_dir}/incomplete-stages.json" 2
@@ -1724,6 +1753,10 @@ grep -Fq '"${AX_DRIVER_BINARY}" reveal' <<<"${auto_wait_body}" ||
   fail "Markdown proof must reveal an exact off-screen heading through AX"
 grep -Fq 'submission_state="submitted"' <<<"${auto_body}" ||
   fail "automated proof must record the point after which it cannot safely resend"
+grep -Fq '[[ "${THREAD_CONTRACT}" == "distinct" || "${index}" -eq 1 ]]' <<<"${auto_body}" ||
+  fail "same-thread proof must prepare exactly the first stage and reuse its composer"
+grep -Fq '[[ "${ASSISTED_MODE}" == "true" || "${THREAD_CONTRACT}" == "same" ]]' <<<"${auto_body}" ||
+  fail "same-thread proof must require one explicit ignored real-provider input"
 setup_line="$(grep -n 'setup_preflight real' <<<"${auto_body}" | cut -d: -f1 | head -1)"
 bound_desktop_line="$(grep -n 'verify_desktop_window_identity' <<<"${auto_body}" | cut -d: -f1 | head -1)"
 postbinding_validation_line="$(grep -n 'validate_postbinding_query_content' <<<"${auto_body}" | cut -d: -f1 | head -1)"

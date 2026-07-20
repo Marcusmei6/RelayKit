@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +30,15 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "enable-codex-config" {
+		return enableCodexConfig(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "disable-codex-config" {
+		return disableCodexConfig(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "codex-config-status" {
+		return codexConfigStatus(args[1:], stdout, stderr)
+	}
 	if len(args) > 0 && args[0] == "activate-codex-config" {
 		return activateCodexConfig(args[1:], stdout, stderr)
 	}
@@ -38,6 +48,83 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := runServer(args, os.Stdin, stderr); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
+	}
+	return 0
+}
+
+func codexConfigStatus(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("codex-config-status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("target", "", "destination Codex config TOML path")
+	state := fs.String("state", "", "RelayKit managed-state JSON path")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *target == "" || *state == "" {
+		fmt.Fprintln(stderr, "target and state are required")
+		return 2
+	}
+	status, err := codexconfig.IntegrationStatus(*target, *state)
+	if err != nil {
+		fmt.Fprintf(stderr, "Codex config status failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, status)
+	return 0
+}
+
+func enableCodexConfig(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("enable-codex-config", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("target", "", "destination Codex config TOML path")
+	catalog := fs.String("catalog", "", "absolute RelayKit model catalog JSON path")
+	state := fs.String("state", "", "RelayKit managed-state JSON path")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *target == "" || *catalog == "" || *state == "" {
+		fmt.Fprintln(stderr, "target, catalog, and state are required")
+		return 2
+	}
+	result, err := codexconfig.Enable(codexconfig.EnableOptions{
+		TargetPath:  *target,
+		CatalogPath: *catalog,
+		StatePath:   *state,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "enable Codex config failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Codex config enabled\ntarget: %s\nstate: %s\nmanaged: openai_base_url, model_catalog_json\n", result.TargetPath, result.StatePath)
+	if result.BackupPath != "" {
+		fmt.Fprintf(stdout, "backup: %s\n", result.BackupPath)
+	}
+	return 0
+}
+
+func disableCodexConfig(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("disable-codex-config", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	target := fs.String("target", "", "destination Codex config TOML path")
+	state := fs.String("state", "", "RelayKit managed-state JSON path")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *target == "" || *state == "" {
+		fmt.Fprintln(stderr, "target and state are required")
+		return 2
+	}
+	result, err := codexconfig.Disable(*target, *state)
+	if err != nil {
+		fmt.Fprintf(stderr, "disable Codex config failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Codex config disabled\ntarget: %s\nremoved: %s\n", result.TargetPath, strings.Join(result.Removed, ", "))
+	if len(result.Restored) > 0 {
+		fmt.Fprintf(stdout, "restored previous values: %s\n", strings.Join(result.Restored, ", "))
+	}
+	if len(result.Preserved) > 0 {
+		fmt.Fprintf(stdout, "preserved later changes: %s\n", strings.Join(result.Preserved, ", "))
 	}
 	return 0
 }
@@ -149,6 +236,10 @@ func activateCodexConfig(args []string, stdout, stderr io.Writer) int {
 	}
 	if *source == "" {
 		fmt.Fprintln(stderr, "source is required")
+		return 2
+	}
+	if codexconfig.IsAuthJSONPath(*target) || codexconfig.IsAuthJSONPath(*source) {
+		fmt.Fprintln(stderr, "auth.json paths are not allowed")
 		return 2
 	}
 	content, err := os.ReadFile(*source)

@@ -80,8 +80,25 @@ final class GatewayProcess {
         self.process = nil
     }
 
-    func activateCodexConfig(binaryPath: String, source: String, target: String) throws -> String {
-        try runGatewayCommand(binaryPath: binaryPath, arguments: ["activate-codex-config", "-source", source, "-target", target])
+    func enableCodexConfig(binaryPath: String, target: String, catalog: String, state: String) throws -> String {
+        try runGatewayCommand(
+            binaryPath: binaryPath,
+            arguments: ["enable-codex-config", "-target", target, "-catalog", catalog, "-state", state]
+        )
+    }
+
+    func disableCodexConfig(binaryPath: String, target: String, state: String) throws -> String {
+        try runGatewayCommand(
+            binaryPath: binaryPath,
+            arguments: ["disable-codex-config", "-target", target, "-state", state]
+        )
+    }
+
+    func codexConfigStatus(binaryPath: String, target: String, state: String) throws -> String {
+        try runGatewayCommand(
+            binaryPath: binaryPath,
+            arguments: ["codex-config-status", "-target", target, "-state", state]
+        )
     }
 
     func summarizeUsage(binaryPath: String, usageLogPath: String) throws -> String {

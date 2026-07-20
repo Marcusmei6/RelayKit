@@ -2,13 +2,15 @@
 set -euo pipefail
 
 APP_NAME="RelayKitApp"
-APP_MARKETING_VERSION="${RELAYKIT_APP_VERSION:-0.1.0}"
+APP_MARKETING_VERSION="${RELAYKIT_APP_VERSION:-0.1.1}"
+EXPECTED_TEAM_ID="WDZT4H533S"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 TAG="v${APP_MARKETING_VERSION}"
 RELEASE_DIR="${DIST_DIR}/github-release/${TAG}"
 SIGNED_ZIP="${RELEASE_DIR}/${APP_NAME}-${APP_MARKETING_VERSION}-signed.zip"
 SHA256_PATH="${SIGNED_ZIP}.sha256"
+MANIFEST_PATH="${RELEASE_DIR}/manifest.json"
 NOTES_PATH="${RELEASE_DIR}/release-notes.md"
 VERIFY_DIR="${DIST_DIR}/verify-github-release"
 EXTRACTED_APP="${VERIFY_DIR}/${APP_NAME}.app"
@@ -35,9 +37,22 @@ fail() {
 
 repo="$(repo_target || true)"
 [[ -n "${repo}" ]] || fail "missing GitHub repo target: set RELAYKIT_GITHUB_REPO or configure origin"
-[[ -f "${SIGNED_ZIP}" && -f "${SHA256_PATH}" ]] || fail "missing signed release artifact: run ./script/package_signed_release.sh first"
+[[ -f "${SIGNED_ZIP}" && -f "${SHA256_PATH}" && -f "${MANIFEST_PATH}" ]] || fail "missing immutable signed release assets: run ./script/package_signed_release.sh first"
 command -v gh >/dev/null 2>&1 || fail "missing gh CLI"
 gh auth status >/dev/null 2>&1 || fail "gh CLI is not authenticated"
+
+zip_sha256="$(/usr/bin/shasum -a 256 "${SIGNED_ZIP}" | /usr/bin/awk '{print $1}')"
+checksum_sha256="$(/usr/bin/awk -v file="$(basename "${SIGNED_ZIP}")" 'NF == 2 && $2 == file { print $1 }' "${SHA256_PATH}")"
+[[ "${checksum_sha256}" == "${zip_sha256}" ]] || fail "signed release checksum does not match zip"
+jq -e --arg artifact_sha256 "${zip_sha256}" --arg version "${APP_MARKETING_VERSION}" --arg team_id "${EXPECTED_TEAM_ID}" '
+  (.schema_version == 1) and (.app_name == "RelayKitApp") and
+  (.artifact_sha256 == $artifact_sha256) and (.version == $version) and
+  (.team_id == $team_id) and (.hardened_runtime == true) and
+  (.source_commit_sha | test("^[0-9a-f]{40}$")) and
+  (.source_snapshot_sha256 | test("^[0-9a-f]{64}$")) and
+  (.app_tree_sha256 | test("^[0-9a-f]{64}$")) and
+  (.app_executable_sha256 | test("^[0-9a-f]{64}$"))
+' "${MANIFEST_PATH}" >/dev/null || fail "signed release manifest does not match zip"
 
 rm -rf "${VERIFY_DIR}"
 mkdir -p "${VERIFY_DIR}"
@@ -73,6 +88,7 @@ gh release create "${TAG}" \
   --title "RelayKit ${APP_MARKETING_VERSION} Dogfood Beta" \
   --notes-file "${NOTES_PATH}" \
   "${SIGNED_ZIP}" \
-  "${SHA256_PATH}"
+  "${SHA256_PATH}" \
+  "${MANIFEST_PATH}"
 
 echo "RelayKit GitHub Release draft created for ${TAG}"

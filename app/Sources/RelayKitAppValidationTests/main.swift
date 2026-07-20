@@ -590,6 +590,91 @@ func expectLocalCatalogSummary() throws {
     }
 }
 
+func expectCodexCatalogMerge() throws {
+    let official = Data(#"""
+    {
+      "catalog_revision": "current",
+      "models": [
+        {
+          "slug": "gpt-official",
+          "display_name": "GPT Official",
+          "context_window": 128000,
+          "supported_in_api": true,
+          "service_tiers": ["standard"],
+          "preserved_metadata": {"kind": "official"}
+        }
+      ]
+    }
+    """#.utf8)
+    let gateway = Data(#"""
+    {
+      "data": [
+        {"id": "provider/healthy", "owned_by": "provider", "display_name": "Healthy Provider"},
+        {"id": "provider/hidden", "owned_by": "provider"}
+      ],
+      "model_health": {"hidden": [{"id": "provider/hidden", "reason": "unavailable"}]}
+    }
+    """#.utf8)
+    let data = try CodexModelCatalog.merge(officialCatalog: official, gatewayModels: gateway, includeOfficialModels: true)
+    guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          root["catalog_revision"] as? String == "current",
+          let models = root["models"] as? [[String: Any]],
+          models.count == 2,
+          let officialModel = models.first,
+          (officialModel["preserved_metadata"] as? [String: String])?["kind"] == "official",
+          let provider = models.last,
+          provider["slug"] as? String == "provider/healthy",
+          provider["display_name"] as? String == "Healthy Provider",
+          provider["context_window"] as? Int == 128000,
+          provider["protocol"] as? String == "responses",
+          provider["transport"] as? String == "local_relaykit",
+          provider["supported_in_api"] as? Bool == true else {
+        fatalError("Codex catalog merge did not preserve official metadata and add only healthy RelayKit models")
+    }
+
+    let duplicateGateway = Data(#"{"data":[{"id":"provider/healthy"},{"id":"provider/healthy"}]}"#.utf8)
+    do {
+        _ = try CodexModelCatalog.merge(officialCatalog: official, gatewayModels: duplicateGateway, includeOfficialModels: true)
+        fatalError("duplicate healthy gateway model must fail catalog generation")
+    } catch CodexModelCatalogError.duplicateGatewayModel("provider/healthy") {
+    }
+
+    let providerOnly = try CodexModelCatalog.merge(officialCatalog: official, gatewayModels: gateway, includeOfficialModels: false)
+    let providerOnlyRoot = try JSONSerialization.jsonObject(with: providerOnly) as? [String: Any]
+    let providerOnlyModels = providerOnlyRoot?["models"] as? [[String: Any]]
+    if providerOnlyModels?.map({ $0["slug"] as? String }) != ["provider/healthy"] {
+        fatalError("provider-only catalog exposed unavailable official routes")
+    }
+
+    let collidingGateway = Data(#"{"data":[{"id":"gpt-official","owned_by":"provider"}]}"#.utf8)
+    let collidingProviderOnly = try CodexModelCatalog.merge(
+        officialCatalog: official,
+        gatewayModels: collidingGateway,
+        includeOfficialModels: false
+    )
+    let collidingRoot = try JSONSerialization.jsonObject(with: collidingProviderOnly) as? [String: Any]
+    let collidingModels = collidingRoot?["models"] as? [[String: Any]]
+    if collidingModels?.first?["slug"] as? String != "gpt-official" {
+        fatalError("provider-only catalog incorrectly dropped an Official-slug provider route")
+    }
+}
+
+func expectCodexCatalogProcessDrainContract() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let source = try String(
+        contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/CodexCatalogBuilder.swift"),
+        encoding: .utf8
+    )
+    guard source.contains("process.standardError = FileHandle.nullDevice") else {
+        fatalError("Codex catalog stderr must not corrupt JSON output")
+    }
+    guard let drain = source.range(of: "readDataToEndOfFile()"),
+          let wait = source.range(of: "process.waitUntilExit()"),
+          drain.lowerBound < wait.lowerBound else {
+        fatalError("Codex catalog output must be drained before waiting so a large catalog cannot deadlock")
+    }
+}
+
 func expectCredentialRefContract() throws {
     try expectValid("""
     {
@@ -1314,6 +1399,52 @@ func expectGatewayCredentialHandoff() throws {
     }
 }
 
+func expectSignedBetaAppContracts() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let gateway = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/GatewayProcess.swift"), encoding: .utf8)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    let app = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift"), encoding: .utf8)
+
+    for required in [
+        "func startGatewayOnOrdinaryLaunch()",
+        "Task { await refreshModels() }",
+        "func reconcileGatewayAfterOfficialStatusChange(wasConnected: Bool)",
+        "wasConnected != officialSnapshot.isConnected, gateway.isRunning",
+        "reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)",
+        "func reloadGatewayAfterProviderConfigChange() throws",
+        "func enableCodexForDesktop() async",
+        "func disableCodexForDesktop() async",
+        "func rebuildCodexCatalog() async throws",
+        "includeOfficialModels: includeOfficial",
+        "var codexIntegrationHasManagedState: Bool",
+        "RelayKitPaths.defaultCodexConfigPath()",
+        "RelayKitPaths.codexCatalogPath()",
+        "RelayKitPaths.codexConfigStatePath()",
+    ] {
+        if !appModel.contains(required) { fatalError("Signed Beta App contract missing \(required)") }
+    }
+    if appModel.components(separatedBy: "reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)").count - 1 < 2 {
+        fatalError("Official status refresh and explicit disconnect must both reconcile the running gateway")
+    }
+    for required in ["enable-codex-config", "disable-codex-config", "codex-config-status", "-target", "-catalog", "-state"] {
+        if !gateway.contains(required) { fatalError("Codex config command contract missing \(required)") }
+    }
+    for required in [
+        "confirmationDialog(", "Enable RelayKit", "Disable RelayKit", "managed fields", "restart Codex",
+        "openai_base_url", "model_catalog_json", ".bak.<timestamp>", "RelayKitPaths.codexConfigStatePath()",
+        "restores their pre-existing values", "never reads or writes auth.json", "does not change model or model_provider",
+    ] {
+        if !content.localizedCaseInsensitiveContains(required) { fatalError("Codex confirmation UI contract missing \(required)") }
+    }
+    if gateway.contains("activate-codex-config") || appModel.contains("activateCodexConfig") {
+        fatalError("legacy Codex activation command must not remain reachable")
+    }
+    if !app.contains("model.startGatewayOnOrdinaryLaunch()") {
+        fatalError("ordinary App launch must evaluate bundled gateway startup")
+    }
+}
+
 func expectStatusPopoverContract() throws {
     let sourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift")
@@ -1422,6 +1553,8 @@ try expectResponsesConnectionUsesGatewayOnly()
 try expectProviderModalAccessibilityContract()
 expectProviderDraftRejectsCredentialValue()
 try expectLocalCatalogSummary()
+try expectCodexCatalogMerge()
+try expectCodexCatalogProcessDrainContract()
 try expectCredentialRefContract()
 try expectCapabilityContract()
 expectAppSettingsPersistence()
@@ -1442,12 +1575,18 @@ expectProviderConnectionClassification()
 expectUsageAnalytics()
 try expectKeychainCredentialStore()
 try expectGatewayCredentialHandoff()
+try expectSignedBetaAppContracts()
 try expectStatusPopoverContract()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }
 if !RelayKitPaths.providerConfigPath(bundle: Bundle(for: BundleSentinel.self)).hasSuffix("Library/Application Support/RelayKit/providers.json") {
     fatalError("provider config path should default to user app support")
+}
+if !RelayKitPaths.codexCatalogPath().hasSuffix("Library/Application Support/RelayKit/codex-model-catalog.json") ||
+    !RelayKitPaths.codexConfigStatePath().hasSuffix("Library/Application Support/RelayKit/codex-config-state.json") ||
+    !RelayKitPaths.defaultCodexConfigPath().hasSuffix(".codex/config.toml") {
+    fatalError("Codex managed paths must stay in App Support with the default Codex config target")
 }
 if !RelayKitPaths.officialCredentialRefPath().hasSuffix("Library/Application Support/RelayKit/OfficialProof/official-credential.json") {
     fatalError("official credential reference should live in RelayKit App Support")

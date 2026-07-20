@@ -6,8 +6,8 @@ APP_NAME="RelayKitApp"
 APP_PROCESS_NAME="${APP_NAME}.bin"
 BUNDLE_ID="dev.relaykit.app"
 MIN_SYSTEM_VERSION="14.0"
-APP_MARKETING_VERSION="${RELAYKIT_APP_VERSION:-0.1.0}"
-APP_BUILD_NUMBER="${RELAYKIT_BUILD_NUMBER:-1}"
+APP_MARKETING_VERSION="${RELAYKIT_APP_VERSION:-0.1.1}"
+APP_BUILD_NUMBER="${RELAYKIT_BUILD_NUMBER:-2}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
@@ -52,6 +52,7 @@ build_bundle() {
   cp "${ROOT_DIR}/gateway/bin/relay" "${BUNDLED_GATEWAY}"
   cp "${ROOT_DIR}/examples/providers.example.json" "${APP_RESOURCES}/providers.example.json"
   cp "${ROOT_DIR}/examples/codex.config.example.toml" "${APP_RESOURCES}/codex.config.example.toml"
+  cp "${ROOT_DIR}/app/Resources/RelayKitApp.icns" "${APP_RESOURCES}/RelayKitApp.icns"
   chmod +x "${APP_REAL_BINARY}"
   chmod +x "${BUNDLED_GATEWAY}"
 
@@ -78,6 +79,8 @@ build_bundle() {
   <string>RelayKit</string>
   <key>CFBundleDisplayName</key>
   <string>RelayKit</string>
+  <key>CFBundleIconFile</key>
+  <string>RelayKitApp</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -111,6 +114,10 @@ verify_bundle() {
   fi
   if [[ ! -f "${APP_CONTENTS}/_CodeSignature/CodeResources" ]]; then
     echo "App bundle is missing _CodeSignature/CodeResources" >&2
+    exit 1
+  fi
+  if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "${INFO_PLIST}")" != "RelayKitApp" || ! -f "${APP_RESOURCES}/RelayKitApp.icns" ]]; then
+    echo "App bundle is missing the Finder icon contract" >&2
     exit 1
   fi
   local provisioning_path

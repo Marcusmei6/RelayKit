@@ -32,7 +32,6 @@ final class AppModel: ObservableObject {
     }
     @Published var codexTargetPath: String {
         didSet {
-            UserDefaults.standard.set(codexTargetPath, forKey: "codexTargetPath")
             refreshCodexConnectionStatus()
         }
     }
@@ -104,7 +103,7 @@ final class AppModel: ObservableObject {
         if savedPath != resolvedProviderConfigPath {
             UserDefaults.standard.set(resolvedProviderConfigPath, forKey: "providerConfigPath")
         }
-        codexTargetPath = UserDefaults.standard.string(forKey: "codexTargetPath") ?? ""
+        codexTargetPath = RelayKitPaths.defaultCodexConfigPath()
         appearanceMode = settingsStore.appearanceMode
         launchAtLoginRequested = settingsStore.launchAtLoginRequested
         refreshCodexConnectionStatus()
@@ -134,16 +133,27 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func startGatewayOnOrdinaryLaunch() {
+        guard storedGatewayConfigurationExists() else {
+            gatewayStatus = "stopped"
+            message = "RelayKit setup required: add a provider or connect Official."
+            return
+        }
+        startGateway()
+        if gateway.isRunning {
+            Task { await refreshModels() }
+        }
+    }
+
     func startGateway() {
         do {
-            let configPath = runtimeProviderConfigPath()
-            let configData = try Data(contentsOf: URL(fileURLWithPath: configPath))
-            let credentialHandoff = try GatewayCredentialHandoff.encode(configData: configData) { reference in
+            let runtimeConfig = try makeGatewayRuntimeConfig()
+            let credentialHandoff = try GatewayCredentialHandoff.encode(configData: runtimeConfig.data) { reference in
                 try KeychainCredentialStore.load(service: reference)
             }
             try gateway.start(
                 binaryPath: gatewayBinaryPath,
-                configPath: configPath,
+                configPath: runtimeConfig.path,
                 usageLogPath: usageLogPath,
                 credentialHandoff: credentialHandoff,
                 parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
@@ -154,7 +164,7 @@ final class AppModel: ObservableObject {
             refreshOfficialGatewayProjection()
         } catch {
             gatewayStatus = "error"
-            message = error.localizedDescription
+            message = gatewayFailureMessage(error)
             refreshOfficialGatewayProjection()
         }
     }
@@ -176,6 +186,7 @@ final class AppModel: ObservableObject {
         do {
             gatewayStatus = try await client.health()
             message = "Gateway health ok"
+            await rebuildCodexCatalogIfEnabled()
         } catch {
             gatewayStatus = gateway.isRunning ? "starting/error" : "stopped"
             message = gateway.isRunning ? error.localizedDescription : ProviderFormLabels.gatewayStoppedGuidance
@@ -192,6 +203,7 @@ final class AppModel: ObservableObject {
             models = response.data
             gatewayModelHealth = response.modelHealth ?? .empty
             message = "Loaded \(models.count) model(s)"
+            await rebuildCodexCatalogIfEnabled()
         } catch {
             message = gateway.isRunning ? error.localizedDescription : ProviderFormLabels.gatewayStoppedGuidance
         }
@@ -345,6 +357,7 @@ final class AppModel: ObservableObject {
     func refreshOfficialAuthStatus() {
         Task {
             do {
+                let wasConnected = officialSnapshot.isConnected
                 try ensureOfficialAuthDirs()
                 let result = await Self.runCodex(arguments: ["login", "status"], environment: officialCodexEnvironment())
                 switch result {
@@ -373,13 +386,25 @@ final class AppModel: ObservableObject {
                 case .failure(let error):
                     updateOfficialSnapshot(loggedIn: false, detail: error.localizedDescription)
                 }
+                reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)
+                await self.rebuildCodexCatalogIfEnabled()
             } catch {
                 updateOfficialSnapshot(loggedIn: false, detail: error.localizedDescription)
             }
         }
     }
 
+    private func reconcileGatewayAfterOfficialStatusChange(wasConnected: Bool) {
+        if wasConnected != officialSnapshot.isConnected, gateway.isRunning {
+            stopGateway()
+        }
+        if storedGatewayConfigurationExists(), !gateway.isRunning {
+            startGateway()
+        }
+    }
+
     func disconnectOfficial() {
+        let wasConnected = officialSnapshot.isConnected
         officialAuthProcess?.terminate()
         officialAuthProcess = nil
         officialAuthInProgress = false
@@ -394,6 +419,8 @@ final class AppModel: ObservableObject {
             officialDeviceCode = ""
             officialDeviceCodeCopied = false
             message = "Disconnected RelayKit official login"
+            reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)
+            Task { await rebuildCodexCatalogIfEnabled() }
         } catch {
             message = error.localizedDescription
         }
@@ -446,18 +473,23 @@ final class AppModel: ObservableObject {
             let json = try JSONSerialization.jsonObject(with: data)
             try ProviderConfigValidator.validate(json)
             let pretty = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            let gatewayWasRunning = gateway.isRunning
             var backupCreated = false
             if FileManager.default.fileExists(atPath: providerConfigPath) {
                 let backup = providerConfigPath + ".bak." + UUID().uuidString
                 try FileManager.default.copyItem(atPath: providerConfigPath, toPath: backup)
                 backupCreated = true
             }
+            try ensureProviderConfigDirectory()
             try pretty.write(to: URL(fileURLWithPath: providerConfigPath), options: .atomic)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? providerConfigText
             refreshConfiguredProviders(from: pretty)
-            message = ProviderFormLabels.providerConfigSavedMessage(backupCreated: backupCreated)
+            try reloadGatewayAfterProviderConfigChange()
+            let lifecycleMessage = gatewayWasRunning ? "gateway reloaded" : "gateway started"
+            message = ProviderFormLabels.providerConfigSavedMessage(backupCreated: backupCreated) + "; " + lifecycleMessage
+            Task { await rebuildCodexCatalogIfEnabled() }
         } catch {
-            message = error.localizedDescription
+            message = gatewayFailureMessage(error)
         }
     }
 
@@ -476,7 +508,7 @@ final class AppModel: ObservableObject {
             let originalConfig = FileManager.default.fileExists(atPath: providerConfigPath) ? try Data(contentsOf: configURL) : nil
             let backupCreated = try createProviderConfigBackupIfNeeded()
             let gatewayWasRunning = gateway.isRunning
-            try saveProviderTransaction(pretty, originalConfig: originalConfig, draft: draft, keychainCredential: keychainCredential, reloadRunningGateway: gatewayWasRunning)
+            try saveProviderTransaction(pretty, originalConfig: originalConfig, draft: draft, keychainCredential: keychainCredential)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
             refreshConfiguredProviders(from: pretty)
             let confirmation = ProviderFormLabels.providerAddedMessage(
@@ -484,9 +516,11 @@ final class AppModel: ObservableObject {
                 backupCreated: backupCreated
             )
             message = gatewayWasRunning ? "\(confirmation); gateway reloaded" : confirmation
+            if !gatewayWasRunning { message += "; gateway started" }
+            Task { await rebuildCodexCatalogIfEnabled() }
             return true
         } catch {
-            message = error.localizedDescription
+            message = gatewayFailureMessage(error)
             return false
         }
     }
@@ -507,14 +541,16 @@ final class AppModel: ObservableObject {
             let pretty = try ProviderConfigDraftWriter.addProvider(draft, to: filtered)
             let backupCreated = try createProviderConfigBackupIfNeeded()
             let gatewayWasRunning = gateway.isRunning
-            try saveProviderTransaction(pretty, originalConfig: originalConfig, draft: draft, keychainCredential: keychainCredential, reloadRunningGateway: gatewayWasRunning)
+            try saveProviderTransaction(pretty, originalConfig: originalConfig, draft: draft, keychainCredential: keychainCredential)
             providerConfigText = String(data: pretty, encoding: .utf8) ?? ""
             refreshConfiguredProviders(from: pretty)
             let confirmation = ProviderFormLabels.providerUpdatedMessage(backupCreated: backupCreated)
             message = gatewayWasRunning ? "\(confirmation); gateway reloaded" : confirmation
+            if !gatewayWasRunning { message += "; gateway started" }
+            Task { await rebuildCodexCatalogIfEnabled() }
             return true
         } catch {
-            message = error.localizedDescription
+            message = gatewayFailureMessage(error)
             return false
         }
     }
@@ -526,7 +562,7 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    private func saveProviderTransaction(_ pretty: Data, originalConfig: Data?, draft: ProviderConfigDraft, keychainCredential: String, reloadRunningGateway: Bool) throws {
+    private func saveProviderTransaction(_ pretty: Data, originalConfig: Data?, draft: ProviderConfigDraft, keychainCredential: String) throws {
         let configURL = URL(fileURLWithPath: providerConfigPath)
         let credential = draft.credentialKind == "keychain" && !keychainCredential.isEmpty
             ? ProviderSaveTransaction.CredentialChange(service: draft.credentialReference, value: keychainCredential)
@@ -539,7 +575,10 @@ final class AppModel: ObservableObject {
                 loadCredential: { try KeychainCredentialStore.loadIfPresent(service: $0) },
                 saveCredential: { service, value in try KeychainCredentialStore.save(value: value, service: service) },
                 deleteCredential: { try KeychainCredentialStore.delete(service: $0) },
-                writeConfig: { try $0.write(to: configURL, options: .atomic) },
+                writeConfig: { data in
+                    try self.ensureProviderConfigDirectory()
+                    try data.write(to: configURL, options: .atomic)
+                },
                 readConfig: {
                     let data = try Data(contentsOf: configURL)
                     let json = try JSONSerialization.jsonObject(with: data)
@@ -554,11 +593,7 @@ final class AppModel: ObservableObject {
                     }
                 },
                 reloadConfig: {
-                    guard reloadRunningGateway else { return }
-                    self.restartGateway()
-                    guard self.gateway.isRunning else {
-                        throw ProviderConfigError.invalid("Gateway reload failed.")
-                    }
+                    try self.reloadGatewayAfterProviderConfigChange()
                 }
             )
         )
@@ -595,26 +630,50 @@ final class AppModel: ObservableObject {
         }.value
     }
 
-    func activateCodexConfig() async {
-        guard !codexTargetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            message = "Codex target path is required"
-            return
-        }
+    func enableCodexForDesktop() async {
         do {
-            let output = try gateway.activateCodexConfig(
+            if !gateway.isRunning {
+                startGateway()
+            }
+            guard gateway.isRunning else {
+                throw GatewayClientError.gatewayUnavailable
+            }
+            try await rebuildCodexCatalog()
+            let output = try gateway.enableCodexConfig(
                 binaryPath: gatewayBinaryPath,
-                source: codexSourcePath,
-                target: codexTargetPath
+                target: RelayKitPaths.defaultCodexConfigPath(),
+                catalog: RelayKitPaths.codexCatalogPath(),
+                state: RelayKitPaths.codexConfigStatePath()
             )
-            message = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            message = detail.isEmpty ? "RelayKit enabled for Codex. Restart Codex to load the updated route." : "\(detail) Restart Codex to load the updated route."
             refreshCodexConnectionStatus()
         } catch {
-            message = error.localizedDescription
+            message = gatewayFailureMessage(error)
+        }
+    }
+
+    func disableCodexForDesktop() async {
+        do {
+            let output = try gateway.disableCodexConfig(
+                binaryPath: gatewayBinaryPath,
+                target: RelayKitPaths.defaultCodexConfigPath(),
+                state: RelayKitPaths.codexConfigStatePath()
+            )
+            let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            message = detail.isEmpty ? "RelayKit disabled for Codex. Restart Codex to restore its previous configuration." : "\(detail) Restart Codex to restore its previous configuration."
+            refreshCodexConnectionStatus()
+        } catch {
+            message = gatewayFailureMessage(error)
         }
     }
 
     var codexConnectionIsConfigured: Bool {
-        codexConnectionStatus == "configured"
+        codexConnectionStatus.hasPrefix("Enabled")
+    }
+
+    var codexIntegrationHasManagedState: Bool {
+        FileManager.default.fileExists(atPath: RelayKitPaths.codexConfigStatePath())
     }
 
     var gatewayIsRunning: Bool {
@@ -659,20 +718,21 @@ final class AppModel: ObservableObject {
     }
 
     func refreshCodexConnectionStatus() {
-        let path = codexTargetPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty else {
-            codexConnectionStatus = "target not set"
-            return
-        }
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
-            codexConnectionStatus = "target missing"
-            return
-        }
-        if text.contains("base_url = \"http://127.0.0.1:19777/v1\"") &&
-            text.contains("wire_api = \"responses\"") {
-            codexConnectionStatus = "configured"
-        } else {
-            codexConnectionStatus = "not RelayKit"
+        do {
+            let status = try gateway.codexConfigStatus(
+                binaryPath: gatewayBinaryPath,
+                target: RelayKitPaths.defaultCodexConfigPath(),
+                state: RelayKitPaths.codexConfigStatePath()
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            switch status {
+            case "enabled": codexConnectionStatus = "Enabled · restart Codex to apply changes"
+            case "drifted": codexConnectionStatus = "Needs attention · managed Codex settings changed"
+            default: codexConnectionStatus = "Disabled"
+            }
+        } catch {
+            codexConnectionStatus = codexIntegrationHasManagedState
+                ? "Needs attention · managed Codex settings could not be verified"
+                : "Disabled"
         }
     }
 
@@ -941,10 +1001,118 @@ final class AppModel: ObservableObject {
         return Data(#"{"providers":[]}"#.utf8)
     }
 
-    private func runtimeProviderConfigPath() -> String {
-        FileManager.default.fileExists(atPath: providerConfigPath)
-            ? providerConfigPath
-            : RelayKitPaths.exampleProviderConfigPath()
+    private func ensureProviderConfigDirectory() throws {
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: providerConfigPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+    }
+
+    private func storedGatewayConfigurationExists() -> Bool {
+        guard let data = try? providerConfigData(),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        let providers = root["providers"] as? [[String: Any]] ?? []
+        return !providers.isEmpty || officialSnapshot.isConnected
+    }
+
+    private func makeGatewayRuntimeConfig() throws -> (path: String, data: Data) {
+        let source = try providerConfigData()
+        guard var root = try JSONSerialization.jsonObject(with: source) as? [String: Any] else {
+            throw ProviderConfigError.invalid("Provider configuration must be a JSON object.")
+        }
+        let providers = root["providers"] as? [[String: Any]] ?? []
+        root.removeValue(forKey: "official_passthrough")
+        if !providers.isEmpty {
+            try ProviderConfigValidator.validate(root)
+        }
+
+        if officialSnapshot.isConnected {
+            let bundled = try CodexCatalogBuilder.catalog(accountProjection: true)
+            guard let catalog = try JSONSerialization.jsonObject(with: bundled.data) as? [String: Any],
+                  let catalogModels = catalog["models"] as? [[String: Any]] else {
+                throw CodexModelCatalogError.invalidOfficialCatalog
+            }
+            let officialModels = catalogModels.compactMap { model -> [String: String]? in
+                guard model["visibility"] as? String == "list",
+                      let id = model["slug"] as? String,
+                      !id.isEmpty else { return nil }
+                return ["id": id, "display_name": (model["display_name"] as? String) ?? id]
+            }
+            guard !officialModels.isEmpty else {
+                throw CodexModelCatalogError.missingOfficialTemplate
+            }
+            root["official_passthrough"] = [
+                "base_url": "https://api.openai.com/v1",
+                "credential_ref": ["kind": "codex_home", "value": RelayKitPaths.officialCodexHomePath()],
+                "codex_binary": bundled.binaryPath,
+                "models": officialModels,
+            ]
+        }
+
+        guard !providers.isEmpty || root["official_passthrough"] != nil else {
+            throw ProviderConfigError.invalid("RelayKit setup required: add a provider or connect Official before starting the gateway.")
+        }
+        root["providers"] = providers
+        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        let runtimeURL = URL(fileURLWithPath: RelayKitPaths.gatewayRuntimeConfigPath())
+        try FileManager.default.createDirectory(at: runtimeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: runtimeURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeURL.path)
+        return (runtimeURL.path, data)
+    }
+
+    private func reloadGatewayAfterProviderConfigChange() throws {
+        let wasRunning = gateway.isRunning
+        if wasRunning {
+            restartGateway()
+        } else {
+            startGateway()
+        }
+        guard gateway.isRunning else {
+            let action = wasRunning ? "reload" : "start"
+            throw ProviderConfigError.invalid("Gateway could not \(action). Check the provider configuration, Keychain credential, and whether port 19777 is already in use.")
+        }
+    }
+
+    private func rebuildCodexCatalogIfEnabled() async {
+        guard codexConnectionIsConfigured else { return }
+        do {
+            try await rebuildCodexCatalog()
+        } catch {
+            message = "Codex catalog update failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func rebuildCodexCatalog() async throws {
+        let includeOfficial = officialSnapshot.isConnected
+        let bundled = try CodexCatalogBuilder.catalog(accountProjection: includeOfficial)
+        let gatewayModels = try await client.modelListData()
+        let merged = try CodexModelCatalog.merge(
+            officialCatalog: bundled.data,
+            gatewayModels: gatewayModels,
+            includeOfficialModels: includeOfficial
+        )
+        let catalogURL = URL(fileURLWithPath: RelayKitPaths.codexCatalogPath())
+        try FileManager.default.createDirectory(at: catalogURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try merged.write(to: catalogURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: catalogURL.path)
+    }
+
+    private func gatewayFailureMessage(_ error: Error) -> String {
+        let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = detail.lowercased()
+        if normalized.contains("address already in use") || normalized.contains("port") {
+            return "Gateway could not bind port 19777. Stop the conflicting local process, then try again."
+        }
+        if normalized.contains("keychain") || normalized.contains("credential") {
+            return "Gateway credential is unavailable. Update the provider credential in Keychain, then try again."
+        }
+        if normalized.contains("config") || normalized.contains("provider") || normalized.contains("setup required") {
+            return "Gateway configuration needs attention: \(detail)"
+        }
+        return detail.isEmpty ? "Gateway action failed. Check RelayKit setup and try again." : detail
     }
 
     private func refreshConfiguredProviders() {
