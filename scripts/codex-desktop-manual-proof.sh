@@ -1122,7 +1122,7 @@ if re.fullmatch(r"RELAYKIT_[A-Z0-9_]{16,127}", marker) is None:
     raise SystemExit("assisted official-tool marker is not public-safe and fresh")
 expected_prompt = (
     "RELAYKIT_EXEC_COMMAND_V1 "
-    + json.dumps({"cmd": f"printf '{marker}\\n'; pwd"}, separators=(",", ":"))
+    + json.dumps({"cmd": f"echo '{marker}'; pwd"}, separators=(",", ":"))
 )
 try:
     prompt_bytes = Path(tool_stage["query_file"]).read_bytes()
@@ -1142,7 +1142,7 @@ import json
 import sys
 
 marker = sys.argv[1]
-command = f"printf '{marker}\\n'; pwd"
+command = f"echo '{marker}'; pwd"
 print("RELAYKIT_EXEC_COMMAND_V1 " + json.dumps({"cmd": command}, separators=(",", ":")))
 PY
 }
@@ -2701,7 +2701,7 @@ write_catalog() {
 write_codex_config() {
   local gateway_port="$1"
   local sandbox_line='sandbox_mode = "read-only"'
-  if [[ "${PROOF_SCOPE}" == "rc1_native_responses" ]]; then
+  if [[ "${PROOF_SCOPE}" == "rc1_native_responses" || "${PROOF_SCOPE}" == "real_isolated_route" ]]; then
     sandbox_line='sandbox_mode = "danger-full-access"'
   fi
 cat >"${CODEX_CONFIG}" <<TOML
@@ -3329,6 +3329,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 import sys
 from datetime import datetime
@@ -3345,6 +3346,7 @@ events = []
 xml_leak_records = []
 calls = {}
 outputs = {}
+invalid_pairs = set()
 
 session_binding_sha256 = None
 exact_session_binding_verified = False
@@ -3445,6 +3447,7 @@ for path in session_paths:
         call_id = item.get("call_id") or payload.get("call_id") or ""
         if not call_id:
             continue
+        pair_key = (str(path), call_id)
         if item_type in {"function_call", "custom_tool_call"}:
             if item_type == "custom_tool_call":
                 command = custom_exec_command(item.get("input"))
@@ -3456,12 +3459,17 @@ for path in session_paths:
                     parsed_args = {}
                 command = str(parsed_args.get("cmd") or parsed_args.get("command") or "")
             marker_found = marker in command
-            calls[call_id] = {
+            if pair_key in calls or pair_key in outputs:
+                invalid_pairs.add(pair_key)
+            calls.setdefault(pair_key, {
+                "call_id": call_id,
                 "model": current_model,
                 "tool_name": item.get("name") or "",
+                "item_type": item_type,
+                "status": item.get("status") or "",
                 "marker_found": marker_found,
-                "exact_shell_command_found": command == f"printf '{marker}\\n'; pwd",
-            }
+                "exact_shell_command_found": command == f"echo '{marker}'; pwd",
+            })
             events.append({
                 "timestamp": record.get("timestamp"),
                 "type": item_type,
@@ -3474,13 +3482,29 @@ for path in session_paths:
             output_text = tool_output_text(output)
             output_lines = output_text.splitlines()
             marker_found = any(line.strip() == marker for line in output_lines)
-            process_exited_zero = "Process exited with code 0" in output_text
-            outputs[call_id] = {
+            custom_tool_completed = bool(output_lines) and output_lines[0].strip() == "Script completed"
+            nonzero_or_failed = any(
+                line.strip().startswith("Script failed")
+                or re.fullmatch(r"Process exited with code [1-9][0-9]*", line.strip())
+                for line in output_lines
+            )
+            call = calls.get(pair_key, {})
+            if call.get("item_type") == "custom_tool_call":
+                process_exited_zero = (
+                    call.get("status") == "completed"
+                    and custom_tool_completed
+                    and not nonzero_or_failed
+                )
+            else:
+                process_exited_zero = "Process exited with code 0" in output_text and not nonzero_or_failed
+            if pair_key in outputs or pair_key not in calls:
+                invalid_pairs.add(pair_key)
+            outputs.setdefault(pair_key, {
                 "model": current_model,
                 "marker_found": marker_found,
                 "process_exited_zero": process_exited_zero,
                 "pwd_output_found": any(line.startswith("/") for line in output_lines),
-            }
+            })
             events.append({
                 "timestamp": record.get("timestamp"),
                 "type": item_type,
@@ -3489,23 +3513,25 @@ for path in session_paths:
                 "process_exited_zero": process_exited_zero,
             })
 
-matched_ids = [
-    call_id for call_id, call in calls.items()
+matched_keys = [
+    pair_key for pair_key, call in calls.items()
+    if pair_key not in invalid_pairs
     if call.get("model") == provider_model
     and call.get("tool_name") in {"exec", "exec_command", "shell", "bash"}
     and call.get("marker_found")
-    and outputs.get(call_id, {}).get("marker_found")
-    and outputs.get(call_id, {}).get("process_exited_zero")
+    and outputs.get(pair_key, {}).get("marker_found")
+    and outputs.get(pair_key, {}).get("process_exited_zero")
 ]
-assisted_matched_ids = [
-    call_id for call_id, call in calls.items()
+assisted_matched_keys = [
+    pair_key for pair_key, call in calls.items()
+    if pair_key not in invalid_pairs
     if call.get("model") == provider_model
     and call.get("tool_name") in {"exec", "exec_command", "shell", "bash"}
     and call.get("exact_shell_command_found")
-    and outputs.get(call_id, {}).get("model") == provider_model
-    and outputs.get(call_id, {}).get("marker_found")
-    and outputs.get(call_id, {}).get("pwd_output_found")
-    and outputs.get(call_id, {}).get("process_exited_zero")
+    and outputs.get(pair_key, {}).get("model") == provider_model
+    and outputs.get(pair_key, {}).get("marker_found")
+    and outputs.get(pair_key, {}).get("pwd_output_found")
+    and outputs.get(pair_key, {}).get("process_exited_zero")
 ]
 xml_leak_found = bool(xml_leak_records)
 exact_shell_command_found = any(
@@ -3520,13 +3546,13 @@ pwd_output_found = any(
     for output in outputs.values()
 )
 out_path.write_text(json.dumps({
-    "proof_found": bool(matched_ids) and not xml_leak_found,
+    "proof_found": bool(matched_keys) and not xml_leak_found,
     "function_call_found": any(event["type"] in {"function_call", "custom_tool_call"} for event in events),
     "function_call_output_found": any(event["type"] in {"function_call_output", "custom_tool_call_output"} for event in events),
-    "process_exited_zero": bool(matched_ids),
-    "matched_provider_tool_count": len(matched_ids),
-    "matched_call_ids": assisted_matched_ids,
-    "assisted_same_call_verified": len(assisted_matched_ids) == 1,
+    "process_exited_zero": bool(matched_keys),
+    "matched_provider_tool_count": len(matched_keys),
+    "matched_call_ids": [calls[key]["call_id"] for key in assisted_matched_keys],
+    "assisted_same_call_verified": len(assisted_matched_keys) == 1,
     "exact_session_binding_verified": exact_session_binding_verified,
     "session_binding_sha256": session_binding_sha256,
     "xml_leak_found": xml_leak_found,
@@ -5029,7 +5055,7 @@ print_rc1_native_responses_contract() {
     submission_count_each:1,
     stage_A:"text_marker",
     stage_B:"native_markdown_structure",
-    stage_C:"exact_shell_printf_marker_plus_pwd",
+    stage_C:"exact_shell_marker_plus_pwd",
     desktop_websocket_to_gateway:true,
     gateway_sse_to_fixture:true,
     tool_roundtrip:true,
@@ -5285,7 +5311,7 @@ write_rc1_native_responses_evidence() {
         isolated_desktop:true,
         stage_A_text_marker:true,
         stage_B_native_markdown_structure:true,
-        stage_C_exact_shell_printf_marker_plus_pwd:true,
+        stage_C_exact_shell_marker_plus_pwd:true,
         exactly_one_submission_each:true,
         desktop_websocket_to_gateway:true,
         gateway_sse_to_fixture:true,
@@ -5845,7 +5871,7 @@ EOF
 Stage 4/4 - keep ${PROOF_PROVIDER_MODEL_ID} selected and send exactly:
 Use the shell tool to run exactly: printf '${TOOL_MARKER}\\n'. Then report only the exact tool output. Do not inspect any files.
 
-Wait until the visible tool block shows the executed printf command and exact marker output, then press Enter here.
+Wait until the visible tool block shows the executed marker command and exact marker output, then press Enter here.
 EOF
     wait_for_verified_stage_checkpoint "provider-tool"
     assert_proof_state_unchanged
@@ -6202,7 +6228,7 @@ EOF
   --test-write-codex-config)
     [[ -n "${2:-}" ]] || exit 2
     if [[ -n "${3:-}" ]]; then
-      [[ "${3}" == "fixture_plumbing_preflight" || "${3}" == "rc1_native_responses" ]] || exit 2
+      [[ "${3}" == "fixture_plumbing_preflight" || "${3}" == "rc1_native_responses" || "${3}" == "real_isolated_route" ]] || exit 2
       PROOF_SCOPE="${3}"
     fi
     ensure_dirs

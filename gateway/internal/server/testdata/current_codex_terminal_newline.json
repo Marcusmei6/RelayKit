@@ -1,0 +1,29 @@
+{
+  "model": "gpt-5.5",
+  "input": [
+    {
+      "type": "additional_tools",
+      "role": "developer",
+      "tools": [
+        {"type": "custom", "name": "exec"},
+        {"type": "function", "name": "wait", "parameters": {"type": "object"}}
+      ]
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [{"type": "input_text", "text": "redacted tool metadata"}]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "phase": "commentary",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "RELAYKIT_EXEC_COMMAND_V1 {\"cmd\":\"printf RELAYKIT_V1_TOOL; pwd\"}\n"
+        }
+      ]
+    }
+  ]
+}

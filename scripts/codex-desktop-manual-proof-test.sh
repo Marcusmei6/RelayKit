@@ -915,7 +915,7 @@ import json
 import sys
 
 marker = sys.argv[1]
-print("RELAYKIT_EXEC_COMMAND_V1 " + json.dumps({"cmd": f"printf '{marker}\\n'; pwd"}, separators=(",", ":")))
+print("RELAYKIT_EXEC_COMMAND_V1 " + json.dumps({"cmd": f"echo '{marker}'; pwd"}, separators=(",", ":")))
 PY
 )"
 printf '%s' "${expected_assisted_prompt}" >"${assisted_dir}/official-tool.txt"
@@ -1300,6 +1300,13 @@ HOME="${rc1_config_home}" "${PROOF_SCRIPT}" --test-write-codex-config 19998 rc1_
 rc1_config="${rc1_config_home}/Library/Application Support/RelayKit/DesktopProof/official-proof/codex-home/config.toml"
 grep -Fx 'sandbox_mode = "danger-full-access"' "${rc1_config}" >/dev/null ||
   fail "RC1 tool proof did not disable only the conflicting inner Codex sandbox"
+
+real_route_config_home="${tmp_dir}/isolated-real-route-config-home"
+mkdir -p "${real_route_config_home}"
+HOME="${real_route_config_home}" "${PROOF_SCRIPT}" --test-write-codex-config 19997 real_isolated_route
+real_route_config="${real_route_config_home}/Library/Application Support/RelayKit/DesktopProof/official-proof/codex-home/config.toml"
+grep -Fx 'sandbox_mode = "danger-full-access"' "${real_route_config}" >/dev/null ||
+  fail "externally sandboxed real route proof retained a conflicting inner Codex sandbox"
 
 scenario_dir="${tmp_dir}/auto-scenario"
 mkdir -m 700 "${scenario_dir}"
@@ -1898,16 +1905,54 @@ custom_tool_output="${tmp_dir}/custom-tool-evidence.json"
 mkdir -p "${custom_tool_rollout_dir}"
 cat >"${custom_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
 {"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
-{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-custom","input":"const result = await tools.exec_command({cmd:\"printf '${tool_marker}\\\\\\\\n'; pwd\"}); text(result.output);"}}
-{"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-custom","output":[{"type":"input_text","text":"Script completed successfully"},{"type":"input_text","text":"Process exited with code 0\nFinal output:\n${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","name":"exec","call_id":"call-custom","input":"const result = await tools.exec_command({cmd:\"echo '${tool_marker}'; pwd\"}); text(result.output);"}}
+{"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-custom","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":"${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
 JSONL
 "${PROOF_SCRIPT}" --test-tool-evidence "${custom_tool_codex_home}" "${custom_tool_output}" 0 gpt-fixture-official "${tool_marker}"
 jq -e '
   .proof_found == true and .function_call_found == true and .function_call_output_found == true and
   .assisted_same_call_verified == true and .matched_call_ids == ["call-custom"] and
   .exact_shell_command_found == true and .marker_output_found == true and .pwd_output_found == true and
-  .process_exited_zero == true and .raw_function_calls_found == false
+  .process_exited_zero == true and .raw_function_calls_found == false and
+  ([.events[] | select(.type == "custom_tool_call_output") | .process_exited_zero] == [true])
 ' "${custom_tool_output}" >/dev/null || fail "custom exec rollout evidence was not recognized"
+
+failed_custom_tool_codex_home="${tmp_dir}/failed-custom-tool-codex-home"
+failed_custom_tool_rollout_dir="${failed_custom_tool_codex_home}/sessions/2099/07/10"
+failed_custom_tool_output="${tmp_dir}/failed-custom-tool-evidence.json"
+mkdir -p "${failed_custom_tool_rollout_dir}"
+cat >"${failed_custom_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
+{"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","name":"exec","call_id":"call-custom-failed","input":"const result = await tools.exec_command({cmd:\"echo '${tool_marker}'; pwd\"}); text(result.output);"}}
+{"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-custom-failed","output":[{"type":"input_text","text":"Script failed with exit code 71\nOutput:\n${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
+JSONL
+"${PROOF_SCRIPT}" --test-tool-evidence "${failed_custom_tool_codex_home}" "${failed_custom_tool_output}" 0 gpt-fixture-official "${tool_marker}"
+jq -e '
+  .proof_found == false and .assisted_same_call_verified == false and
+  .process_exited_zero == false and .matched_provider_tool_count == 0
+' "${failed_custom_tool_output}" >/dev/null || fail "failed custom exec rollout was accepted"
+
+ambiguous_custom_tool_codex_home="${tmp_dir}/ambiguous-custom-tool-codex-home"
+ambiguous_custom_tool_rollout_dir="${ambiguous_custom_tool_codex_home}/sessions/2099/07/10"
+ambiguous_custom_tool_output="${tmp_dir}/ambiguous-custom-tool-evidence.json"
+mkdir -p "${ambiguous_custom_tool_rollout_dir}"
+cat >"${ambiguous_custom_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
+{"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-missing-status","input":"const result = await tools.exec_command({cmd:\"echo '${tool_marker}'; pwd\"}); text(result.output);"}}
+{"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-missing-status","output":[{"type":"input_text","text":"Script completed\nProcess exited with code 0\n${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
+{"timestamp":"2099-07-10T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","status":"failed","name":"exec","call_id":"call-failed-status","input":"const result = await tools.exec_command({cmd:\"echo '${tool_marker}'; pwd\"}); text(result.output);"}}
+{"timestamp":"2099-07-10T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-failed-status","output":[{"type":"input_text","text":"Script completed\nProcess exited with code 0\n${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
+{"timestamp":"2099-07-10T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","name":"exec","call_id":"call-duplicate","input":"const result = await tools.exec_command({cmd:\"echo '${tool_marker}'; pwd\"}); text(result.output);"}}
+{"timestamp":"2099-07-10T00:00:06Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","name":"exec","call_id":"call-duplicate","input":"const result = await tools.exec_command({cmd:\"echo '${tool_marker}'; pwd\"}); text(result.output);"}}
+{"timestamp":"2099-07-10T00:00:07Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-duplicate","output":[{"type":"input_text","text":"Script completed\n${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
+{"timestamp":"2099-07-10T00:00:08Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-reordered","output":[{"type":"input_text","text":"Script completed\n${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
+{"timestamp":"2099-07-10T00:00:09Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","name":"exec","call_id":"call-reordered","input":"const result = await tools.exec_command({cmd:\"echo '${tool_marker}'; pwd\"}); text(result.output);"}}
+JSONL
+"${PROOF_SCRIPT}" --test-tool-evidence "${ambiguous_custom_tool_codex_home}" "${ambiguous_custom_tool_output}" 0 gpt-fixture-official "${tool_marker}"
+jq -e '
+  .proof_found == false and .assisted_same_call_verified == false and
+  .process_exited_zero == false and .matched_provider_tool_count == 0 and .matched_call_ids == []
+' "${ambiguous_custom_tool_output}" >/dev/null || fail "ambiguous custom exec rollout was accepted"
 
 bad_tool_codex_home="${tmp_dir}/bad-tool-codex-home"
 bad_tool_rollout_dir="${bad_tool_codex_home}/sessions/2099/07/10"
@@ -1926,7 +1971,7 @@ assisted_tool_output="${tmp_dir}/assisted-tool-evidence.json"
 mkdir -p "${assisted_tool_rollout_dir}"
 cat >"${assisted_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
 {"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
-{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-exact","arguments":"{\"cmd\":\"printf '${tool_marker}\\\\\\\\n'; pwd\"}"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-exact","arguments":"{\"cmd\":\"echo '${tool_marker}'; pwd\"}"}}
 {"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-exact","output":"Process exited with code 0\nFinal output:\n${tool_marker}\n/tmp/relaykit-fixture\n"}}
 JSONL
 assisted_tool_session="2099/07/10/rollout-current.jsonl"
@@ -1946,7 +1991,7 @@ aggregate_tool_output="${tmp_dir}/aggregate-tool-evidence.json"
 mkdir -p "${aggregate_tool_rollout_dir}"
 cat >"${aggregate_tool_rollout_dir}/rollout-command.jsonl" <<JSONL
 {"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
-{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-aggregate","arguments":"{\"cmd\":\"printf '${tool_marker}\\\\\\\\n'; pwd\"}"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-aggregate","arguments":"{\"cmd\":\"echo '${tool_marker}'; pwd\"}"}}
 JSONL
 cat >"${aggregate_tool_rollout_dir}/rollout-output.jsonl" <<JSONL
 {"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
@@ -1968,7 +2013,7 @@ split_tool_output="${tmp_dir}/split-tool-evidence.json"
 mkdir -p "${split_tool_rollout_dir}"
 cat >"${split_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
 {"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
-{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-command","arguments":"{\"cmd\":\"printf '${tool_marker}\\\\\\\\n'; pwd\"}"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-command","arguments":"{\"cmd\":\"echo '${tool_marker}'; pwd\"}"}}
 {"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-command","output":"Process exited with code 0\nFinal output:\n${tool_marker}\n"}}
 {"timestamp":"2099-07-10T00:00:03Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-pwd","arguments":"{\"cmd\":\"pwd\"}"}}
 {"timestamp":"2099-07-10T00:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-pwd","output":"Process exited with code 0\nFinal output:\n${tool_marker}\n/tmp/relaykit-fixture\n"}}
@@ -2361,7 +2406,7 @@ jq -e '
   .submission_count_each == 1 and
   .stage_A == "text_marker" and
   .stage_B == "native_markdown_structure" and
-  .stage_C == "exact_shell_printf_marker_plus_pwd" and
+  .stage_C == "exact_shell_marker_plus_pwd" and
   .desktop_websocket_to_gateway == true and
   .gateway_sse_to_fixture == true and
   .tool_roundtrip == true and

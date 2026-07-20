@@ -897,22 +897,17 @@ printf '%s\n' "$*" >>"$RELAYKIT_TEST_CODEX_RECORD"
 		t.Fatalf("V1 second response = %s", v1Second)
 	}
 
-	additionalTools := map[string]any{
-		"type": "additional_tools", "role": "developer",
-		"tools": []map[string]any{
-			{"type": "custom", "name": "exec"},
-			{"type": "function", "name": "wait", "parameters": map[string]any{"type": "object"}},
-		},
-	}
-	currentInput := []map[string]any{
-		additionalTools,
-		{"type": "message", "role": "developer", "content": []map[string]string{{"type": "input_text", "text": "current Codex tools"}}},
-		{"type": "message", "role": "user", "content": []map[string]string{{"type": "input_text", "text": v1Prompt}}},
-	}
-	currentRequest, err := json.Marshal(map[string]any{"model": "gpt-5.5", "input": currentInput})
+	currentRequest, err := os.ReadFile("testdata/current_codex_terminal_newline.json")
 	if err != nil {
 		t.Fatal(err)
 	}
+	var currentEnvelope struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(currentRequest, &currentEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	currentInput := currentEnvelope.Input
 	currentConn, currentReader := openTestWebSocket(t, srv.URL, "/v1/responses")
 	defer currentConn.Close()
 	writeTestWebSocketText(t, currentConn, string(currentRequest))
@@ -1075,6 +1070,28 @@ fi
 		}
 	})
 
+	t.Run("current Desktop terminal newline fixture works over HTTP", func(t *testing.T) {
+		body, err := os.ReadFile("testdata/current_codex_terminal_newline.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"type":"custom_tool_call"`) ||
+			!strings.Contains(rec.Body.String(), `"name":"exec"`) ||
+			!strings.Contains(rec.Body.String(), `printf RELAYKIT_V1_TOOL; pwd`) {
+			t.Fatalf("current Desktop fixture response = %s", rec.Body.String())
+		}
+		if invocationCount() != 0 {
+			t.Fatalf("nested Codex invocations = %d, want 0", invocationCount())
+		}
+	})
+
 	t.Run("function output second leg uses nested message-only completion", func(t *testing.T) {
 		rec := request([]map[string]any{
 			{"type": "message", "role": "user", "content": []map[string]string{{"type": "input_text", "text": exact}}},
@@ -1132,8 +1149,20 @@ fi
 				"parameters": map[string]any{"type": "object", "properties": map[string]any{"cmd": map[string]any{"type": "number"}}, "required": []string{"cmd"}},
 			}},
 		},
-		"V1 terminal newline": {
-			input: exactV1 + "\n",
+		"V1 multiple terminal newlines": {
+			input: exactV1 + "\n\n",
+			tools: validTools,
+		},
+		"V1 terminal CR": {
+			input: exactV1 + "\r",
+			tools: validTools,
+		},
+		"V1 terminal CRLF": {
+			input: exactV1 + "\r\n",
+			tools: validTools,
+		},
+		"V1 raw internal newline": {
+			input: exactV1 + "\ntrailing",
 			tools: validTools,
 		},
 		"V1 duplicate command key": {
@@ -1242,6 +1271,9 @@ func TestOfficialExplicitExecCommandScopesMessageOnlyToValidExplicitRoundTrip(t 
 	})
 	t.Run("exact V1 first leg is supported", func(t *testing.T) {
 		check(t, exactV1, validTools, command, false, false)
+	})
+	t.Run("current Desktop terminal newline is supported", func(t *testing.T) {
+		check(t, exactV1+"\n", validTools, command, false, false)
 	})
 	t.Run("current Codex additional tools support exact V1", func(t *testing.T) {
 		check(t, []map[string]any{additionalTools, {"type": "message", "role": "user", "content": exactV1}}, nil, command, false, false)

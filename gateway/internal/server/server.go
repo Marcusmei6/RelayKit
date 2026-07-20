@@ -1810,6 +1810,8 @@ func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools [
 
 func parseExplicitExecCommand(text string, execCommandAllowed bool) (command string, explicit bool, err error) {
 	if strings.HasPrefix(text, explicitExecCommandV1Prefix) {
+		// Codex Desktop terminates submitted composer text with one LF.
+		text = strings.TrimSuffix(text, "\n")
 		if strings.ContainsAny(text, "\r\n\x00") {
 			return "", true, newOfficialStructuralRejectionError("command", "malformed", "invalid V1 explicit shell command line")
 		}
