@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECK="${ROOT}/scripts/public-boundary-check.sh"
+BUILD_SCRIPT="${ROOT}/script/build_app_bundle.sh"
 
 fail() {
   printf 'public boundary contract test failed: %s\n' "$*" >&2
@@ -10,6 +11,12 @@ fail() {
 }
 
 [[ -x "${CHECK}" ]] || fail "checker is missing"
+grep -Fq 'go build -trimpath' "${BUILD_SCRIPT}" || fail "bundled gateway build must strip local source paths"
+grep -Fq -- '-c release' "${BUILD_SCRIPT}" || fail "bundled App must use the release Swift configuration"
+grep -Fq -- '-debug-prefix-map' "${BUILD_SCRIPT}" || fail "bundled App must remap debug source paths"
+grep -Fq -- '-file-prefix-map' "${BUILD_SCRIPT}" || fail "bundled App must remap file source paths"
+grep -Fq "Release binary contains a machine-local user path" "${BUILD_SCRIPT}" ||
+  fail "bundle build must fail before signing when a binary exposes a local user path"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/relaykit-public-boundary-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT

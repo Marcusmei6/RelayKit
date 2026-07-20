@@ -34,12 +34,17 @@ stop_app() {
 
 build_bundle() {
   cd "${ROOT_DIR}/gateway"
-  go build -o bin/relay ./cmd/gateway
+  go build -trimpath -o bin/relay ./cmd/gateway
 
   cd "${ROOT_DIR}/app"
-  swift build
+  local -a swift_build_args=(
+    -c release
+    -Xswiftc -debug-prefix-map -Xswiftc "${ROOT_DIR}=."
+    -Xswiftc -file-prefix-map -Xswiftc "${ROOT_DIR}=."
+  )
+  swift build "${swift_build_args[@]}"
   local build_binary
-  build_binary="$(swift build --show-bin-path)/${APP_NAME}"
+  build_binary="$(swift build "${swift_build_args[@]}" --show-bin-path)/${APP_NAME}"
 
   rm -rf "${APP_BUNDLE}"
   mkdir -p "${APP_MACOS}" "${APP_RESOURCES}"
@@ -49,6 +54,16 @@ build_bundle() {
   cp "${ROOT_DIR}/examples/codex.config.example.toml" "${APP_RESOURCES}/codex.config.example.toml"
   chmod +x "${APP_REAL_BINARY}"
   chmod +x "${BUNDLED_GATEWAY}"
+
+  local binary local_path_hits
+  local users_path_prefix='/''Users/'
+  for binary in "${APP_REAL_BINARY}" "${BUNDLED_GATEWAY}"; do
+    local_path_hits="$(LC_ALL=C strings "${binary}" | grep -E "${users_path_prefix}[^/]+/" || true)"
+    if [[ -n "${local_path_hits}" ]]; then
+      echo "Release binary contains a machine-local user path: ${binary}" >&2
+      exit 1
+    fi
+  done
 
   cat >"${INFO_PLIST}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

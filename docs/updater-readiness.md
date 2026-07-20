@@ -1,6 +1,6 @@
 # Updater Readiness
 
-Status: blocked.
+Status: signed-beta prerequisite complete; updater runtime blocked.
 
 RelayKit has the version and release package structure needed for a future Sparkle 2 updater, but the updater is not implemented and must not be advertised as available.
 
@@ -12,19 +12,17 @@ RelayKit has the version and release package structure needed for a future Spark
 - Local ad-hoc beta package: `./script/package_release.sh --verify`.
 - Signed release script shape: `./script/package_signed_release.sh`.
 - GitHub Release asset shape: `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip` plus `.sha256`.
+- Developer ID signing, notarization, stapling, Gatekeeper, and signed-beta route proof.
 
 ## Blocked Before Sparkle Runtime Work
 
-- Developer ID Application certificate.
-- Notarization credentials.
-- A successful signed and stapled RelayKit app.
 - Sparkle EdDSA private key stored outside git.
-- Sparkle public key committed only after the signed beta path is real.
+- Sparkle public key and feed configuration.
 - Signed stable appcast hosted from the GitHub Releases release process.
 
 ## Minimum Future Implementation
 
-When the signed beta gate is real:
+When updater implementation begins:
 
 1. Add Sparkle 2 as the macOS updater dependency.
 2. Add `SUPublicEDKey`, `SUFeedURL`, and signed-feed settings to `Info.plist`.

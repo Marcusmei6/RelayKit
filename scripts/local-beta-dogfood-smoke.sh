@@ -6,7 +6,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${ROOT}/dist/dogfood-local-beta"
 INSTALL_DIR="${OUT}/install"
 SCREENSHOT_DIR="${OUT}/screenshots"
-ZIP_PATH="${ROOT}/dist/RelayKitApp-local.zip"
+ZIP_PATH="${RELAYKIT_DOGFOOD_ZIP_PATH:-${ROOT}/dist/RelayKitApp-local.zip}"
+[[ "${ZIP_PATH}" == /* ]] || {
+  echo "RelayKit local beta dogfood failed: RELAYKIT_DOGFOOD_ZIP_PATH must be absolute" >&2
+  exit 2
+}
 APP_BUNDLE="${INSTALL_DIR}/RelayKitApp.app"
 APP_REAL="${APP_BUNDLE}/Contents/MacOS/RelayKitApp.bin"
 BUNDLED_RELAY="${APP_BUNDLE}/Contents/MacOS/relay"
@@ -1151,7 +1155,9 @@ CODEX_AUTH_BEFORE="${codex_auth_before}"
 real_provider_config_before="$(file_signature "${REAL_PROVIDER_CONFIG}")"
 
 cd "${ROOT}"
-reuse_current_zip="${RELAYKIT_DOGFOOD_REUSE_CURRENT_ZIP:-0}"
+reuse_default=0
+[[ -n "${RELAYKIT_DOGFOOD_ZIP_PATH:-}" ]] && reuse_default=1
+reuse_current_zip="${RELAYKIT_DOGFOOD_REUSE_CURRENT_ZIP:-${reuse_default}}"
 case "${reuse_current_zip}" in
   0) ./script/package_release.sh --verify >/dev/null ;;
   1) ;;
@@ -1437,7 +1443,7 @@ jq -n \
         accepted: ($spctl_status == 0),
         notarized_developer_id: $spctl_notarized_developer_id,
         output_redacted: true,
-        local_beta_friction_expected: true
+        local_beta_friction_expected: ($spctl_status != 0)
       }
     },
     app_regression: {

@@ -6,13 +6,15 @@ RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-c
 
 ## Signed Beta v0.1.0 Current Candidate
 
-Status: **incomplete and blocked**. The current artifact has SHA-256 `c481ae5607c813f8f907f3c7b82252e7c709f7e10b77b1176688215736f720f3`. Developer ID signing, hardened runtime, notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle passed. The artifact is nevertheless ineligible because its current six-stage Desktop route gate failed.
+Status: **signed beta candidate complete; public release unpublished**. The current artifact is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `116928bda89b6ca9a266bd7e1b3b820fc811d45f6ba118be16a367c619cf1a78`. It uses release/trimmed-path binaries and passed the archive personal-path scan, Developer ID signing, hardened runtime, fresh notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle. The redacted release verification is `dist/signed-beta-v0.1.0/path-clean-six-stage-20260720T162614Z/replacement-release-evidence.redacted.json`.
 
-The single assigned assisted state `signed-c481-six-final-20260718T200844Z-f890e7` is bound to that artifact and to one current run. Its recorded first-five ledger hash is intact and those entries exactly match stages 1-5 in `dist/codex-desktop-manual-proof/automated-stages.json`; each is `evidence_verified` with one submission. Stage 6, `official-tool`, was submitted once in one exactly bound fresh thread and ended `observation_failed_2`.
+Current setup evidence and current route evidence are separate. `dist/dogfood-local-beta/evidence.json` binds the extracted ordinary-App lifecycle, Provider/Keychain persistence, gateway restart, actionable error states, and cleanup directly to the immutable current release zip; its provider is explicitly a fixture and makes no real-model compatibility claim. `dist/signed-beta-v0.1.0/path-clean-six-stage-20260720T162614Z/final-evidence/` is the current-package Desktop route evidence. Its six unique stages each have one submission and an exact rollout binding: Official plain/Markdown, provider plain/Markdown/tool, and Official tool. All six are `evidence_verified`, with no human intervention.
 
-At the stage-6 usage baseline of 17, the run recorded three completed/200 Official WebSocket events followed by four typed 400 `invalid_request_error` events. No assistant marker or current custom tool call/output evidence is present. The available evidence does not identify an exact rejected wire shape or support a narrower root cause.
+The final Official tool stage contains one native function call and matching output in the exact bound session, the fresh marker, workspace `pwd`, and exit code 0. The provider tool stage independently contains a real function call/output, fresh marker, workspace path, and exit code 0. The process-bound screenshots show native tool blocks and the required Markdown structure without bare XML, `function_calls`, or unresolved protocol JSON.
 
-Cleanup passed: the App, bundled gateway, and isolated Desktop stopped; `19777` and `18787` were free; and the global non-content guards passed unchanged. No retry, remediation, or replacement artifact is authorized. Signed Beta v0.1.0 remains incomplete and blocked, the public GitHub Release remains unpublished, and the updater is not implemented.
+The product defect was the first-leg explicit shell prompt terminator: current Desktop input adds one terminal LF. Commit `c2581ac` accepts exactly that one terminal LF while preserving rejection of remaining or internal newlines. No rejected second-leg payload was used as the root-cause claim.
+
+Cleanup passed: the App, bundled gateway, and isolated Desktop stopped; `19777` and `18787` were free; and the global config/auth guards passed unchanged. The public GitHub Release remains unpublished and the updater is not implemented.
 
 Current product scope:
 
@@ -203,15 +205,15 @@ Historical Desktop route evidence:
 - `markdown_render_verified`, `tool_gui_verified`, and `raw_protocol_absent` are true. No bare `<function_calls>`, `<invoke>`, `<parameter>`, `<tool_call>`, raw XML, or unresolved tool JSON was accepted.
 - The completed run used the current Desktop-bundled Codex CLI, did not use mock OK, old usage, CLI fallback, or manually edited evidence, and released both protected ports.
 
-Current Signed Beta blocked state:
+Historical Signed Beta failed candidate:
 
-Preserve the failed current-run evidence for artifact SHA-256 `c481ae5607c813f8f907f3c7b82252e7c709f7e10b77b1176688215736f720f3`. Do not retry the route gate, start remediation, or create a replacement artifact without new Planner authorization. This run provides no route PASS or release decision.
+Preserve artifact SHA-256 `c481ae5607c813f8f907f3c7b82252e7c709f7e10b77b1176688215736f720f3` and the superseded path-bearing candidate `c340a53682d0a615ab0409c3be8f0a290f720aa5a488c774349be615fc5020ee` as historical/ineligible. Neither is the current candidate, and their evidence must not be relabeled or mixed into the `116928...1a78` manifest.
 
 Versioning, install/uninstall instructions, privacy docs, updater policy, and the signed package script are reserved in `docs/release-readiness.md`, `docs/update-policy.md`, and `docs/updater-readiness.md`.
 
 ## Post-Gate User Feedback Loop
 
-The six-stage current-package proof is complete as a failed gate. No real-user beta begins from this candidate; any further gate work requires a new bounded authorization. If a future candidate passes all gates, use:
+The current `116928...1a78` six-stage package proof passed. Public publication is still a separate decision; for bounded beta feedback use:
 
 - `docs/beta-test-guide.md` for install, provider setup, local verification, and cleanup.
 - `docs/feedback-template.md` for structured feedback without asking users to share keys, tokens, provider base URLs, or raw private logs.

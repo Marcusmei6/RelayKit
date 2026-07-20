@@ -19,6 +19,14 @@ file_signature() {
 }
 
 bash -n "${SCRIPT}"
+grep -Fq 'RELAYKIT_DOGFOOD_ZIP_PATH:-' "${SCRIPT}" ||
+  fail "dogfood must support an immutable caller-pinned zip path"
+grep -Fq 'RELAYKIT_DOGFOOD_ZIP_PATH must be absolute' "${SCRIPT}" ||
+  fail "dogfood must reject ambiguous relative artifact paths"
+grep -Fq '[[ -n "${RELAYKIT_DOGFOOD_ZIP_PATH:-}" ]] && reuse_default=1' "${SCRIPT}" ||
+  fail "an explicitly pinned zip must skip unrelated local package rebuilds by default"
+grep -Fq 'local_beta_friction_expected: ($spctl_status != 0)' "${SCRIPT}" ||
+  fail "Gatekeeper friction evidence must reflect the actual signed/ad-hoc result"
 grep -Fq 'umask 077' "${SCRIPT}" ||
   fail "dogfood screenshots and temporary state must be owner-only"
 grep -Fq 'rm -f "${SCREENSHOT_DIR}"/*.raw.png "${SCREENSHOT_DIR}"/*.composited.png' "${SCRIPT}" ||

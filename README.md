@@ -116,7 +116,7 @@ The dogfood smoke runs from an extracted `dist/RelayKitApp-local.zip` app bundle
 
 ## Signed Beta Package
 
-The signed beta flow is reserved but requires external Apple credentials:
+The signed beta flow has passed locally. Reproducing it requires external Apple credentials:
 
 ```bash
 RELAYKIT_SIGNING_IDENTITY="Developer ID Application: Example Team (TEAMID)" \
@@ -127,7 +127,7 @@ RELAYKIT_APPLE_TEAM_ID="TEAMID" \
 
 Without those values the script fails with `missing Developer ID signing identity / notarization credentials` and does not produce a misleading signed artifact. Signing runs after the full bundle is assembled, signs the bundled `relay` helper first, then signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and writes GitHub Release-ready assets under `dist/github-release/v<version>/`.
 
-`RELAYKIT_APP_VERSION` and `RELAYKIT_BUILD_NUMBER` are reserved now and flow into `CFBundleShortVersionString` and `CFBundleVersion`. Auto-updater support, including Sparkle 2/appcast work, is documented in `docs/update-policy.md` and `docs/updater-readiness.md`, but intentionally not implemented until after a real signed beta exists.
+`RELAYKIT_APP_VERSION` and `RELAYKIT_BUILD_NUMBER` flow into `CFBundleShortVersionString` and `CFBundleVersion`. Auto-updater support, including Sparkle 2/appcast work, is documented in `docs/update-policy.md` and `docs/updater-readiness.md`; the signed-beta prerequisite is proven, but updater runtime remains intentionally unimplemented.
 
 ## Durable Local Helper
 

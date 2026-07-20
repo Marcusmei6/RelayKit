@@ -812,9 +812,9 @@ let attributes: [NSAttributedString.Key: Any] = [
 let lines = [
     "Use the shell tool to run exactly: printf '\(marker)\\n'",
     "运行了多个命令",
-    "已运行 printf '\(marker)\\n'",
     "已处理 5s",
     marker,
+    FileManager.default.currentDirectoryPath,
 ]
 for (index, line) in lines.enumerated() {
     NSString(string: line).draw(at: NSPoint(x: 360, y: 650 - (index * 110)), withAttributes: attributes)
@@ -1828,6 +1828,10 @@ grep -Fq 'trap handle_automated_signal INT TERM HUP' "${PROOF_SCRIPT}" ||
   fail "automated proof must preserve interrupted current-run evidence"
 grep -Fq 'automated_stages_complete' <<<"${auto_body}" ||
   fail "automated proof must verify the expected stage count and unique rollout threads before completion"
+stage_loop_done_line="$(grep -n 'done < <(jq -c '\''\.stages\[\]'\'' "${AUTOMATED_SCENARIO_NORMALIZED}")' <<<"${auto_body}" | cut -d: -f1)"
+custom_render_line="$(grep -n 'AUTO_ERROR_CODE="custom_render_evidence_failed"' <<<"${auto_body}" | cut -d: -f1)"
+[[ -n "${stage_loop_done_line}" && -n "${custom_render_line}" && "${custom_render_line}" -gt "${stage_loop_done_line}" ]] ||
+  fail "custom aggregate render/tool validation must run only after every scenario stage completes"
 grep -Fq 'write_desktop_render_evidence "${overall_since}" "${PROOF_PROVIDER_MODEL_ID}" "${SCREENSHOT_EVIDENCE}" "${gpt55_marker}" "${gpt56_marker}"' <<<"${auto_body}" ||
   fail "final render evidence must use the current scenario official markers"
 grep -Fq 'driver_failure_code' <<<"${auto_body}" ||
@@ -1871,6 +1875,19 @@ jq -e '
   .tool_gui_verified == true
 ' "${render_output}" >/dev/null
 
+custom_render_screenshots="${tmp_dir}/custom-render-screenshots.json"
+jq 'map(if .role == "gpt56-response" then .role = "official-plain" else . end)' \
+  "${usage_dir}/screenshots-markdown-split.json" >"${custom_render_screenshots}"
+"${PROOF_SCRIPT}" --test-render-evidence "${render_codex_home}" "${render_output}" 0 "${provider_model}" \
+  "${custom_render_screenshots}" "${render_gpt55_marker}" "${render_gpt56_marker}" \
+  gpt-5.6-luna gpt55-response official-plain provider-markdown provider-tool
+jq -e '
+  .gpt56_gui_visible == true and .markdown_source_contract_verified == true and
+  .markdown_render_verified == true and .tool_gui_verified == true and .raw_protocol_absent == true
+' "${render_output}" >/dev/null || fail "custom scenario render roles were not aggregated"
+
+echo "Manual proof custom scenario render aggregation test passed"
+
 cat >>"${render_rollout_dir}/rollout-current.jsonl" <<'JSONL'
 {"timestamp":"2099-07-10T00:00:06Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"<invoke>raw</invoke>"}]}}
 JSONL
@@ -1905,7 +1922,7 @@ custom_tool_output="${tmp_dir}/custom-tool-evidence.json"
 mkdir -p "${custom_tool_rollout_dir}"
 cat >"${custom_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
 {"timestamp":"2099-07-10T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-official"}}
-{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","name":"exec","call_id":"call-custom","input":"const result = await tools.exec_command({cmd:\"echo '${tool_marker}'; pwd\"}); text(result.output);"}}
+{"timestamp":"2099-07-10T00:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","name":"exec","call_id":"call-custom","input":"const result = await tools.exec_command({cmd:\"printf '${tool_marker}\\\\\\\\n'; pwd\"}); text(result.output);"}}
 {"timestamp":"2099-07-10T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-custom","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":"${tool_marker}\n/tmp/relaykit-fixture\n"}]}}
 JSONL
 "${PROOF_SCRIPT}" --test-tool-evidence "${custom_tool_codex_home}" "${custom_tool_output}" 0 gpt-fixture-official "${tool_marker}"
@@ -2030,6 +2047,25 @@ JSONL
 jq -e '.proof_found == false and .xml_leak_found == true and .raw_function_calls_found == true' "${tool_output}" >/dev/null
 
 echo "Manual proof rollout tool evidence tests passed"
+
+coalesced_tool_codex_home="${tmp_dir}/coalesced-tool-codex-home"
+coalesced_tool_rollout_dir="${coalesced_tool_codex_home}/sessions/2099/07/11"
+coalesced_tool_output="${tmp_dir}/coalesced-tool-evidence.json"
+coalesced_tool_marker="RELAYKITCOALESCEDTOOL20990711"
+mkdir -p "${coalesced_tool_rollout_dir}"
+cat >"${coalesced_tool_rollout_dir}/rollout-current.jsonl" <<JSONL
+{"timestamp":"2099-07-11T00:00:00Z","type":"turn_context","payload":{"model":"gpt-fixture-provider"}}
+{"timestamp":"2099-07-11T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-coalesced","arguments":"{\"cmd\":\"printf '${coalesced_tool_marker} '; pwd\"}"}}
+{"timestamp":"2099-07-11T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-coalesced","output":"Process exited with code 0\nOutput:\n${coalesced_tool_marker} /tmp/relaykit-fixture\n"}}
+JSONL
+"${PROOF_SCRIPT}" --test-tool-evidence "${coalesced_tool_codex_home}" "${coalesced_tool_output}" 0 gpt-fixture-provider "${coalesced_tool_marker}"
+jq -e '
+  .proof_found == true and .function_call_found == true and .function_call_output_found == true and
+  .process_exited_zero == true and .marker_output_found == true and .pwd_output_found == true and
+  .exact_shell_command_found == false and .assisted_same_call_verified == false
+' "${coalesced_tool_output}" >/dev/null || fail "coalesced provider marker and pwd output were not recognized without weakening exact-command evidence"
+
+echo "Manual proof coalesced provider tool output test passed"
 
 expect_failure "real route policy accepted missing provider config" env \
   RELAYKIT_DESKTOP_PROOF_REAL_PROVIDER_CONFIG= \

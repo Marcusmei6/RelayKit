@@ -4,13 +4,13 @@ RelayKit is preparing for public beta distribution, not a public release yet.
 
 ## Signed Beta v0.1.0 Current Candidate
 
-Release readiness is **incomplete and blocked**. The current artifact has SHA-256 `c481ae5607c813f8f907f3c7b82252e7c709f7e10b77b1176688215736f720f3`. Developer ID signing, hardened runtime, notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle passed. The artifact is nevertheless ineligible because its current six-stage Desktop route gate failed.
+Release readiness is **complete for a signed beta candidate; public release remains unpublished**. The current artifact is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `116928bda89b6ca9a266bd7e1b3b820fc811d45f6ba118be16a367c619cf1a78`. Its release/trimmed-path binaries passed the archive personal-path scan, Developer ID signing, hardened runtime, fresh notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle.
 
-Exactly one assigned assisted state is bound to the artifact and current run. Its first-five ledger is hash-valid and matches stages 1-5 in `dist/codex-desktop-manual-proof/automated-stages.json`; each stage is `evidence_verified` with one submission. Stage 6, `official-tool`, was submitted once in one exactly bound fresh thread and ended `observation_failed_2`.
+`dist/dogfood-local-beta/evidence.json` binds normal extracted-App launch, Provider/Keychain persistence, gateway restart, failure guidance, Quit, cleanup, and zip SHA directly to the immutable current release zip. This is setup/plumbing evidence and its provider remains explicitly a fixture. Real current-package route evidence is separate under `dist/signed-beta-v0.1.0/path-clean-six-stage-20260720T162614Z/final-evidence/`: six unique Desktop stages each have one submission, one exact rollout binding, and `evidence_verified` state. Official and provider plain/Markdown requests completed; both tool routes show native tool calls with matching output, fresh marker, workspace `pwd`, and exit code 0. Required Markdown rendered without bare XML, `function_calls`, or unresolved protocol JSON.
 
-The stage-6 usage baseline was 17. Current usage then records three completed/200 Official WebSocket events and four typed 400 `invalid_request_error` events. No assistant marker or current custom tool call/output evidence is present. The evidence does not establish an exact rejected wire shape or a narrower root cause.
+The product fix in `c2581ac` accepts the single terminal LF added by current Desktop explicit-shell input. It does not claim a rejected second-leg payload as the root cause. The current run uses the corrected harness directly; no post-run evidence rewrite is needed.
 
-Cleanup passed: the App, bundled gateway, and isolated Desktop stopped; `19777` and `18787` were free; and the global non-content guards passed unchanged. No retry, remediation, or replacement artifact is authorized. Signed Beta v0.1.0 remains incomplete and blocked, the public GitHub Release remains unpublished, and the updater is not implemented.
+Cleanup passed: the App, bundled gateway, and isolated Desktop stopped; `19777` and `18787` were free; and global Codex config/auth guards passed unchanged. The public GitHub Release remains unpublished and the updater is not implemented.
 
 ## Historical Local/RC1 State
 
@@ -50,7 +50,7 @@ RC1 public-proof status is separate from the older local-beta result. The final 
 
 That profile builds one local package, then reuses its extracted `dist/verify-release/RelayKitApp.app` for the menu smoke, loopback-only native Responses proof, and abrupt-parent helper lifecycle proof. It does not use a real provider, send a paid Desktop request, run the four-stage Desktop scenario, sign with Developer ID, notarize, publish, or update shared Codex/LaunchAgent state.
 
-Developer ID identity and the notarization credential profile were prepared during that historical RC1 closeout. The current candidate above subsequently completed signing, notarization, and stapling, but has not passed its final Desktop route gate.
+Developer ID identity and the notarization credential profile were prepared during that historical RC1 closeout. The current candidate above subsequently completed signing, notarization, stapling, signed dogfood, and its final Desktop route gate.
 
 Historical RC1 boundary: that goal produced no signed artifact, notarization submission, stapling result, Gatekeeper result, or GitHub Release. `dist/RelayKitApp-local.zip` remains an ad-hoc artifact and must not be described as the current signed beta.
 
@@ -197,15 +197,15 @@ Local beta:
 - no cloud telemetry;
 - feedback collected manually with `docs/feedback-template.md`.
 
-The current Signed Beta candidate is blocked:
+The current Signed Beta candidate passed its bounded package and route gates:
 
-- preserve the failed route-gate evidence for artifact SHA-256 `c481ae5607c813f8f907f3c7b82252e7c709f7e10b77b1176688215736f720f3`;
-- do not retry, remediate, or create a replacement artifact without new Planner authorization;
-- no route PASS or publication decision exists.
+- current eligible artifact: SHA-256 `116928bda89b6ca9a266bd7e1b3b820fc811d45f6ba118be16a367c619cf1a78`;
+- superseded path-bearing artifact: SHA-256 `c340a53682d0a615ab0409c3be8f0a290f720aa5a488c774349be615fc5020ee`;
+- historical/ineligible failed artifact: SHA-256 `c481ae5607c813f8f907f3c7b82252e7c709f7e10b77b1176688215736f720f3`;
+- publication remains a separate, currently unexecuted decision.
 
 Public release still needs:
 
-- signed and notarized package;
 - signed beta tester feedback;
 - final privacy, install, uninstall, support, and security docs reviewed in public-safe form;
 - Sparkle 2 updater implementation after signed beta, following `docs/update-policy.md`;

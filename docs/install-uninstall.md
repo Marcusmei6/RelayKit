@@ -18,7 +18,7 @@ Signed beta packages will use the same app bundle layout and reserved bundle id:
 - App bundle: `RelayKitApp.app`
 - Signed artifact: `RelayKitApp-<version>-signed.zip`
 
-The signed package is blocked until a Developer ID Application certificate and notarization credentials are available. Do not distribute the local ad-hoc zip as a signed beta.
+The current signed beta candidate is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`. It is Developer ID signed, notarized, stapled, and Gatekeeper accepted. Unzip that artifact and open `RelayKitApp.app`; do not distribute the local ad-hoc zip as a signed beta. The public GitHub Release is still unpublished.
 
 ## Uninstall
 

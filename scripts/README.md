@@ -40,7 +40,7 @@ The build script creates `dist/RelayKitApp.app`, ad-hoc signs the bundled `relay
 
 The package script builds the local app bundle through the headless build path, writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release/`, and verifies the extracted bundled gateway plus public demo provider and Codex config examples without opening the GUI app. It does not Developer ID sign, notarize, publish, or upload anything.
 
-When sequencing zip dogfood and Desktop route proof against one artifact, set `RELAYKIT_DOGFOOD_REUSE_CURRENT_ZIP=1` for `scripts/local-beta-dogfood-smoke.sh` after the zip has already been built and verified. The default remains `0`, which rebuilds the package; unsupported values fail closed.
+When sequencing dogfood and Desktop route proof against one immutable artifact, set `RELAYKIT_DOGFOOD_ZIP_PATH` to the absolute verified zip path. An explicit path skips the unrelated local package rebuild by default; `RELAYKIT_DOGFOOD_REUSE_CURRENT_ZIP=0` can request a rebuild only when that is intentional. Without the path override, dogfood keeps the local `dist/RelayKitApp-local.zip` default; relative overrides fail closed.
 
 ## Signed Beta Package
 
@@ -55,7 +55,7 @@ The signed package script requires external Apple distribution credentials. With
 
 When credentials are present, the script builds the complete bundle, signs the bundled `relay` helper first, signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and emits GitHub Release-ready zip plus checksum files.
 
-Auto-updater runtime work is intentionally not part of this script. Sparkle 2/appcast policy is documented in `docs/update-policy.md` and remains blocked until a real signed beta passes.
+Auto-updater runtime work is intentionally not part of this script. Sparkle 2/appcast policy is documented in `docs/update-policy.md`; the signed-beta prerequisite passed, but the updater runtime and feed remain unimplemented.
 
 ## GitHub Release Draft
 

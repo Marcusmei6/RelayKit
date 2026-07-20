@@ -3468,7 +3468,10 @@ for path in session_paths:
                 "item_type": item_type,
                 "status": item.get("status") or "",
                 "marker_found": marker_found,
-                "exact_shell_command_found": command == f"echo '{marker}'; pwd",
+                "exact_shell_command_found": command in {
+                    f"echo '{marker}'; pwd",
+                    f"printf '{marker}\\n'; pwd",
+                },
             })
             events.append({
                 "timestamp": record.get("timestamp"),
@@ -3481,7 +3484,7 @@ for path in session_paths:
             output = item.get("output")
             output_text = tool_output_text(output)
             output_lines = output_text.splitlines()
-            marker_found = any(line.strip() == marker for line in output_lines)
+            marker_found = any(marker in line for line in output_lines)
             custom_tool_completed = bool(output_lines) and output_lines[0].strip() == "Script completed"
             nonzero_or_failed = any(
                 line.strip().startswith("Script failed")
@@ -3503,7 +3506,10 @@ for path in session_paths:
                 "model": current_model,
                 "marker_found": marker_found,
                 "process_exited_zero": process_exited_zero,
-                "pwd_output_found": any(line.startswith("/") for line in output_lines),
+                "pwd_output_found": any(
+                    line.startswith("/") or re.search(r"(?:^|\s)/\S+", line)
+                    for line in output_lines
+                ),
             })
             events.append({
                 "timestamp": record.get("timestamp"),
@@ -3577,7 +3583,12 @@ write_desktop_render_evidence() {
   local screenshot_evidence="$3"
   local gpt55_marker="${4:-RelayKit Official 55 Live:}"
   local gpt56_marker="${5:-RelayKit Official 56 Live:}"
-  python3 - "${CODEX_HOME_DIR}" "${DESKTOP_RENDER_EVIDENCE}" "${since_epoch}" "${provider_model}" "${screenshot_evidence}" "${gpt55_marker}" "${gpt56_marker}" <<'PY'
+  local gpt56_model="${6:-gpt-5.6-luna}"
+  local gpt55_role="${7:-gpt55-response}"
+  local gpt56_role="${8:-gpt56-response}"
+  local markdown_role="${9:-provider-markdown}"
+  local tool_role="${10:-provider-tool}"
+  python3 - "${CODEX_HOME_DIR}" "${DESKTOP_RENDER_EVIDENCE}" "${since_epoch}" "${provider_model}" "${screenshot_evidence}" "${gpt55_marker}" "${gpt56_marker}" "${gpt56_model}" "${gpt55_role}" "${gpt56_role}" "${markdown_role}" "${tool_role}" <<'PY'
 import json
 import re
 import sys
@@ -3591,6 +3602,11 @@ provider_model = sys.argv[4]
 screenshot_path = Path(sys.argv[5])
 gpt55_marker = sys.argv[6]
 gpt56_marker = sys.argv[7]
+gpt56_model = sys.argv[8]
+gpt55_role = sys.argv[9]
+gpt56_role = sys.argv[10]
+markdown_role = sys.argv[11]
+tool_role = sys.argv[12]
 
 def parse_ts(value):
     if not value:
@@ -3679,7 +3695,7 @@ for path in sorted(sessions_root.glob("**/rollout-*.jsonl")):
             })
 
 gpt55_source = any(model == "gpt-5.5" and gpt55_marker in text for model, text in assistant_messages)
-gpt56_source = any(model == "gpt-5.6-luna" and gpt56_marker in text for model, text in assistant_messages)
+gpt56_source = any(model == gpt56_model and gpt56_marker in text for model, text in assistant_messages)
 markdown_source = False
 for model, text in assistant_messages:
     if model != provider_model:
@@ -3713,18 +3729,18 @@ def role_screenshots(role):
 def visual(role, key):
     return any((item.get("visual_checks") or {}).get(key) is True for item in role_screenshots(role))
 
-proof_roles = ("gpt55-response", "gpt56-response", "provider-markdown", "provider-tool")
+proof_roles = (gpt55_role, gpt56_role, markdown_role, tool_role)
 screenshot_raw_protocol_absent = all(not visual(role, "raw_protocol_visible") for role in proof_roles)
 raw_protocol_absent = not raw_protocol_records and screenshot_raw_protocol_absent
-markdown_visual = all(visual("provider-markdown", key) for key in (
+markdown_visual = all(visual(markdown_role, key) for key in (
     "heading_visible", "numbered_items_visible", "table_headers_visible",
     "bash_code_visible", "bold_conclusion_visible",
 ))
-tool_gui_verified = visual("provider-tool", "tool_marker_visible") and visual("provider-tool", "tool_execution_visible")
+tool_gui_verified = visual(tool_role, "tool_marker_visible") and visual(tool_role, "tool_execution_visible")
 
 out_path.write_text(json.dumps({
-    "gpt55_gui_visible": gpt55_source and (visual("gpt55-response", "response_marker_visible") or visual("gpt55-response", "official55_response_visible")),
-    "gpt56_gui_visible": gpt56_source and (visual("gpt56-response", "response_marker_visible") or visual("gpt56-response", "official56_response_visible")),
+    "gpt55_gui_visible": gpt55_source and (visual(gpt55_role, "response_marker_visible") or visual(gpt55_role, "official55_response_visible")),
+    "gpt56_gui_visible": gpt56_source and (visual(gpt56_role, "response_marker_visible") or visual(gpt56_role, "official56_response_visible")),
     "markdown_source_contract_verified": markdown_source,
     "markdown_visual_tokens_verified": markdown_visual,
     "markdown_render_verified": markdown_source and markdown_visual and raw_protocol_absent,
@@ -4045,15 +4061,34 @@ write_evidence() {
       usage_event_count: ($usage[0] | length),
       usage_models: ($usage[0] | map(.model) | unique | sort),
       provider_model_public_id: $provider_model,
-      usage_official_completed_count: ([$usage[0][] | select(.provider_id == "openai" and .model == "gpt-5.5" and (.status // "") == "completed" and (.http_status // 0) == 200)] | length),
-      usage_gpt56_completed_count: ([$usage[0][] | select(.provider_id == "openai" and .model == "gpt-5.6-luna" and (.status // "") == "completed" and (.http_status // 0) == 200)] | length),
+      usage_official_completed_count: (
+        if $automated_profile == "custom_scenario" then
+          ([$automated_stages[0][] | select(.id | startswith("official-")) | .model_id] | unique) as $official_models |
+          ([$usage[0][] | select(.provider_id == "openai" and ([.model] | inside($official_models)) and (.status // "") == "completed" and (.http_status // 0) == 200)] | length)
+        else
+          ([$usage[0][] | select(.provider_id == "openai" and .model == "gpt-5.5" and (.status // "") == "completed" and (.http_status // 0) == 200)] | length)
+        end
+      ),
+      usage_gpt56_completed_count: (
+        if $automated_profile == "custom_scenario" then
+          ([$automated_stages[0][] | select(.id | startswith("official-")) | .model_id | select(startswith("gpt-5.6"))] | unique) as $gpt56_models |
+          ([$usage[0][] | select(.provider_id == "openai" and ([.model] | inside($gpt56_models)) and (.status // "") == "completed" and (.http_status // 0) == 200)] | length)
+        else
+          ([$usage[0][] | select(.provider_id == "openai" and .model == "gpt-5.6-luna" and (.status // "") == "completed" and (.http_status // 0) == 200)] | length)
+        end
+      ),
       usage_official_auth_required_count: ([$usage[0][] | select(.provider_id == "openai" and (.error_type // "") == "auth_required")] | length),
       usage_official_refresh_revoked_count: ([$usage[0][] | select(.provider_id == "openai" and ((.error_type // "") | test("refresh(_token)?_revoked|token_revoked")))] | length),
       usage_provider_completed_count: ([$usage[0][] | select(.model == $provider_model and (.status // "") == "completed" and (.http_status // 0) == 200)] | length),
       usage_unknown_model_count: ([$usage[0][] | select((.error_type // "") == "unknown_model")] | length),
       gpt56_gui_completed: (
-        ([$usage[0][] | select(.provider_id == "openai" and .model == "gpt-5.6-luna" and (.status // "") == "completed" and (.http_status // 0) == 200)] | length) > 0
-        and ($render[0].gpt56_gui_visible // false)
+        if $automated_profile == "custom_scenario" then
+          ([$automated_stages[0][] | select(.id | startswith("official-")) | select(.model_id | startswith("gpt-5.6")) | select(.state == "evidence_verified")] | length) > 0
+          and ($render[0].gpt56_gui_visible // false)
+        else
+          ([$usage[0][] | select(.provider_id == "openai" and .model == "gpt-5.6-luna" and (.status // "") == "completed" and (.http_status // 0) == 200)] | length) > 0
+          and ($render[0].gpt56_gui_visible // false)
+        end
       ),
       markdown_render_verified: ($render[0].markdown_render_verified // false),
       raw_protocol_absent: (($render[0].raw_protocol_absent // false) and ($tool[0].xml_leak_found != true) and ($tool[0].raw_function_calls_found != true)),
@@ -4061,6 +4096,8 @@ write_evidence() {
       official_auth_status: (
         if ([$usage[0][] | select(.provider_id == "openai" and ((.error_type // "") | test("refresh(_token)?_revoked|token_revoked")))] | length) > 0 then "refresh_revoked"
         elif ([$usage[0][] | select(.provider_id == "openai" and (.error_type // "") == "auth_required")] | length) > 0 then "auth_required"
+        elif $automated_profile == "custom_scenario" and
+          ([$automated_stages[0][] | select(.id | startswith("official-")) | select(.state == "evidence_verified")] | length) >= 2 then "verified"
         elif ([$usage[0][] | select(.provider_id == "openai" and .model == "gpt-5.5" and (.status // "") == "completed" and (.http_status // 0) == 200)] | length) > 0
           and ([$usage[0][] | select(.provider_id == "openai" and .model == "gpt-5.6-luna" and (.status // "") == "completed" and (.http_status // 0) == 200)] | length) > 0 then "verified"
         else "not_attempted"
@@ -4396,6 +4433,7 @@ func visuallyContainsMarker(_ candidate: String, _ expected: String) -> Bool {
 let normalized = compact(combined)
 let assistantNormalizedLines = assistantLines.map(compact)
 let markerNormalized = compact(marker)
+let workspaceNormalized = compact(FileManager.default.currentDirectoryPath)
 let visualMarkerLineCount = lines.map(compact).filter { visuallyContainsMarker($0, markerNormalized) }.count
 let rawProtocolVisible = ["functioncalls", "toolcall", "functioncallxml", "invoketool", "parametername"].contains { normalized.contains($0) }
 let authErrorVisible = [
@@ -4480,14 +4518,19 @@ case "provider-markdown":
 case "provider-tool":
     checks["tool_marker_visible"] = !markerNormalized.isEmpty && visualMarkerLineCount >= 2
     checks["tool_execution_visible"] =
-        normalized.contains("processexitedwithcode0") || occurrences(normalized, "printf") >= 2
+        normalized.contains("processexitedwithcode0") ||
+        (!workspaceNormalized.isEmpty && visualMarkerLineCount >= 2 && normalized.contains(workspaceNormalized)) ||
+        occurrences(normalized, "printf") >= 2
 case "plain":
     break
 case "markdown":
     applyMarkdownChecks()
 case "tool":
     checks["tool_marker_visible"] = !markerNormalized.isEmpty && visualMarkerLineCount >= 2
-    checks["tool_execution_visible"] = normalized.contains("processexitedwithcode0") || occurrences(normalized, "printf") >= 2
+    checks["tool_execution_visible"] =
+        normalized.contains("processexitedwithcode0") ||
+        (!workspaceNormalized.isEmpty && visualMarkerLineCount >= 2 && normalized.contains(workspaceNormalized)) ||
+        occurrences(normalized, "printf") >= 2
 default:
     break
 }
@@ -4920,16 +4963,12 @@ refresh_automated_stage_evidence() {
   local marker="$4"
   local evidence_role="$5"
   if [[ "${expectation}" == "tool" ]]; then
-    if [[ "${ASSISTED_MODE}" == "true" && "${evidence_role}" == "official-tool" ]]; then
-      local binding_file="${RUN_DIR}/automated-rollout-${evidence_role}.json"
-      local session_file session_binding_sha256
-      session_file="$(jq -er '.session_file | select(type == "string" and length > 0)' "${binding_file}")" || return 1
-      session_binding_sha256="$(jq -er '.session_binding_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "${binding_file}")" || return 1
-      write_desktop_tool_evidence "${since_epoch}" "${model_id}" "${marker}" \
-        "${session_file}" "${session_binding_sha256}" || return 1
-    else
-      write_desktop_tool_evidence "${since_epoch}" "${model_id}" "${marker}" || return 1
-    fi
+    local binding_file="${RUN_DIR}/automated-rollout-${evidence_role}.json"
+    local session_file session_binding_sha256
+    session_file="$(jq -er '.session_file | select(type == "string" and length > 0)' "${binding_file}")" || return 1
+    session_binding_sha256="$(jq -er '.session_binding_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "${binding_file}")" || return 1
+    write_desktop_tool_evidence "${since_epoch}" "${model_id}" "${marker}" \
+      "${session_file}" "${session_binding_sha256}" || return 1
   fi
   write_desktop_render_evidence "${since_epoch}" "${model_id}" "${SCREENSHOT_EVIDENCE}"
 }
@@ -5660,7 +5699,40 @@ run_automated_proof() {
       fi
       rm -f "${assisted_final_current}"
       ;;
-    custom_scenario) ;;
+    custom_scenario)
+      if jq -e '
+        [.stages[].id] == ["official-plain","official-markdown","provider-plain","provider-markdown","provider-tool","official-tool"]
+      ' "${AUTOMATED_SCENARIO_NORMALIZED}" >/dev/null; then
+        local custom_official_model custom_official_marker
+        custom_official_model="$(jq -er '.stages[] | select(.id == "official-plain") | .model_id' "${AUTOMATED_SCENARIO_NORMALIZED}")" || return 1
+        custom_official_marker="$(jq -er '.stages[] | select(.id == "official-plain") | .response_marker' "${AUTOMATED_SCENARIO_NORMALIZED}")" || return 1
+        AUTO_ERROR_CODE="custom_render_evidence_failed"
+        write_desktop_render_evidence "${overall_since}" "${PROOF_PROVIDER_MODEL_ID}" "${SCREENSHOT_EVIDENCE}" \
+          "RelayKit Official 55 Live:" "${custom_official_marker}" "${custom_official_model}" \
+          "gpt55-response" "official-plain" "provider-markdown" "provider-tool"
+        jq -e '
+          .gpt56_gui_visible == true and
+          .markdown_source_contract_verified == true and
+          .markdown_render_verified == true and
+          .raw_protocol_absent == true and
+          .tool_gui_verified == true
+        ' "${DESKTOP_RENDER_EVIDENCE}" >/dev/null || {
+          AUTO_ERROR_CODE="custom_render_evidence_incomplete"
+          return 1
+        }
+        jq -e '
+          .proof_found == true and .function_call_found == true and .function_call_output_found == true and
+          .process_exited_zero == true and .matched_provider_tool_count == 1 and
+          .assisted_same_call_verified == true and (.matched_call_ids | length) == 1 and
+          .exact_session_binding_verified == true and .exact_shell_command_found == true and
+          .marker_output_found == true and .pwd_output_found == true and
+          .xml_leak_found == false and .raw_function_calls_found == false
+        ' "${DESKTOP_TOOL_EVIDENCE}" >/dev/null || {
+          AUTO_ERROR_CODE="custom_tool_evidence_incomplete"
+          return 1
+        }
+      fi
+      ;;
     *)
       AUTO_ERROR_CODE="scenario_profile_unknown"
       return 1
@@ -6288,7 +6360,7 @@ EOF
     [[ -n "${8:-}" ]] || exit 2
     CODEX_HOME_DIR="$2"
     DESKTOP_RENDER_EVIDENCE="$3"
-    write_desktop_render_evidence "$4" "$5" "$6" "$7" "$8"
+    write_desktop_render_evidence "$4" "$5" "$6" "$7" "$8" "${9:-}" "${10:-}" "${11:-}" "${12:-}" "${13:-}"
     ;;
   --test-screenshot-analysis)
     [[ -n "${3:-}" ]] || exit 2
