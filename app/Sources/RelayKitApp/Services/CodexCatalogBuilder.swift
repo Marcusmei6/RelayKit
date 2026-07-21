@@ -9,8 +9,10 @@ enum CodexCatalogBuilder {
     }
 
     static func catalog(accountProjection: Bool) throws -> Catalog {
-        let binary = try codexBinary()
+        try catalog(accountProjection: accountProjection, binary: resolveBinary())
+    }
 
+    static func catalog(accountProjection: Bool, binary: URL) throws -> Catalog {
         let process = Process()
         let output = Pipe()
         process.executableURL = binary
@@ -38,7 +40,7 @@ enum CodexCatalogBuilder {
         return Catalog(data: data, binaryPath: binary.path)
     }
 
-    private static func codexBinary() throws -> URL {
+    static func resolveBinary() throws -> URL {
         var candidates: [String] = []
         if let override = ProcessInfo.processInfo.environment["RELAYKIT_CODEX_BINARY"] {
             candidates.append(override)

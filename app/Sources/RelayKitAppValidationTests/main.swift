@@ -1456,21 +1456,21 @@ func expectSignedBetaAppContracts() throws {
 
     for required in [
         "func startGatewayOnOrdinaryLaunch()",
-        "Task { await refreshModels() }",
+        "await refreshModels(officialCatalog: officialCatalog)",
         "func reconcileGatewayAfterOfficialStatusChange(wasConnected: Bool)",
         "wasConnected != officialSnapshot.isConnected, gateway.isRunning",
         "reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)",
         "func reloadGatewayAfterProviderConfigChange() throws",
         "func enableCodexForDesktop() async",
         "func disableCodexForDesktop() async",
-        "func rebuildCodexCatalog(gatewayModels snapshot: Data? = nil) async throws",
+        "func rebuildCodexCatalog(gatewayModels snapshot: Data? = nil, officialCatalog: Data? = nil) async throws",
         "let gatewayModels = try await client.modelListData()",
-        "await rebuildCodexCatalogIfEnabled(gatewayModels: gatewayModels)",
+        "await rebuildCodexCatalogIfEnabled(gatewayModels: gatewayModels, officialCatalog: officialCatalog)",
         "func gatewayModelsForCodexCatalog() async throws",
         "try configuredProvidersExist()",
         "try CodexModelCatalog.gatewayModelsNeedRetry(models)",
         "Task.sleep(nanoseconds: 700_000_000)",
-        "OfficialCodexAuthState.isConnected(data:)",
+        "OfficialCodexAuthState.isConnected(at: authURL)",
         "let providers = root[\"providers\"] as? [[String: Any]]",
         "includeOfficialModels: includeOfficial",
         "var codexIntegrationHasManagedState: Bool",
@@ -1482,6 +1482,14 @@ func expectSignedBetaAppContracts() throws {
     }
     if appModel.components(separatedBy: "reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)").count - 1 < 2 {
         fatalError("Official status refresh and explicit disconnect must both reconcile the running gateway")
+    }
+    guard let initializerStart = appModel.range(of: "    init() {"),
+          let initializerEnd = appModel.range(of: "    func useTemporaryProviderConfigPath", range: initializerStart.upperBound..<appModel.endIndex) else {
+        fatalError("AppModel initializer contract is missing")
+    }
+    let initializer = appModel[initializerStart.lowerBound..<initializerEnd.lowerBound]
+    if !initializer.contains("loadOfficialAuthStateFromDisk()") || initializer.contains("refreshOfficialAuthStatus()") {
+        fatalError("ordinary launch must synchronously load Official auth before starting the gateway")
     }
     for required in ["enable-codex-config", "disable-codex-config", "codex-config-status", "-target", "-catalog", "-state"] {
         if !gateway.contains(required) { fatalError("Codex config command contract missing \(required)") }
@@ -1499,8 +1507,15 @@ func expectSignedBetaAppContracts() throws {
     if appModel.contains("runCodex(arguments: [\"login\", \"status\"]") {
         fatalError("ordinary official status must not depend on a Codex subprocess")
     }
-    if !app.contains("model.startGatewayOnOrdinaryLaunch()") {
-        fatalError("ordinary App launch must evaluate bundled gateway startup")
+    if !app.contains("Task { await model.startGatewayOnOrdinaryLaunch() }") {
+        fatalError("ordinary App launch must prepare its complete gateway without blocking UI establishment")
+    }
+    if !appModel.contains("func startGatewayOnOrdinaryLaunch() async") ||
+        !appModel.contains("let codexBinary = try CodexCatalogBuilder.resolveBinary()") ||
+        !appModel.contains("Task.detached") ||
+        !appModel.contains("catalog(accountProjection: true, binary: codexBinary)") ||
+        !appModel.contains("startGateway(officialCatalog:") {
+        fatalError("ordinary launch must resolve AppKit state on MainActor, build the catalog off MainActor, and start one complete gateway")
     }
 }
 
@@ -1633,10 +1648,10 @@ expectProviderConnectionLabels()
 expectProviderHealthLabels()
 expectProviderConnectionClassification()
 expectUsageAnalytics()
-try expectKeychainCredentialStore()
-try expectGatewayCredentialHandoff()
 try expectSignedBetaAppContracts()
 try expectStatusPopoverContract()
+try expectKeychainCredentialStore()
+try expectGatewayCredentialHandoff()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }

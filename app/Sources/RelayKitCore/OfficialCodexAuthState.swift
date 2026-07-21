@@ -23,6 +23,11 @@ public enum OfficialCodexAuthState {
         }
     }
 
+    public static func isConnected(at url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url) else { return false }
+        return isConnected(data: data)
+    }
+
     public static func isConnected(data: Data) -> Bool {
         guard let auth = try? JSONDecoder().decode(AuthFile.self, from: data),
               auth.authMode == "chatgpt" else {

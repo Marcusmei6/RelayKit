@@ -109,7 +109,7 @@ final class AppModel: ObservableObject {
         refreshCodexConnectionStatus()
         refreshLaunchAtLoginStatus()
         refreshConfiguredProviders()
-        refreshOfficialAuthStatus()
+        loadOfficialAuthStateFromDisk()
     }
 
     func useTemporaryProviderConfigPath(_ path: String) {
@@ -133,21 +133,36 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func startGatewayOnOrdinaryLaunch() {
+    func startGatewayOnOrdinaryLaunch() async {
         guard storedGatewayConfigurationExists() else {
             gatewayStatus = "stopped"
             message = "RelayKit setup required: add a provider or connect Official."
             return
         }
-        startGateway()
+        let officialCatalog: Data?
+        do {
+            if officialSnapshot.isConnected {
+                let codexBinary = try CodexCatalogBuilder.resolveBinary()
+                officialCatalog = try await Task.detached(priority: .userInitiated) {
+                    try CodexCatalogBuilder.catalog(accountProjection: true, binary: codexBinary).data
+                }.value
+            } else {
+                officialCatalog = nil
+            }
+        } catch {
+            gatewayStatus = "error"
+            message = error.localizedDescription
+            return
+        }
+        startGateway(officialCatalog: officialCatalog)
         if gateway.isRunning {
-            Task { await refreshModels() }
+            await refreshModels(officialCatalog: officialCatalog)
         }
     }
 
-    func startGateway() {
+    func startGateway(officialCatalog: Data? = nil) {
         do {
-            let runtimeConfig = try makeGatewayRuntimeConfig()
+            let runtimeConfig = try makeGatewayRuntimeConfig(officialCatalog: officialCatalog)
             let credentialHandoff = try GatewayCredentialHandoff.encode(configData: runtimeConfig.data) { reference in
                 try KeychainCredentialStore.load(service: reference)
             }
@@ -193,7 +208,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refreshModels() async {
+    func refreshModels(officialCatalog: Data? = nil) async {
         if usesSmokeModelHealthFixture {
             message = "Loaded smoke model health fixture"
             return
@@ -204,7 +219,7 @@ final class AppModel: ObservableObject {
             models = response.data
             gatewayModelHealth = response.modelHealth ?? .empty
             message = "Loaded \(models.count) model(s)"
-            await rebuildCodexCatalogIfEnabled(gatewayModels: gatewayModels)
+            await rebuildCodexCatalogIfEnabled(gatewayModels: gatewayModels, officialCatalog: officialCatalog)
         } catch {
             message = gateway.isRunning ? error.localizedDescription : ProviderFormLabels.gatewayStoppedGuidance
         }
@@ -360,34 +375,37 @@ final class AppModel: ObservableObject {
             let wasConnected = officialSnapshot.isConnected
             do {
                 try ensureOfficialAuthDirs()
-                let authURL = URL(fileURLWithPath: RelayKitPaths.officialCodexHomePath())
-                    .appendingPathComponent("auth.json")
-                let loggedIn = (try? Data(contentsOf: authURL))
-                    .map(OfficialCodexAuthState.isConnected(data:)) ?? false
-                if loggedIn {
-                    let verified = officialRouteEvidence(
-                        gatewayRunning: gateway.isRunning,
-                        executableHash: Self.fileHash(Bundle.main.executableURL),
-                        providerConfigHash: Self.fileHash(URL(fileURLWithPath: providerConfigPath))
-                    ).isVerified
-                    updateOfficialSnapshot(
-                        loggedIn: true,
-                        detail: verified
-                            ? "Current proof verified official and provider routes."
-                            : "Isolated Codex login is available; current route proof is unavailable or stale."
-                    )
-                } else {
-                    updateOfficialSnapshot(loggedIn: false, detail: "Use Connect Official to sign in with Codex device authorization.")
-                }
-                officialAuthURL = ""
-                officialDeviceCode = ""
-                officialDeviceCodeCopied = false
+                loadOfficialAuthStateFromDisk()
             } catch {
                 updateOfficialSnapshot(loggedIn: false, detail: error.localizedDescription)
             }
             reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)
             await self.rebuildCodexCatalogIfEnabled()
         }
+    }
+
+    private func loadOfficialAuthStateFromDisk() {
+        let authURL = URL(fileURLWithPath: RelayKitPaths.officialCodexHomePath())
+            .appendingPathComponent("auth.json")
+        let loggedIn = OfficialCodexAuthState.isConnected(at: authURL)
+        if loggedIn {
+            let verified = officialRouteEvidence(
+                gatewayRunning: gateway.isRunning,
+                executableHash: Self.fileHash(Bundle.main.executableURL),
+                providerConfigHash: Self.fileHash(URL(fileURLWithPath: providerConfigPath))
+            ).isVerified
+            updateOfficialSnapshot(
+                loggedIn: true,
+                detail: verified
+                    ? "Current proof verified official and provider routes."
+                    : "Isolated Codex login is available; current route proof is unavailable or stale."
+            )
+        } else {
+            updateOfficialSnapshot(loggedIn: false, detail: "Use Connect Official to sign in with Codex device authorization.")
+        }
+        officialAuthURL = ""
+        officialDeviceCode = ""
+        officialDeviceCodeCopied = false
     }
 
     private func reconcileGatewayAfterOfficialStatusChange(wasConnected: Bool) {
@@ -987,7 +1005,7 @@ final class AppModel: ObservableObject {
         return !providers.isEmpty || officialSnapshot.isConnected
     }
 
-    private func makeGatewayRuntimeConfig() throws -> (path: String, data: Data) {
+    private func makeGatewayRuntimeConfig(officialCatalog: Data? = nil) throws -> (path: String, data: Data) {
         let source = try providerConfigData()
         guard var root = try JSONSerialization.jsonObject(with: source) as? [String: Any] else {
             throw ProviderConfigError.invalid("Provider configuration must be a JSON object.")
@@ -999,8 +1017,8 @@ final class AppModel: ObservableObject {
         }
 
         if officialSnapshot.isConnected {
-            let bundled = try CodexCatalogBuilder.catalog(accountProjection: true)
-            guard let catalog = try JSONSerialization.jsonObject(with: bundled.data) as? [String: Any],
+            let catalogData = try officialCatalog ?? CodexCatalogBuilder.catalog(accountProjection: true).data
+            guard let catalog = try JSONSerialization.jsonObject(with: catalogData) as? [String: Any],
                   let catalogModels = catalog["models"] as? [[String: Any]] else {
                 throw CodexModelCatalogError.invalidOfficialCatalog
             }
@@ -1045,18 +1063,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func rebuildCodexCatalogIfEnabled(gatewayModels: Data? = nil) async {
+    private func rebuildCodexCatalogIfEnabled(gatewayModels: Data? = nil, officialCatalog: Data? = nil) async {
         guard codexConnectionIsConfigured else { return }
         do {
-            try await rebuildCodexCatalog(gatewayModels: gatewayModels)
+            try await rebuildCodexCatalog(gatewayModels: gatewayModels, officialCatalog: officialCatalog)
         } catch {
             message = "Codex catalog update failed: \(error.localizedDescription)"
         }
     }
 
-    private func rebuildCodexCatalog(gatewayModels snapshot: Data? = nil) async throws {
+    private func rebuildCodexCatalog(gatewayModels snapshot: Data? = nil, officialCatalog: Data? = nil) async throws {
         let includeOfficial = officialSnapshot.isConnected
-        let bundled = try CodexCatalogBuilder.catalog(accountProjection: includeOfficial)
+        let catalogData = try officialCatalog ?? CodexCatalogBuilder.catalog(accountProjection: includeOfficial).data
         let gatewayModels: Data
         if let snapshot {
             gatewayModels = snapshot
@@ -1064,7 +1082,7 @@ final class AppModel: ObservableObject {
             gatewayModels = try await gatewayModelsForCodexCatalog()
         }
         let merged = try CodexModelCatalog.merge(
-            officialCatalog: bundled.data,
+            officialCatalog: catalogData,
             gatewayModels: gatewayModels,
             includeOfficialModels: includeOfficial
         )

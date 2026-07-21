@@ -17,4 +17,16 @@ func expectOfficialCodexAuthState() throws {
             fatalError("incomplete isolated Codex auth must not be connected")
         }
     }
+    let temporaryRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("relaykit-official-auth-state-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+    let authURL = temporaryRoot.appendingPathComponent("auth.json")
+    if OfficialCodexAuthState.isConnected(at: authURL) {
+        fatalError("missing isolated Codex auth file must not be connected")
+    }
+    try valid.write(to: authURL)
+    if !OfficialCodexAuthState.isConnected(at: authURL) {
+        fatalError("ordinary launch must synchronously read a complete isolated Codex auth file")
+    }
 }
