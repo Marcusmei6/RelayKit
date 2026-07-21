@@ -24,6 +24,21 @@ Source gates on HEAD e9ecd63 all pass: `go test ./... -count=1`, `go vet`, `gofm
 
 Pending (needs user-in-the-loop per objective): install v0.1.4 to `/Applications` (currently v0.1.3), then real ordinary Codex Desktop same-thread E2E (Case 4/5) with a real third-party provider credential.
 
+### Install + runtime verification (2026-07-21, v0.1.4)
+
+- Installed v0.1.4 build 5 to /Applications atomically via script/install_signed_release.sh. Post-install executable SHA matches manifest ac8424c5...5325. Old v0.1.3 backed up at /Applications/.RelayKitApp.backup.20260721T112446Z.37437 (rollback: quit app, remove app, move backup back).
+- Case 1: LSUIElement menu-bar app installed with normal Finder app icon; status item present.
+- Case 2: ordinary launch auto-started the bundled gateway on 127.0.0.1:19777 (parent-pid bound to app 37693). Health: status ok, provider_count 1, official_model_count 7, configured_model_count 2, model_health healthy 9 / hidden 0.
+- Real route proof through the installed App gateway (NOT fixtures): a configured third-party provider model returned status completed with real token usage; official gpt-5.6-terra returned status completed. A real third-party provider key is already present in the App Keychain reference.
+
+### Remaining (needs user at the physical machine)
+
+The SSH-bridged automation is NOT Accessibility-trusted (AXIsProcessTrusted=false, System Events -1719). So Case 3/4/5 cannot be driven remotely:
+- Case 3: click Connect page "Enable RelayKit" (id codex-relaykit-toggle), confirm the dialog. This rebuilds the catalog WITH provider models and writes the two managed fields to the real ~/.codex/config.toml while the gateway is live.
+- Case 4/5: fully quit + relaunch ordinary Codex Desktop, then in ONE thread: official -> provider (Markdown) -> provider (real shell/tool) -> official, capturing thread_id/model/usage/screenshots.
+
+Global state left safe: ~/.codex/config.toml has NO 19777/managed fields (Codex uses official). codex-config-state absent (disabled). auth.json untouched. The App gateway listening on 19777 is harmless because config is disabled.
+
 ## Signed Beta v0.1.0 Current Candidate
 
 Status: **signed beta candidate complete; public release unpublished**. The current artifact is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `116928bda89b6ca9a266bd7e1b3b820fc811d45f6ba118be16a367c619cf1a78`. It uses release/trimmed-path binaries and passed the archive personal-path scan, Developer ID signing, hardened runtime, fresh notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle. The redacted release verification is `dist/signed-beta-v0.1.0/path-clean-six-stage-20260720T162614Z/replacement-release-evidence.redacted.json`.
