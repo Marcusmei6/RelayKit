@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -188,9 +189,10 @@ func Enable(options EnableOptions) (EnableResult, error) {
 	if err != nil {
 		return EnableResult{}, err
 	}
-	tree.Set("openai_base_url", managedOpenAIBaseURL)
-	tree.Set("model_catalog_json", catalogPath)
-	merged, err := tree.ToTomlString()
+	merged, err := rewriteRootStringValues(original, tree, []rootStringUpdate{
+		{name: "openai_base_url", value: stringPointer(managedOpenAIBaseURL)},
+		{name: "model_catalog_json", value: stringPointer(catalogPath)},
+	})
 	if err != nil {
 		return EnableResult{}, fmt.Errorf("encode target TOML failed")
 	}
@@ -210,7 +212,7 @@ func Enable(options EnableOptions) (EnableResult, error) {
 	if err := os.MkdirAll(filepath.Dir(statePath), 0700); err != nil {
 		return EnableResult{}, err
 	}
-	if err := writeFileAtomic(targetPath, []byte(merged), 0600); err != nil {
+	if err := writeFileAtomic(targetPath, merged, 0600); err != nil {
 		return EnableResult{}, err
 	}
 	stateBody, err := json.Marshal(managedState{
@@ -323,6 +325,7 @@ func Disable(targetPath, statePath string) (DisableResult, error) {
 	}
 
 	result := DisableResult{TargetPath: targetPath, StatePath: statePath}
+	updates := make([]rootStringUpdate, 0, 2)
 	for _, field := range []struct {
 		name     string
 		managed  string
@@ -333,12 +336,11 @@ func Disable(targetPath, statePath string) (DisableResult, error) {
 	} {
 		if current, ok := tree.Get(field.name).(string); ok && current == field.managed {
 			if field.original.Present {
-				tree.Set(field.name, field.original.Value)
+				value := field.original.Value
+				updates = append(updates, rootStringUpdate{name: field.name, value: &value})
 				result.Restored = append(result.Restored, field.name)
 			} else {
-				if err := tree.Delete(field.name); err != nil {
-					return DisableResult{}, fmt.Errorf("remove managed setting failed")
-				}
+				updates = append(updates, rootStringUpdate{name: field.name})
 				result.Removed = append(result.Removed, field.name)
 			}
 		} else {
@@ -346,11 +348,11 @@ func Disable(targetPath, statePath string) (DisableResult, error) {
 		}
 	}
 	if len(result.Removed) > 0 || len(result.Restored) > 0 {
-		updated, err := tree.ToTomlString()
+		updated, err := rewriteRootStringValues(content, tree, updates)
 		if err != nil {
 			return DisableResult{}, fmt.Errorf("encode target TOML failed")
 		}
-		if err := writeFileAtomic(targetPath, []byte(updated), 0600); err != nil {
+		if err := writeFileAtomic(targetPath, updated, 0600); err != nil {
 			return DisableResult{}, err
 		}
 	}
@@ -358,6 +360,187 @@ func Disable(targetPath, statePath string) (DisableResult, error) {
 		return DisableResult{}, fmt.Errorf("remove RelayKit state failed")
 	}
 	return result, nil
+}
+
+type rootStringUpdate struct {
+	name  string
+	value *string
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
+// rewriteRootStringValues preserves the original TOML document byte-for-byte
+// outside RelayKit's two root string assignments. This avoids re-encoding
+// unrelated quoted keys whose spelling can be significant.
+func rewriteRootStringValues(content []byte, tree *toml.Tree, updates []rootStringUpdate) ([]byte, error) {
+	lines := strings.SplitAfter(string(content), "\n")
+	lineByName := make(map[string]int, len(updates))
+	for _, update := range updates {
+		value := tree.Get(update.name)
+		if value == nil {
+			continue
+		}
+		if _, ok := value.(string); !ok {
+			return nil, fmt.Errorf("existing %s must be a string", update.name)
+		}
+		position := tree.GetPosition(update.name)
+		index := position.Line - 1
+		if index < 0 || index >= len(lines) {
+			return nil, fmt.Errorf("existing %s uses unsupported TOML syntax", update.name)
+		}
+		lineByName[update.name] = index
+	}
+
+	prepend := strings.Builder{}
+	for _, update := range updates {
+		if index, ok := lineByName[update.name]; ok {
+			end, prefix, suffix, ok := splitRootStringAssignment(lines, index, update.name)
+			if !ok {
+				return nil, fmt.Errorf("existing %s uses unsupported TOML syntax", update.name)
+			}
+			if update.value == nil {
+				lines[index] = rootAssignmentComment(prefix, suffix)
+				for removed := index + 1; removed <= end; removed++ {
+					lines[removed] = ""
+				}
+				continue
+			}
+			lines[index] = prefix + strconv.Quote(*update.value) + suffix
+			for removed := index + 1; removed <= end; removed++ {
+				lines[removed] = ""
+			}
+			continue
+		}
+		if update.value != nil {
+			prepend.WriteString(update.name)
+			prepend.WriteString(" = ")
+			prepend.WriteString(strconv.Quote(*update.value))
+			prepend.WriteByte('\n')
+		}
+	}
+	updated := []byte(prepend.String() + strings.Join(lines, ""))
+	verified, err := toml.LoadBytes(updated)
+	if err != nil {
+		return nil, err
+	}
+	for _, update := range updates {
+		value := verified.Get(update.name)
+		if update.value == nil {
+			if value != nil {
+				return nil, fmt.Errorf("remove %s was not verified", update.name)
+			}
+			continue
+		}
+		if text, ok := value.(string); !ok || text != *update.value {
+			return nil, fmt.Errorf("write %s was not verified", update.name)
+		}
+	}
+	return updated, nil
+}
+
+func rootAssignmentComment(prefix, suffix string) string {
+	trimmed := strings.TrimLeft(suffix, " \t")
+	if !strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+	indent := prefix[:len(prefix)-len(strings.TrimLeft(prefix, " \t"))]
+	return indent + trimmed
+}
+
+func splitRootStringAssignment(lines []string, start int, name string) (int, string, string, bool) {
+	body := strings.Join(lines[start:], "")
+	leftTrimmed := strings.TrimLeft(body, " \t")
+	indentLength := len(body) - len(leftTrimmed)
+	keyLength := 0
+	for _, key := range []string{name, strconv.Quote(name), "'" + name + "'"} {
+		if strings.HasPrefix(leftTrimmed, key) {
+			keyLength = len(key)
+			break
+		}
+	}
+	if keyLength == 0 {
+		return 0, "", "", false
+	}
+	position := indentLength + keyLength
+	for position < len(body) && (body[position] == ' ' || body[position] == '\t') {
+		position++
+	}
+	if position >= len(body) || body[position] != '=' {
+		return 0, "", "", false
+	}
+	position++
+	for position < len(body) && (body[position] == ' ' || body[position] == '\t') {
+		position++
+	}
+	if position >= len(body) || (body[position] != '"' && body[position] != '\'') {
+		return 0, "", "", false
+	}
+	quote := body[position]
+	triple := position+2 < len(body) && body[position+1] == quote && body[position+2] == quote
+	valueStart := position
+	if triple {
+		position += 3
+		for position+2 < len(body) {
+			if body[position] == quote && body[position+1] == quote && body[position+2] == quote &&
+				(quote == '\'' || precedingBackslashes(body, position)%2 == 0) {
+				position += 3
+				break
+			}
+			position++
+		}
+		if position < 3 || body[position-3:position] != strings.Repeat(string(quote), 3) {
+			return 0, "", "", false
+		}
+	} else {
+		position++
+		escaped := false
+		closed := false
+		for position < len(body) && body[position] != '\n' && body[position] != '\r' {
+			character := body[position]
+			if quote == '"' && character == '\\' && !escaped {
+				escaped = true
+				position++
+				continue
+			}
+			if character == quote && !escaped {
+				position++
+				closed = true
+				break
+			}
+			escaped = false
+			position++
+		}
+		if !closed {
+			return 0, "", "", false
+		}
+	}
+	lineEnd := strings.IndexByte(body[position:], '\n')
+	if lineEnd == -1 {
+		lineEnd = len(body)
+	} else {
+		lineEnd += position + 1
+	}
+	suffix := body[position:lineEnd]
+	trimmedSuffix := strings.TrimSpace(strings.TrimSuffix(suffix, "\n"))
+	if trimmedSuffix != "" && !strings.HasPrefix(trimmedSuffix, "#") {
+		return 0, "", "", false
+	}
+	consumedLines := strings.Count(body[:lineEnd], "\n")
+	end := start
+	if consumedLines > 0 {
+		end += consumedLines - 1
+	}
+	return end, body[:valueStart], suffix, true
+}
+
+func precedingBackslashes(value string, before int) int {
+	count := 0
+	for index := before - 1; index >= 0 && value[index] == '\\'; index-- {
+		count++
+	}
+	return count
 }
 
 func originalValuesForEnable(tree *toml.Tree, targetPath, statePath string) (originalValues, error) {
@@ -368,6 +551,11 @@ func originalValuesForEnable(tree *toml.Tree, targetPath, statePath string) (ori
 		}
 		if state.Target != targetPath {
 			return originalValues{}, fmt.Errorf("RelayKit state target does not match target path")
+		}
+		baseURL, baseOK := tree.Get("openai_base_url").(string)
+		catalog, catalogOK := tree.Get("model_catalog_json").(string)
+		if !baseOK || !catalogOK || baseURL != state.Managed.OpenAIBaseURL || catalog != state.Managed.ModelCatalogJSON {
+			return originalValues{}, fmt.Errorf("managed Codex settings changed; disable or restore before enabling again")
 		}
 		return state.Original, nil
 	} else if !os.IsNotExist(err) {

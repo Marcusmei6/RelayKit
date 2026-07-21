@@ -166,6 +166,183 @@ enabled = true
 	}
 }
 
+func TestEnablePreservesDistinctQuotedProjectTables(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "relaykit-state.json")
+	catalogPath := filepath.Join(dir, "catalog.json")
+	original := []byte(`model = "keep"
+
+[projects.'"/workspace/Iris"']
+trust_level = "quoted-key"
+
+[projects."/workspace/Iris"]
+trust_level = "path-key"
+`)
+	if err := os.WriteFile(target, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: catalogPath, StatePath: statePath}); err != nil {
+		t.Fatalf("Enable err = %v", err)
+	}
+	merged := loadTOML(t, target)
+	if got := merged.GetPath([]string{"projects", `"/workspace/Iris"`, "trust_level"}); got != "quoted-key" {
+		t.Fatalf("quoted project key changed: %#v", got)
+	}
+	if got := merged.GetPath([]string{"projects", "/workspace/Iris", "trust_level"}); got != "path-key" {
+		t.Fatalf("path project key changed: %#v", got)
+	}
+	if status, err := IntegrationStatus(target, statePath); err != nil || status != StatusEnabled {
+		t.Fatalf("status = %q, %v", status, err)
+	}
+
+	if _, err := Disable(target, statePath); err != nil {
+		t.Fatalf("Disable err = %v", err)
+	}
+	restored, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("unrelated TOML formatting changed:\n%s", restored)
+	}
+}
+
+func TestEnablePreservesUnrelatedMultilineStringWithTableLikeContent(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "relaykit-state.json")
+	catalogPath := filepath.Join(dir, "catalog.json")
+	original := []byte(`description = """
+[this-is-text-not-a-table]
+"""
+model = "keep"
+`)
+	if err := os.WriteFile(target, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: catalogPath, StatePath: statePath}); err != nil {
+		t.Fatalf("Enable err = %v", err)
+	}
+	if status, err := IntegrationStatus(target, statePath); err != nil || status != StatusEnabled {
+		t.Fatalf("status = %q, %v", status, err)
+	}
+	if _, err := Disable(target, statePath); err != nil {
+		t.Fatalf("Disable err = %v", err)
+	}
+	restored, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("unrelated multiline TOML changed:\n%s", restored)
+	}
+}
+
+func TestEnableAcceptsPreexistingMultilineManagedStrings(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "relaykit-state.json")
+	catalogPath := filepath.Join(dir, "catalog.json")
+	originalBaseURL := "http://127.0.0.1:11434/v1"
+	originalCatalog := filepath.Join(dir, "original-catalog.json")
+	original := fmt.Sprintf("openai_base_url = \"\"\"\\\n%s\\\n\"\"\" # base note\nmodel_catalog_json = \"\"\"\\\n%s\\\n\"\"\"\nmodel = \"keep\"\n", originalBaseURL, originalCatalog)
+	if err := os.WriteFile(target, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: catalogPath, StatePath: statePath}); err != nil {
+		t.Fatalf("Enable err = %v", err)
+	}
+	if status, err := IntegrationStatus(target, statePath); err != nil || status != StatusEnabled {
+		t.Fatalf("status = %q, %v", status, err)
+	}
+	if _, err := Disable(target, statePath); err != nil {
+		t.Fatalf("Disable err = %v", err)
+	}
+	disabled := loadTOML(t, target)
+	if disabled.Get("openai_base_url") != originalBaseURL || disabled.Get("model_catalog_json") != originalCatalog || disabled.Get("model") != "keep" {
+		t.Fatalf("multiline managed values were not restored: %#v", disabled.ToMap())
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "# base note") {
+		t.Fatalf("managed-field comment was not preserved:\n%s", body)
+	}
+}
+
+func TestRepeatedEnableRejectsDriftWithoutWrites(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "relaykit-state.json")
+	firstCatalog := filepath.Join(dir, "catalog-1.json")
+	secondCatalog := filepath.Join(dir, "catalog-2.json")
+	if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: firstCatalog, StatePath: statePath}); err != nil {
+		t.Fatal(err)
+	}
+	tree := loadTOML(t, target)
+	tree.Set("openai_base_url", "http://127.0.0.1:29999/v1")
+	drifted, err := tree.ToTomlString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(drifted), 0600); err != nil {
+		t.Fatal(err)
+	}
+	targetBefore, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: secondCatalog, StatePath: statePath}); err == nil || !strings.Contains(err.Error(), "managed Codex settings changed") {
+		t.Fatalf("repeated Enable drift error = %v", err)
+	}
+	targetAfter, _ := os.ReadFile(target)
+	stateAfter, _ := os.ReadFile(statePath)
+	if string(targetAfter) != string(targetBefore) || string(stateAfter) != string(stateBefore) {
+		t.Fatal("rejected repeated Enable changed target or state")
+	}
+}
+
+func TestDisablePreservesCommentOnRemovedManagedField(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	statePath := filepath.Join(dir, "relaykit-state.json")
+	catalogPath := filepath.Join(dir, "catalog.json")
+	if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: catalogPath, StatePath: statePath}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withComment := strings.Replace(string(body), "model_catalog_json = "+fmt.Sprintf("%q", catalogPath), "model_catalog_json = "+fmt.Sprintf("%q", catalogPath)+" # keep this note", 1)
+	if err := os.WriteFile(target, []byte(withComment), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Disable(target, statePath); err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(disabled), "# keep this note") || strings.Contains(string(disabled), "model_catalog_json") {
+		t.Fatalf("managed-field comment was not preserved:\n%s", disabled)
+	}
+}
+
 func TestEnableRejectsRelativeCatalogAndInvalidTOMLWithoutWrites(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "config.toml")
