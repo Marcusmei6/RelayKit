@@ -657,6 +657,15 @@ func expectCodexCatalogMerge() throws {
     if collidingModels?.first?["slug"] as? String != "gpt-official" {
         fatalError("provider-only catalog incorrectly dropped an Official-slug provider route")
     }
+
+    let pendingHealth = Data(#"{"model_health":{"probed":false,"healthy":7,"unhealthy":0}}"#.utf8)
+    let unhealthyHealth = Data(#"{"model_health":{"probed":true,"healthy":8,"unhealthy":1}}"#.utf8)
+    let healthyHealth = Data(#"{"model_health":{"probed":true,"healthy":9,"unhealthy":0}}"#.utf8)
+    if try !CodexModelCatalog.gatewayModelsNeedRetry(pendingHealth) ||
+        !CodexModelCatalog.gatewayModelsNeedRetry(unhealthyHealth) ||
+        CodexModelCatalog.gatewayModelsNeedRetry(healthyHealth) {
+        fatalError("Codex catalog gateway health retry decision is incorrect")
+    }
 }
 
 func expectCodexCatalogProcessDrainContract() throws {
@@ -1430,7 +1439,14 @@ func expectSignedBetaAppContracts() throws {
         "func reloadGatewayAfterProviderConfigChange() throws",
         "func enableCodexForDesktop() async",
         "func disableCodexForDesktop() async",
-        "func rebuildCodexCatalog() async throws",
+        "func rebuildCodexCatalog(gatewayModels snapshot: Data? = nil) async throws",
+        "let gatewayModels = try await client.modelListData()",
+        "await rebuildCodexCatalogIfEnabled(gatewayModels: gatewayModels)",
+        "func gatewayModelsForCodexCatalog() async throws",
+        "try configuredProvidersExist()",
+        "try CodexModelCatalog.gatewayModelsNeedRetry(models)",
+        "Task.sleep(nanoseconds: 700_000_000)",
+        "let providers = root[\"providers\"] as? [[String: Any]]",
         "includeOfficialModels: includeOfficial",
         "var codexIntegrationHasManagedState: Bool",
         "RelayKitPaths.defaultCodexConfigPath()",

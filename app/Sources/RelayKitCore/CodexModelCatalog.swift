@@ -21,6 +21,16 @@ public enum CodexModelCatalogError: LocalizedError {
 }
 
 public enum CodexModelCatalog {
+    public static func gatewayModelsNeedRetry(_ data: Data) throws -> Bool {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let health = root["model_health"] as? [String: Any],
+              let probed = health["probed"] as? Bool,
+              let unhealthy = health["unhealthy"] as? Int else {
+            throw CodexModelCatalogError.invalidGatewayModels
+        }
+        return !probed || unhealthy > 0
+    }
+
     public static func merge(officialCatalog: Data, gatewayModels: Data, includeOfficialModels: Bool) throws -> Data {
         guard var root = try JSONSerialization.jsonObject(with: officialCatalog) as? [String: Any],
               let official = root["models"] as? [[String: Any]],

@@ -199,11 +199,12 @@ final class AppModel: ObservableObject {
             return
         }
         do {
-            let response = try await client.modelList()
+            let gatewayModels = try await client.modelListData()
+            let response = try JSONDecoder().decode(ModelListResponse.self, from: gatewayModels)
             models = response.data
             gatewayModelHealth = response.modelHealth ?? .empty
             message = "Loaded \(models.count) model(s)"
-            await rebuildCodexCatalogIfEnabled()
+            await rebuildCodexCatalogIfEnabled(gatewayModels: gatewayModels)
         } catch {
             message = gateway.isRunning ? error.localizedDescription : ProviderFormLabels.gatewayStoppedGuidance
         }
@@ -1076,19 +1077,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func rebuildCodexCatalogIfEnabled() async {
+    private func rebuildCodexCatalogIfEnabled(gatewayModels: Data? = nil) async {
         guard codexConnectionIsConfigured else { return }
         do {
-            try await rebuildCodexCatalog()
+            try await rebuildCodexCatalog(gatewayModels: gatewayModels)
         } catch {
             message = "Codex catalog update failed: \(error.localizedDescription)"
         }
     }
 
-    private func rebuildCodexCatalog() async throws {
+    private func rebuildCodexCatalog(gatewayModels snapshot: Data? = nil) async throws {
         let includeOfficial = officialSnapshot.isConnected
         let bundled = try CodexCatalogBuilder.catalog(accountProjection: includeOfficial)
-        let gatewayModels = try await client.modelListData()
+        let gatewayModels: Data
+        if let snapshot {
+            gatewayModels = snapshot
+        } else {
+            gatewayModels = try await gatewayModelsForCodexCatalog()
+        }
         let merged = try CodexModelCatalog.merge(
             officialCatalog: bundled.data,
             gatewayModels: gatewayModels,
@@ -1098,6 +1104,26 @@ final class AppModel: ObservableObject {
         try FileManager.default.createDirectory(at: catalogURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try merged.write(to: catalogURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: catalogURL.path)
+    }
+
+    private func gatewayModelsForCodexCatalog() async throws -> Data {
+        let models = try await client.modelListData()
+        guard try configuredProvidersExist(),
+              try CodexModelCatalog.gatewayModelsNeedRetry(models) else {
+            return models
+        }
+        try await Task.sleep(nanoseconds: 700_000_000)
+        return try await client.modelListData()
+    }
+
+    private func configuredProvidersExist() throws -> Bool {
+        guard let root = try JSONSerialization.jsonObject(with: providerConfigData()) as? [String: Any] else {
+            throw ProviderConfigError.invalid("Provider configuration must be a JSON object.")
+        }
+        guard let providers = root["providers"] as? [[String: Any]] else {
+            throw ProviderConfigError.invalid("providers array is required")
+        }
+        return !providers.isEmpty
     }
 
     private func gatewayFailureMessage(_ error: Error) -> String {
