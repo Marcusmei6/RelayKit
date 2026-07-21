@@ -4,6 +4,22 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-21, native official Responses refactor)
+
+The same-thread switching failure is confirmed as an official-route architecture defect, not a provider credential defect. The old `codex_home` path spawned one ephemeral `codex exec` process per request, flattened structured Responses history into a prompt, waited for a complete output file, and enforced a two-minute timeout. It also had no `/v1/responses/compact` route. Real long Desktop threads therefore failed either with remote-compaction output errors or with a 120-second timeout followed by WebSocket `Broken pipe`.
+
+Phase 7.11 replaces that path with a native official Responses proxy:
+
+- App runtime config now points official traffic at the ChatGPT Codex backend and no longer writes `codex_binary`.
+- Gateway forwards the raw Responses request to `/responses` or `/responses/compact`, with a strict Codex protocol-header allowlist, isolated OAuth Bearer, and `ChatGPT-Account-Id`. Inbound Desktop Authorization, cookies, provider credentials, and arbitrary headers are not forwarded.
+- HTTP JSON/SSE and Desktop WebSocket ingress use the existing validated native Responses event pipeline, preserve tools/structured history, restore the public model id, and retain real usage.
+- One upstream 401 performs one OAuth refresh, atomically updates only the isolated Codex `auth.json` while preserving unknown fields, and retries once. RelayKit writers use a cross-process lock and exact snapshot guard so observed external updates win. No auth value enters client responses, usage, tests, or tracked config.
+- The subprocess implementation, explicit shell shim, structural trace, and obsolete fixtures/tests were removed.
+
+Current source gates pass: `go test ./... -count=1`, `go vet ./...`, clean `gofmt -l`, `swift build`, `public-boundary-check.sh`, and `git diff --check`. New loopback tests cover official auth/header isolation, compact routing, HTTP SSE, Desktop WebSocket bridging, public model rewriting, and 401 refresh persistence/retry. `RelayKitAppValidationTests` still needs a console GUI Keychain session; SSH execution built successfully but correctly failed Keychain interaction with `-25308`. Selector-required menu smoke, current package, and isolated same-thread live switching/compaction proof remain pending. No global Codex config/auth, shared service, LaunchAgent, or port `18787` was changed.
+
+Independent CR closed the arbitrary-OAuth-target High finding and compact-usage Low finding. One Medium risk is accepted for this candidate: a non-cooperating external process could write RelayKit's isolated `auth.json` after the guarded comparison but before atomic rename. RelayKit no longer spawns Codex during requests, all RelayKit helpers honor the lock, and normal product flow owns that isolated home; arbitrary concurrent external writers are not a supported workflow.
+
 ## Current Truth (2026-07-21, recovery + new candidate)
 
 Immediate incident: a prior Enable-for-Codex/validation run left the real global `~/.codex/config.toml` pointing at RelayKit's `openai_base_url=http://127.0.0.1:19777/v1` plus RelayKit `model_catalog_json` while the App/gateway were NOT running. Codex Desktop then failed every request with `stream disconnected before completion: error sending request for url (http://127.0.0.1:19777/v1/responses)`. This violated the AGENTS.md shared-runtime boundary (validation must not leave the global config enabled without a running gateway/rollback).

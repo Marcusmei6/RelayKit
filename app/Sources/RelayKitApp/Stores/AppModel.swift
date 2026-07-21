@@ -1045,9 +1045,8 @@ final class AppModel: ObservableObject {
                 throw CodexModelCatalogError.missingOfficialTemplate
             }
             root["official_passthrough"] = [
-                "base_url": "https://api.openai.com/v1",
+                "base_url": "https://chatgpt.com/backend-api/codex",
                 "credential_ref": ["kind": "codex_home", "value": RelayKitPaths.officialCodexHomePath()],
-                "codex_binary": bundled.binaryPath,
                 "models": officialModels,
             ]
         }

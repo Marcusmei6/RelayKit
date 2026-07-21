@@ -260,7 +260,7 @@ func TestValidationAcceptsOfficialPassthroughCredentialRef(t *testing.T) {
 func TestValidationAcceptsOfficialCodexHomeCredentialRef(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.json")
-	body := `{"official_passthrough":{"base_url":"https://api.openai.example/v1","credential_ref":{"kind":"codex_home","value":"` + dir + `"},"codex_binary":"/usr/local/bin/codex","models":[{"id":"gpt-5.5","display_name":"GPT-5.5"}]},"providers":[]}`
+	body := `{"official_passthrough":{"base_url":"https://chatgpt.com/backend-api/codex","credential_ref":{"kind":"codex_home","value":"` + dir + `"},"codex_binary":"/usr/local/bin/codex","models":[{"id":"gpt-5.5","display_name":"GPT-5.5"}]},"providers":[]}`
 	if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -296,6 +296,7 @@ func TestValidationRejectsUnsafeCredentialRefAndMetadata(t *testing.T) {
 		"unicode env name":             {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"env","value":"TOKEN_é"},"models":[{"id":"m"}]}]}`, CodeValidationError},
 		"unsafe official credential":   {`{"official_passthrough":{"base_url":"https://api.openai.example/v1","credential_ref":{"kind":"env","value":"sk-secret-value"},"models":[{"id":"gpt-5.5"}]},"providers":[]}`, CodeValidationError},
 		"provider codex home":          {`{"providers":[{"id":"p","name":"n","base_url":"https://example.test/v1","api_format":"openai_chat","credential_ref":{"kind":"codex_home","value":"/tmp/codex-home"},"models":[{"id":"m"}]}]}`, CodeValidationError},
+		"official codex home target":   {`{"official_passthrough":{"base_url":"https://example.test/backend-api/codex","credential_ref":{"kind":"codex_home","value":"/tmp/codex-home"},"models":[{"id":"gpt-5.5"}]},"providers":[]}`, CodeValidationError},
 		"relative official codex home": {`{"official_passthrough":{"base_url":"https://api.openai.example/v1","credential_ref":{"kind":"codex_home","value":"relative"},"models":[{"id":"gpt-5.5"}]},"providers":[]}`, CodeValidationError},
 	}
 	for name, tc := range cases {

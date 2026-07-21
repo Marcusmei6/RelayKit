@@ -314,6 +314,19 @@ Status: complete for the local ad-hoc RC1 product gate. Signed Beta remains a se
 - The RC1 stage ledger, process-bound screenshots, rollout binding, usage, provider events, and tool evidence are authoritative for A/B/C. The generic manual-proof render summary is a separate schema and must not override or substitute for the RC1 stage result.
 - Current-candidate Desktop AX/manual/RC1 contracts, Swift, Go test/vet/gofmt, public-boundary, diagnostics redaction, frozen package verification, current App/Desktop evidence, and cleanup checks passed. `dist/rc1-final-current-run-20260717/final/product-evidence.json` is the current product truth; the manifest is generated from it only after the tracked worktree is committed and clean.
 
+## Phase 7.11: Native Official Responses Proxy
+
+Status: implementation and source-level validation complete; current-package GUI and same-thread live validation pending.
+
+- Replace the `codex_home` official route's per-request `codex exec` subprocess with a native Responses reverse proxy. Preserve the inbound Responses body, replace only the public model id with its upstream mapping, and use the isolated Codex login's OAuth access token plus `ChatGPT-Account-Id`.
+- Forward only the explicit Codex protocol header allowlist. Never forward the inbound Desktop Authorization header, cookies, provider credentials, or arbitrary headers.
+- Support native JSON and SSE on `POST /v1/responses`, SSE-to-Desktop WebSocket bridging, and `POST /v1/responses/compact` to the official `/responses/compact` endpoint. Compaction output remains an opaque Responses item; RelayKit must not decode or invent encrypted compaction content.
+- On one upstream 401, refresh once through the public Codex OAuth client contract, atomically update only the isolated `auth.json`, preserve unknown/root/token fields, and retry the original request once. RelayKit writers share a cross-process lock and compare the exact auth snapshot under that lock before rename; an external update observed before the guarded write wins. Errors and usage remain sanitized.
+- Remove the obsolete subprocess prompt flattening, deterministic shell-decision shim, 120-second subprocess timeout, structural trace, and their fixtures. Provider adapters and non-`codex_home` compatibility paths remain unchanged.
+- Source evidence: focused RED/GREEN tests cover native auth/header isolation, compact routing, HTTP SSE, Desktop WebSocket bridging, public model rewriting, one refresh/retry, atomic auth persistence, and unknown-field preservation. `go test ./... -count=1`, `go vet ./...`, `gofmt -l`, `swift build`, public-boundary, and diff checks pass.
+- Accepted Medium risk: a non-cooperating external process could still write the RelayKit-owned isolated `auth.json` in the tiny interval after the guarded comparison and before rename. The product does not spawn Codex while serving requests, RelayKit instances honor the lock, and normal device login/catalog work is outside that request interval. A future stronger ownership protocol is required if arbitrary external writers to RelayKit's isolated CODEX_HOME become supported.
+- Remaining gates: run `RelayKitAppValidationTests` in the console GUI Keychain session, run the selector-required menu smoke, build one current package, then execute one isolated same-thread provider -> official -> provider -> official sequence that reaches compaction without touching global Codex config/auth or port `18787`.
+
 ## Release Gate
 
 First public release requires:

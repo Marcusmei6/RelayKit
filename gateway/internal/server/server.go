@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -33,7 +34,8 @@ type Server struct {
 	usageLogPath             string
 	keychainCredentials      map[string]string
 	allowKeychainCLIFallback bool
-	officialStructuralTrace  *officialStructuralTrace
+	officialAuthRefreshMu    sync.Mutex
+	officialCodexBaseURL     string
 }
 
 const maximumResponsesRequestBytes = 16 << 20
@@ -70,6 +72,10 @@ func NewWithUsageLogAndCredentials(configPath, usageLogPath string, credentials 
 }
 
 func newServer(configPath, usageLogPath string, credentials map[string]string, allowKeychainCLIFallback bool) (http.Handler, error) {
+	return newServerWithOfficialEndpoint(configPath, usageLogPath, credentials, allowKeychainCLIFallback, config.OfficialCodexBaseURL)
+}
+
+func newServerWithOfficialEndpoint(configPath, usageLogPath string, credentials map[string]string, allowKeychainCLIFallback bool, officialCodexBaseURL string) (http.Handler, error) {
 	credentialCopy := make(map[string]string, len(credentials))
 	for reference, value := range credentials {
 		credentialCopy[reference] = value
@@ -78,6 +84,7 @@ func newServer(configPath, usageLogPath string, credentials map[string]string, a
 		client:                   http.DefaultClient,
 		keychainCredentials:      credentialCopy,
 		allowKeychainCLIFallback: allowKeychainCLIFallback,
+		officialCodexBaseURL:     officialCodexBaseURL,
 	}
 	s.usageLogPath = usageLogPath
 	if configPath != "" {
@@ -98,18 +105,13 @@ func newServer(configPath, usageLogPath string, credentials map[string]string, a
 			}},
 		}
 	}
-	trace, err := newOfficialStructuralTraceFromEnv()
-	if err != nil {
-		return nil, err
-	}
-	s.officialStructuralTrace = trace
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /v1/models", s.models)
 	mux.HandleFunc("POST /_relaykit/provider-test", s.providerTest)
 	mux.HandleFunc("GET /v1/responses", s.responsesWebSocket)
 	mux.HandleFunc("POST /v1/responses", s.responses)
+	mux.HandleFunc("POST /v1/responses/compact", s.officialResponsesCompact)
 	return mux, nil
 }
 
@@ -550,6 +552,10 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, body)
 		return
 	}
+	if model, ok := s.officialModelForModel(req.Model); ok && officialUsesCodexHome(*s.config.OfficialPassthrough) {
+		s.officialOpenAIResponses(w, r, rawRequest, req, *s.config.OfficialPassthrough, model, start, false)
+		return
+	}
 	if provider, model, ok := s.providerForModel(req.Model); ok && provider.APIFormat == config.APIFormatOpenAIResponses {
 		s.nativeOpenAIResponses(w, r, rawRequest, req, provider, model, start)
 		return
@@ -728,6 +734,11 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = conn.Close()
 				<-monitorDone
 			}()
+			if model, ok := s.officialModelForModel(req.Model); ok && officialUsesCodexHome(*s.config.OfficialPassthrough) {
+				s.officialOpenAIResponsesWebSocket(rw.Writer, requestCtx, r.Header, requestBody, req, *s.config.OfficialPassthrough, model, start)
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
 			if provider, model, ok := s.providerForModel(req.Model); ok && provider.APIFormat == config.APIFormatOpenAIResponses {
 				s.nativeOpenAIResponsesWebSocket(rw.Writer, requestCtx, requestBody, req, provider, model, start)
 				_ = writeWebSocketClose(rw.Writer)
@@ -995,16 +1006,6 @@ func writeWebSocketCustomToolCallInput(w *bufio.Writer, event string, outputInde
 
 func (s *Server) completeResponse(ctx context.Context, req responsesRequest, messages []chatMessage, start time.Time, transport string) (map[string]any, int, map[string]any) {
 	if model, ok := s.officialModelForModel(req.Model); ok {
-		if officialUsesCodexHome(*s.config.OfficialPassthrough) {
-			result, err := s.completeOfficialWithCodex(ctx, *s.config.OfficialPassthrough, model, req, messages)
-			if err != nil {
-				status, errorType, message := officialCodexFailureDetails(err)
-				s.recordFailedUsage("openai", req.Model, errorType, status, start, transport)
-				return nil, status, errorBody(errorType, message)
-			}
-			s.recordCompletedUsage("openai", req.Model, responseID(""), "completed", false, nil, start, transport)
-			return result, http.StatusOK, nil
-		}
 		upstreamReq := upstreamRequest(config.APIFormatOpenAIChat, upstreamModelName(model), messages, false)
 		payload, err := json.Marshal(upstreamReq)
 		if err != nil {
@@ -1104,28 +1105,6 @@ func (s *Server) completeResponse(ctx context.Context, req responsesRequest, mes
 }
 
 func (s *Server) officialResponses(w http.ResponseWriter, r *http.Request, req responsesRequest, model config.Model, messages []chatMessage, start time.Time) {
-	if officialUsesCodexHome(*s.config.OfficialPassthrough) {
-		result, err := s.completeOfficialWithCodex(r.Context(), *s.config.OfficialPassthrough, model, req, messages)
-		if err != nil {
-			status, errorType, message := officialCodexFailureDetails(err)
-			s.recordFailedUsage("openai", req.Model, errorType, status, start, "responses_http")
-			writeJSON(w, status, errorBody(errorType, message))
-			return
-		}
-		usage, _ := result["usage"].(map[string]any)
-		status := stringValue(result["status"])
-		if status == "" {
-			status = "completed"
-		}
-		s.recordCompletedUsage("openai", req.Model, responseID(stringValue(result["id"])), status, req.Stream, usage, start, "responses_http")
-		if req.Stream {
-			writeCompletedResponsesSSE(w, result)
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
-		return
-	}
-
 	upstreamReq := upstreamRequest(config.APIFormatOpenAIChat, upstreamModelName(model), messages, req.Stream)
 	payload, err := json.Marshal(upstreamReq)
 	if err != nil {
@@ -1577,525 +1556,6 @@ func (s *Server) applyOfficialAuth(req *http.Request, official config.OfficialPa
 
 func officialUsesCodexHome(official config.OfficialPassthrough) bool {
 	return official.CredentialRef != nil && official.CredentialRef.Kind == config.CredentialKindCodexHome
-}
-
-type officialCodexFailure struct {
-	status    int
-	errorType string
-	message   string
-}
-
-func (failure *officialCodexFailure) Error() string {
-	return failure.message
-}
-
-func classifyOfficialCodexFailure(stderr string, contextError error) error {
-	if contextError == context.DeadlineExceeded {
-		return &officialCodexFailure{
-			status:    http.StatusGatewayTimeout,
-			errorType: "official_timeout",
-			message:   "RelayKit official Codex request timed out",
-		}
-	}
-	normalized := strings.ToLower(stderr)
-	if strings.Contains(normalized, "not supported when using codex with a chatgpt account") {
-		return &officialCodexFailure{
-			status:    http.StatusBadRequest,
-			errorType: "model_not_supported",
-			message:   "Official model is not available for this Codex account",
-		}
-	}
-	if strings.Contains(normalized, "unknown model") {
-		return &officialCodexFailure{
-			status:    http.StatusBadRequest,
-			errorType: "unknown_model",
-			message:   "Official model is not recognized by the current Codex installation",
-		}
-	}
-	for _, marker := range []string{"not logged in", "login required", "unauthorized", "authentication failed", "refresh token"} {
-		if strings.Contains(normalized, marker) {
-			return &officialCodexFailure{
-				status:    http.StatusUnauthorized,
-				errorType: "auth_required",
-				message:   "RelayKit official Codex login is not connected",
-			}
-		}
-	}
-	return &officialCodexFailure{
-		status:    http.StatusBadGateway,
-		errorType: "official_request_failed",
-		message:   "RelayKit official Codex request failed",
-	}
-}
-
-func officialCodexFailureDetails(err error) (int, string, string) {
-	if failure, ok := err.(*officialCodexFailure); ok {
-		return failure.status, failure.errorType, failure.message
-	}
-	return http.StatusBadGateway, "official_request_failed", "RelayKit official Codex request failed"
-}
-
-type officialCodexDecision struct {
-	Kind          string `json:"kind"`
-	Name          string `json:"name"`
-	ArgumentsJSON string `json:"arguments_json"`
-	Text          string `json:"text"`
-}
-
-const officialCodexDecisionSchema = `{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["kind", "name", "arguments_json", "text"],
-  "properties": {
-    "kind": {"type": "string", "enum": ["message", "function_call"]},
-    "name": {"type": "string"},
-    "arguments_json": {"type": "string"},
-    "text": {"type": "string"}
-  }
-}`
-
-const (
-	explicitExecCommandPrefix   = "Use the shell tool to run exactly: "
-	explicitExecCommandSuffix   = "\nThen report only the exact tool output."
-	explicitExecCommandV1Prefix = "RELAYKIT_EXEC_COMMAND_V1 "
-)
-
-func (s *Server) completeOfficialWithCodex(ctx context.Context, official config.OfficialPassthrough, model config.Model, req responsesRequest, messages []chatMessage) (map[string]any, error) {
-	execCapability := officialExecCommandCapability(req.Input, req.Tools)
-	command, messageOnly, err := officialExplicitExecCommand(req.Input, messages, req.Tools)
-	if err != nil {
-		s.officialStructuralTrace.recordRejectedOfficialRequest(req.raw, req.Input, officialStructuralRejectionForError(err))
-		return nil, &officialCodexFailure{
-			status:    http.StatusBadRequest,
-			errorType: "invalid_request_error",
-			message:   "invalid explicit shell tool request",
-		}
-	}
-	if command != "" {
-		return explicitExecCommandResponse(command, model.ID, execCapability)
-	}
-
-	codexHome := strings.TrimPrefix(official.CredentialRef.Value, "~/")
-	if codexHome != official.CredentialRef.Value {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, err
-		}
-		codexHome = filepath.Join(home, codexHome)
-	}
-	isolatedHome := filepath.Join(filepath.Dir(codexHome), "home")
-	if err := os.MkdirAll(isolatedHome, 0700); err != nil {
-		return nil, err
-	}
-	outDir, err := os.MkdirTemp("", "relaykit-codex-official-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(outDir)
-	outPath := filepath.Join(outDir, "last-message.txt")
-	schemaPath := filepath.Join(outDir, "tool-decision-schema.json")
-	binary := official.CodexBinary
-	if binary == "" {
-		binary = "codex"
-	}
-	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	args := []string{"exec", "--skip-git-repo-check", "--ephemeral", "--ignore-rules", "--ignore-user-config", "--sandbox", "read-only", "--color", "never"}
-	prompt := codexPrompt(messages)
-	if messageOnly {
-		args = append(args, "--disable", "shell_tool", "--disable", "unified_exec")
-		prompt = codexExplicitToolResultPrompt(messages)
-	} else if len(req.Tools) > 0 {
-		if err := os.WriteFile(schemaPath, []byte(officialCodexDecisionSchema), 0600); err != nil {
-			return nil, err
-		}
-		args = append(args, "--disable", "shell_tool", "--disable", "unified_exec", "--output-schema", schemaPath)
-		prompt, err = codexToolDecisionPrompt(messages, req.Tools)
-		if err != nil {
-			return nil, err
-		}
-	}
-	args = append(args, "-m", upstreamModelName(model), "-o", outPath, "-")
-	cmd := exec.CommandContext(cmdCtx, binary, args...)
-	cmd.Env = append(os.Environ(), "HOME="+isolatedHome, "CODEX_HOME="+codexHome)
-	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Stdout = io.Discard
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, classifyOfficialCodexFailure(stderr.String(), cmdCtx.Err())
-	}
-	body, err := os.ReadFile(outPath)
-	if err != nil {
-		return nil, err
-	}
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		return nil, fmt.Errorf("empty official response")
-	}
-	if messageOnly {
-		return responsesFromChat(chatResponse{
-			ID: "codex-official",
-			Choices: []chatChoice{{
-				Message:      chatMessage{Role: "assistant", Content: text},
-				FinishReason: "stop",
-			}},
-		}, model.ID), nil
-	}
-	if len(req.Tools) > 0 {
-		return responsesFromOfficialCodexDecision(text, req.Tools, model.ID)
-	}
-	return responsesFromChat(chatResponse{
-		ID: "codex-official",
-		Choices: []chatChoice{{
-			Message:      chatMessage{Role: "assistant", Content: text},
-			FinishReason: "stop",
-		}},
-	}, model.ID), nil
-}
-
-func codexExplicitToolResultPrompt(messages []chatMessage) string {
-	return "The requested external shell command has already completed. Do not call or request any tool. " +
-		"Return only the final textual answer from the completed tool result.\nConversation:\n" + codexPrompt(messages)
-}
-
-func officialExplicitExecCommand(input json.RawMessage, _ []chatMessage, tools []responsesTool) (command string, messageOnly bool, err error) {
-	execCapability := officialExecCommandCapability(input, tools)
-	execCommandAllowed := execCapability != officialExecCommandUnavailable
-	var text string
-	if json.Unmarshal(input, &text) == nil {
-		command, explicit, err := parseExplicitExecCommand(text, execCommandAllowed)
-		if !explicit {
-			return "", false, nil
-		}
-		return command, false, err
-	}
-
-	var items []responsesInputItem
-	if json.Unmarshal(input, &items) != nil {
-		return "", false, nil
-	}
-	currentUser := -1
-	for i := len(items) - 1; i >= 0; i-- {
-		if items[i].Role == "user" && (items[i].Type == "" || items[i].Type == "message") {
-			currentUser = i
-			break
-		}
-	}
-	if currentUser < 0 {
-		return "", false, nil
-	}
-	message, ok := items[currentUser].chatMessage()
-	if !ok {
-		return "", false, nil
-	}
-	command, explicit, err := parseExplicitExecCommand(message.Content, execCommandAllowed)
-	if !explicit {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	if currentUser == len(items)-1 {
-		return command, false, nil
-	}
-	if len(items)-currentUser != 3 {
-		return "", false, newOfficialStructuralRejectionError("roundtrip", "malformed", "invalid explicit shell tool roundtrip")
-	}
-	if err := validateExplicitExecCommandRoundTrip(command, items[currentUser+1], items[currentUser+2], execCapability); err != nil {
-		return "", false, err
-	}
-	return "", true, nil
-}
-
-func parseExplicitExecCommand(text string, execCommandAllowed bool) (command string, explicit bool, err error) {
-	if strings.HasPrefix(text, explicitExecCommandV1Prefix) {
-		// Codex Desktop terminates submitted composer text with one LF.
-		text = strings.TrimSuffix(text, "\n")
-		if strings.ContainsAny(text, "\r\n\x00") {
-			return "", true, newOfficialStructuralRejectionError("command", "malformed", "invalid V1 explicit shell command line")
-		}
-		object, err := strictJSONObject([]byte(strings.TrimPrefix(text, explicitExecCommandV1Prefix)))
-		if err != nil || len(object) != 1 {
-			return "", true, newOfficialStructuralRejectionError("command", "malformed", "invalid V1 explicit shell command")
-		}
-		if json.Unmarshal(object["cmd"], &command) != nil || strings.TrimSpace(command) == "" || strings.ContainsAny(command, "\r\n\x00") {
-			return "", true, newOfficialStructuralRejectionError("command", "malformed", "invalid V1 explicit shell command value")
-		}
-		if !execCommandAllowed {
-			return "", true, newOfficialStructuralRejectionError("command", "incompatible", "incompatible explicit shell command")
-		}
-		return command, true, nil
-	}
-	if !strings.HasPrefix(text, explicitExecCommandPrefix) {
-		return "", false, nil
-	}
-	candidate := strings.TrimPrefix(text, explicitExecCommandPrefix)
-	if !strings.HasSuffix(candidate, explicitExecCommandSuffix) {
-		return "", true, newOfficialStructuralRejectionError("command", "malformed", "malformed explicit shell command")
-	}
-	command = strings.TrimSuffix(candidate, explicitExecCommandSuffix)
-	if command == "" || strings.ContainsAny(command, "\r\n") || !execCommandAllowed {
-		return "", true, newOfficialStructuralRejectionError("command", "incompatible", "incompatible explicit shell command")
-	}
-	return command, true, nil
-}
-
-func validateExplicitExecCommandRoundTrip(command string, call, output responsesInputItem, capability officialExecCommandCapabilityKind) error {
-	var outputType string
-	switch capability {
-	case officialExecCommandFunction:
-		if call.Type != "function_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec_command" {
-			return newOfficialStructuralRejectionError("tool_call", "malformed", "invalid explicit shell function call")
-		}
-		arguments, err := strictJSONObject([]byte(call.Arguments))
-		if err != nil || len(arguments) != 1 {
-			return newOfficialStructuralRejectionError("call_arguments", "malformed", "invalid explicit shell function arguments")
-		}
-		var calledCommand string
-		if json.Unmarshal(arguments["cmd"], &calledCommand) != nil || calledCommand != command {
-			return newOfficialStructuralRejectionError("call_arguments", "mismatch", "explicit shell function arguments do not match")
-		}
-		outputType = "function_call_output"
-	case officialExecCommandCustom:
-		expectedInput, err := codeModeExecProgram(command)
-		if err != nil {
-			return err
-		}
-		if call.Type != "custom_tool_call" || strings.TrimSpace(call.CallID) == "" || call.Name != "exec" || call.Input != expectedInput {
-			return newOfficialStructuralRejectionError("call_input", "mismatch", "invalid explicit shell custom tool call")
-		}
-		outputType = "custom_tool_call_output"
-	default:
-		return newOfficialStructuralRejectionError("tool_capability", "unavailable", "explicit shell tool capability is unavailable")
-	}
-	if output.Type != outputType || strings.TrimSpace(output.CallID) == "" || output.CallID != call.CallID {
-		return newOfficialStructuralRejectionError("tool_output", "malformed", "invalid explicit shell tool output")
-	}
-	if rawJSONPresent(output.Output) && rawJSONPresent(output.Content) {
-		return newOfficialStructuralRejectionError("tool_output", "ambiguous", "ambiguous explicit shell function output")
-	}
-	var result string
-	var err error
-	if rawJSONPresent(output.Output) {
-		result, err = responseToolOutputText(output.Output)
-	} else if rawJSONPresent(output.Content) {
-		result, err = responseToolOutputText(output.Content)
-	}
-	if err != nil {
-		return newOfficialStructuralRejectionError("tool_output", "unsupported", "invalid explicit shell function output content")
-	}
-	if strings.TrimSpace(result) == "" {
-		return newOfficialStructuralRejectionError("tool_output", "empty", "empty explicit shell function output")
-	}
-	return nil
-}
-
-func officialExecCommandToolAllowed(tools []responsesTool) bool {
-	found := false
-	for _, tool := range tools {
-		if tool.Name != "exec_command" {
-			continue
-		}
-		if found || tool.Type != "function" || tool.Parameters["type"] != "object" {
-			return false
-		}
-		properties, ok := tool.Parameters["properties"].(map[string]any)
-		if !ok {
-			return false
-		}
-		cmd, ok := properties["cmd"].(map[string]any)
-		if !ok || cmd["type"] != "string" {
-			return false
-		}
-		required, ok := tool.Parameters["required"].([]any)
-		if !ok || len(required) != 1 || required[0] != "cmd" {
-			return false
-		}
-		found = true
-	}
-	return found
-}
-
-type officialExecCommandCapabilityKind int
-
-const (
-	officialExecCommandUnavailable officialExecCommandCapabilityKind = iota
-	officialExecCommandFunction
-	officialExecCommandCustom
-)
-
-func officialExecCommandCapability(input json.RawMessage, tools []responsesTool) officialExecCommandCapabilityKind {
-	if officialExecCommandToolAllowed(tools) {
-		return officialExecCommandFunction
-	}
-	var items []struct {
-		Type  string `json:"type"`
-		Role  string `json:"role"`
-		Tools []struct {
-			Type string `json:"type"`
-			Name string `json:"name"`
-		} `json:"tools"`
-	}
-	if json.Unmarshal(input, &items) != nil {
-		return officialExecCommandUnavailable
-	}
-	additionalToolsCount := 0
-	execToolCount := 0
-	for _, item := range items {
-		if item.Type != "additional_tools" {
-			continue
-		}
-		additionalToolsCount++
-		if item.Role != "developer" || len(item.Tools) == 0 {
-			return officialExecCommandUnavailable
-		}
-		for _, tool := range item.Tools {
-			if tool.Name != "exec" {
-				continue
-			}
-			if tool.Type != "custom" {
-				return officialExecCommandUnavailable
-			}
-			execToolCount++
-		}
-	}
-	if additionalToolsCount == 1 && execToolCount == 1 {
-		return officialExecCommandCustom
-	}
-	return officialExecCommandUnavailable
-}
-
-func explicitExecCommandResponse(command, requestedModel string, capability officialExecCommandCapabilityKind) (map[string]any, error) {
-	var output map[string]any
-	arguments, err := json.Marshal(map[string]string{"cmd": command})
-	if err != nil {
-		return nil, err
-	}
-	response := responseID("")
-	callID := strings.Replace(response, "resp_", "call_", 1)
-	switch capability {
-	case officialExecCommandFunction:
-		output = map[string]any{
-			"type":      "function_call",
-			"id":        callID,
-			"status":    "completed",
-			"call_id":   callID,
-			"name":      "exec_command",
-			"arguments": string(arguments),
-		}
-	case officialExecCommandCustom:
-		input, err := codeModeExecProgram(command)
-		if err != nil {
-			return nil, err
-		}
-		output = map[string]any{
-			"type":    "custom_tool_call",
-			"id":      callID,
-			"status":  "completed",
-			"call_id": callID,
-			"name":    "exec",
-			"input":   input,
-		}
-	default:
-		return nil, fmt.Errorf("explicit shell tool capability is unavailable")
-	}
-	return map[string]any{
-		"id":          response,
-		"object":      "response",
-		"status":      "completed",
-		"model":       requestedModel,
-		"output_text": "",
-		"output":      []map[string]any{output},
-		"usage":       responsesUsage(nil),
-	}, nil
-}
-
-func codeModeExecProgram(command string) (string, error) {
-	encoded, err := json.Marshal(command)
-	if err != nil {
-		return "", err
-	}
-	return "const result = await tools.exec_command({cmd:" + string(encoded) + "}); text(result.output);", nil
-}
-
-func codexToolDecisionPrompt(messages []chatMessage, tools []responsesTool) (string, error) {
-	encodedTools, err := json.Marshal(tools)
-	if err != nil {
-		return "", err
-	}
-	return "You are choosing the next response for a separate client. Do not call or execute any of your own tools. " +
-		"The client will execute an external function_call exactly once. If the conversation can be answered now, " +
-		"return kind=message with final text. If an external tool is required, return kind=function_call using one exact " +
-		"tool name and put a compact JSON object string in arguments_json. Use empty name, arguments_json={} and empty " +
-		"text where a field does not apply.\nExternal tools: " + string(encodedTools) + "\nConversation:\n" + codexPrompt(messages), nil
-}
-
-func responsesFromOfficialCodexDecision(raw string, tools []responsesTool, requestedModel string) (map[string]any, error) {
-	var decision officialCodexDecision
-	if err := json.Unmarshal([]byte(raw), &decision); err != nil {
-		return nil, fmt.Errorf("invalid official tool decision")
-	}
-	if decision.Kind == "message" {
-		text := strings.TrimSpace(decision.Text)
-		if text == "" {
-			return nil, fmt.Errorf("empty official message decision")
-		}
-		return responsesFromChat(chatResponse{
-			ID: "codex-official",
-			Choices: []chatChoice{{
-				Message:      chatMessage{Role: "assistant", Content: text},
-				FinishReason: "stop",
-			}},
-		}, requestedModel), nil
-	}
-	if decision.Kind != "function_call" || !officialToolAllowed(decision.Name, tools) {
-		return nil, fmt.Errorf("invalid official function decision")
-	}
-	arguments := normalizeToolArguments(decision.Name, strings.TrimSpace(decision.ArgumentsJSON))
-	var argumentObject map[string]any
-	if arguments == "" || json.Unmarshal([]byte(arguments), &argumentObject) != nil || argumentObject == nil {
-		return nil, fmt.Errorf("invalid official function arguments")
-	}
-	response := responseID("")
-	callID := strings.Replace(response, "resp_", "call_", 1)
-	return map[string]any{
-		"id":          response,
-		"object":      "response",
-		"status":      "completed",
-		"model":       requestedModel,
-		"output_text": "",
-		"output": []map[string]any{{
-			"type":      "function_call",
-			"id":        callID,
-			"status":    "completed",
-			"call_id":   callID,
-			"name":      decision.Name,
-			"arguments": arguments,
-		}},
-		"usage": responsesUsage(nil),
-	}, nil
-}
-
-func officialToolAllowed(name string, tools []responsesTool) bool {
-	for _, tool := range tools {
-		if tool.Type == "function" && tool.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func codexPrompt(messages []chatMessage) string {
-	var b strings.Builder
-	for _, message := range messages {
-		role := message.Role
-		if role == "" {
-			role = "user"
-		}
-		fmt.Fprintf(&b, "%s: %s\n", role, message.Content)
-	}
-	return b.String()
 }
 
 func (s *Server) credentialRefToken(ref config.CredentialRef) (string, error) {
@@ -3248,13 +2708,17 @@ type usageEvent struct {
 }
 
 func (s *Server) recordCompletedUsage(providerID, model, requestID, status string, streaming bool, usage map[string]any, start time.Time, transport string) {
+	s.recordCompletedUsageRoute(providerID, model, requestID, status, streaming, usage, start, transport, "/v1/responses")
+}
+
+func (s *Server) recordCompletedUsageRoute(providerID, model, requestID, status string, streaming bool, usage map[string]any, start time.Time, transport, route string) {
 	normalizedUsage := responsesUsage(usage)
 	s.recordUsage(usageEvent{
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 		RequestID:    requestID,
 		ProviderID:   providerID,
 		Model:        model,
-		Route:        "/v1/responses",
+		Route:        route,
 		Transport:    transport,
 		Streaming:    streaming,
 		Status:       status,
@@ -3267,11 +2731,15 @@ func (s *Server) recordCompletedUsage(providerID, model, requestID, status strin
 }
 
 func (s *Server) recordFailedUsage(providerID, model, errorType string, httpStatus int, start time.Time, transport string) {
+	s.recordFailedUsageRoute(providerID, model, errorType, httpStatus, start, transport, "/v1/responses")
+}
+
+func (s *Server) recordFailedUsageRoute(providerID, model, errorType string, httpStatus int, start time.Time, transport, route string) {
 	s.recordUsage(usageEvent{
 		Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
 		ProviderID: providerID,
 		Model:      model,
-		Route:      "/v1/responses",
+		Route:      route,
 		Transport:  transport,
 		Status:     "failed",
 		HTTPStatus: httpStatus,

@@ -23,6 +23,7 @@ const (
 	CredentialKindCodexHome    = "codex_home"
 	RoutingStatusEnabled       = "enabled"
 	RoutingStatusDisabled      = "disabled"
+	OfficialCodexBaseURL       = "https://chatgpt.com/backend-api/codex"
 )
 
 type Error struct {
@@ -190,6 +191,9 @@ func validate(cfg Config) error {
 		if cfg.OfficialPassthrough.CredentialRef != nil {
 			if err := validateOfficialCredentialRef(*cfg.OfficialPassthrough.CredentialRef); err != nil {
 				return &Error{Code: CodeValidationError, Err: fmt.Errorf("invalid official_passthrough credential_ref: %w", err)}
+			}
+			if cfg.OfficialPassthrough.CredentialRef.Kind == CredentialKindCodexHome && cfg.OfficialPassthrough.BaseURL != OfficialCodexBaseURL {
+				return &Error{Code: CodeValidationError, Err: fmt.Errorf("codex_home official_passthrough must use the official Codex endpoint")}
 			}
 		}
 		if cfg.OfficialPassthrough.CodexBinary != "" && strings.ContainsAny(cfg.OfficialPassthrough.CodexBinary, "\n\r") {
