@@ -78,6 +78,24 @@ func TestChatMessagesAcceptsResponsesFunctionCallOutput(t *testing.T) {
 	}
 }
 
+func TestAnthropicMixedResponsesHistoryPreservesAssistantOutputText(t *testing.T) {
+	input := "[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"first user\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"first assistant\"}]},{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"latest user\"}]}]"
+	messages, err := chatMessages(json.RawMessage(input))
+	if err != nil {
+		t.Fatalf("chatMessages err = %v", err)
+	}
+	request := upstreamRequest("anthropic_messages", "m", messages, false)
+	got := request["messages"].([]chatMessage)
+	want := []chatMessage{
+		{Role: "user", Content: "first user"},
+		{Role: "assistant", Content: "first assistant"},
+		{Role: "user", Content: "latest user"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("messages = %#v, want %#v", got, want)
+	}
+}
+
 func TestModels(t *testing.T) {
 	cfgPath := filepath.Join("..", "..", "..", "examples", "providers.example.json")
 	h, err := New(cfgPath)

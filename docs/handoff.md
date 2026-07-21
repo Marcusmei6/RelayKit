@@ -4,6 +4,14 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-22, mixed Responses history preservation)
+
+The notarized v0.1.5 build 7 package from cb1cca8 was installed atomically and restored an App-parented healthy helper with manifest-bound executable, official 7 / provider 1 / configured 2, and unchanged global Codex config/auth hashes. A real current-package Codex WebSocket thread completed provider -> official -> provider -> official without client transport failures, proving the headerless official SSE fix. However, both later provider turns returned the immediately preceding official marker instead of their fresh provider marker, so build 7 is not releasable.
+
+The remaining defect is deterministic in the Responses-to-Anthropic adapter. Real mixed history represents assistant text as content parts with type output_text. chatMessages accepted only input_text/text, silently dropped every assistant message, and anthropicMessages then merged adjacent user instructions into one conflicting prompt. A focused RED regression produced one merged user message instead of the required user/assistant/user sequence. The minimal fix recognizes output_text, preserves alternating roles and the latest user instruction, and passes focused plus full Go/race/vet/gofmt, Swift build, public-boundary, and diff checks.
+
+Build one fresh Developer-ID/notarized v0.1.5 build 8 after committing this fix, replace build 7 atomically, and rerun the same-thread provider -> official -> provider -> official marker sequence. Keep installed build 7 and its helper running until replacement because the global Codex config remains RelayKit-managed.
+
 ## Current Truth (2026-07-22, headerless official SSE compatibility)
 
 The notarized v0.1.5 build 6 package was produced and installed from main at 4222970. Signature, hardened runtime, notarization, staple, Gatekeeper, manifest hashes, atomic install, App-parented helper startup, health (official 7 / provider 1 / configured 2), and global config/auth hash guards passed. A current-package same-thread Codex run then exposed one remaining protocol defect: the provider turn completed, but the first official turn failed over WebSocket and HTTP fallback because RelayKit required an explicit text/event-stream Content-Type before reading the upstream body.

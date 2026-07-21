@@ -1786,7 +1786,7 @@ func (i responsesInputItem) chatMessage() (chatMessage, bool) {
 	}
 	var texts []string
 	for _, part := range parts {
-		if part.Text != "" && (part.Type == "" || part.Type == "input_text" || part.Type == "text") {
+		if part.Text != "" && (part.Type == "" || part.Type == "input_text" || part.Type == "output_text" || part.Type == "text") {
 			texts = append(texts, part.Text)
 		}
 	}
