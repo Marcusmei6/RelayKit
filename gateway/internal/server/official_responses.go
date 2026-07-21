@@ -94,12 +94,19 @@ func (s *Server) officialOpenAIResponses(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if !isJSONContentType(resp.Header.Get("Content-Type")) {
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if (!compact && !isJSONContentType(contentType)) || (compact && contentType != "" && !isJSONContentType(contentType)) {
 		s.recordFailedUsageRoute("openai", req.Model, "protocol_error", http.StatusBadGateway, start, "responses_http", route)
 		writeJSON(w, http.StatusBadGateway, errorBody("protocol_error", "official upstream returned an invalid response"))
 		return
 	}
-	response, err := rewriteNativeResponsesResponse(resp.Body, req.Model)
+	var response nativeResponsesResponse
+	var err error
+	if compact {
+		response, err = rewriteNativeResponsesCompactResponse(resp.Body, req.Model)
+	} else {
+		response, err = rewriteNativeResponsesResponse(resp.Body, req.Model)
+	}
 	if err != nil {
 		s.recordFailedUsageRoute("openai", req.Model, "protocol_error", http.StatusBadGateway, start, "responses_http", route)
 		writeJSON(w, http.StatusBadGateway, errorBody("protocol_error", "official upstream returned an invalid response"))
@@ -107,6 +114,53 @@ func (s *Server) officialOpenAIResponses(w http.ResponseWriter, r *http.Request,
 	}
 	writeRawJSON(w, http.StatusOK, response.body)
 	s.recordCompletedUsageRoute("openai", req.Model, response.id, response.status, false, response.usage, start, "responses_http", route)
+}
+
+func rewriteNativeResponsesCompactResponse(reader io.Reader, publicModel string) (nativeResponsesResponse, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, maximumNativeResponsesResponseBytes+1))
+	if err != nil {
+		return nativeResponsesResponse{}, err
+	}
+	if len(body) > maximumNativeResponsesResponseBytes {
+		return nativeResponsesResponse{}, fmt.Errorf("native compact response exceeds size limit")
+	}
+	response, err := strictJSONObject(body)
+	if err != nil {
+		return nativeResponsesResponse{}, err
+	}
+	rawOutput := bytes.TrimSpace(response["output"])
+	if len(rawOutput) == 0 || rawOutput[0] != '[' {
+		return nativeResponsesResponse{}, fmt.Errorf("invalid native compact output")
+	}
+	var output []json.RawMessage
+	if err := json.Unmarshal(rawOutput, &output); err != nil {
+		return nativeResponsesResponse{}, fmt.Errorf("invalid native compact output")
+	}
+	for _, rawItem := range output {
+		item, err := strictJSONObject(rawItem)
+		if err != nil {
+			return nativeResponsesResponse{}, fmt.Errorf("invalid native compact item")
+		}
+		var itemType string
+		if err := json.Unmarshal(item["type"], &itemType); err != nil || strings.TrimSpace(itemType) == "" {
+			return nativeResponsesResponse{}, fmt.Errorf("invalid native compact item type")
+		}
+	}
+	if _, ok := response["model"]; ok {
+		response["model"] = json.RawMessage(strconvQuote(publicModel))
+	}
+	rewritten, err := json.Marshal(response)
+	if err != nil {
+		return nativeResponsesResponse{}, err
+	}
+	result := nativeResponsesResponse{body: rewritten, status: "completed"}
+	_ = json.Unmarshal(response["id"], &result.id)
+	_ = json.Unmarshal(response["status"], &result.status)
+	if !isNativeResponsesTerminalStatus(result.status) {
+		result.status = "completed"
+	}
+	_ = json.Unmarshal(response["usage"], &result.usage)
+	return result, nil
 }
 
 func (s *Server) officialOpenAIResponsesWebSocket(w *bufio.Writer, ctx context.Context, inbound http.Header, raw map[string]json.RawMessage, req responsesRequest, official config.OfficialPassthrough, model config.Model, start time.Time) {

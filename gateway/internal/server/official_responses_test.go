@@ -104,6 +104,39 @@ func TestOfficialCodexHomeProxiesCompactionEndpoint(t *testing.T) {
 	}
 }
 
+func TestOfficialCodexHomeAcceptsHeaderlessCompactHistoryResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses/compact" {
+			t.Fatalf("compact path = %q", r.URL.Path)
+		}
+		w.Header()["Content-Type"] = []string{}
+		_, _ = fmt.Fprint(w, `{"id":"resp_compact","object":"response.compaction","output":[{"type":"message","role":"user","content":[]},{"type":"compaction_summary","encrypted_content":"opaque-test-value"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
+	}))
+	defer upstream.Close()
+
+	h, _ := newOfficialCodexHomeTestHandler(t, upstream.URL, "test-access-token", "test-account-id")
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"public-official","input":[{"role":"user","content":"compact me"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("headerless compact response = %d %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"object":"response.compaction"`, `"type":"message"`, `"type":"compaction_summary"`, `"encrypted_content":"opaque-test-value"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("compact response missing %s: %s", want, rec.Body.String())
+		}
+	}
+}
+
+func TestRewriteNativeResponsesCompactResponseRejectsNullOutput(t *testing.T) {
+	_, err := rewriteNativeResponsesCompactResponse(strings.NewReader(`{"object":"response.compaction","output":null}`), "public-official")
+	if err == nil {
+		t.Fatal("null compact output was accepted")
+	}
+}
+
 func TestOfficialCodexHomeStreamsNativeResponsesOverHTTPAndWebSocket(t *testing.T) {
 	var hits int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

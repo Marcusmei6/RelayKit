@@ -4,6 +4,16 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-22, headerless official compact response)
+
+The notarized v0.1.5 build 8 package from c2e3034 was installed atomically with valid Developer-ID signature, hardened runtime, notarization, staple, Gatekeeper, manifest/checksum binding, App-parented helper, and unchanged global Codex config/auth hashes. A fresh real Codex WebSocket thread passed provider -> official -> provider -> official: all four exact markers were correct, all turns shared one thread id, provider and official each completed twice, and no client-visible failure occurred. This proves both headerless SSE and mixed Responses history preservation in the installed package.
+
+The remaining explicit compact gate exposed the same backend header omission on the unary endpoint. The live official /responses/compact response was HTTP 200, about 69 KiB, valid JSON with id/object/output/usage, ten message items and one compaction_summary, but no Content-Type. Build 8 rejected it before parsing and returned a sanitized 502 protocol_error, so build 8 is not releasable.
+
+The source fix is intentionally compact-only: an absent media-type header is accepted only for /responses/compact, while any non-empty non-JSON media type is still rejected and ordinary non-streaming /responses remains unchanged. A dedicated bounded parser requires one top-level JSON object, an actual output array, and object items with non-empty type fields; it preserves opaque fields such as encrypted_content and supports the backend response.compaction shape without requiring normal Responses status/model fields. Focused RED/GREEN tests pass, including rejection of output:null. Full Go/race/vet/gofmt, Swift build, public-boundary, and diff gates pass. A real official-only source helper on isolated port 19779 then returned the exact compact request as HTTP 200 application/json with the expected item types and completed usage; global and isolated auth hashes stayed unchanged.
+
+Commit this fix, produce fresh Developer-ID/notarized v0.1.5 build 9 in the Mini GUI Keychain session, atomically replace build 8, and rerun the explicit current-package compact request. Keep installed build 8 and its healthy helper running until replacement because the global Codex config remains RelayKit-managed.
+
 ## Current Truth (2026-07-22, mixed Responses history preservation)
 
 The notarized v0.1.5 build 7 package from cb1cca8 was installed atomically and restored an App-parented healthy helper with manifest-bound executable, official 7 / provider 1 / configured 2, and unchanged global Codex config/auth hashes. A real current-package Codex WebSocket thread completed provider -> official -> provider -> official without client transport failures, proving the headerless official SSE fix. However, both later provider turns returned the immediately preceding official marker instead of their fresh provider marker, so build 7 is not releasable.
