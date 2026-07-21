@@ -4,6 +4,26 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-21, recovery + new candidate)
+
+Immediate incident: a prior Enable-for-Codex/validation run left the real global `~/.codex/config.toml` pointing at RelayKit's `openai_base_url=http://127.0.0.1:19777/v1` plus RelayKit `model_catalog_json` while the App/gateway were NOT running. Codex Desktop then failed every request with `stream disconnected before completion: error sending request for url (http://127.0.0.1:19777/v1/responses)`. This violated the AGENTS.md shared-runtime boundary (validation must not leave the global config enabled without a running gateway/rollback).
+
+Recovery performed (surgical, matches `codexconfig.Disable` semantics):
+- Backed up global config to `~/.codex/config.toml.bak.pre-recovery-20260721T102301Z`.
+- Removed ONLY the two RelayKit-managed root lines (`openai_base_url`, `model_catalog_json`). User `model`, notify, MCP, projects, hooks, sandbox and all other fields preserved. Codex now falls back to the official endpoint.
+- Archived stale state to `~/Library/Application Support/RelayKit/codex-config-state.json.disabled-recovery-20260721T103016Z` so status reads `disabled`, not `drifted`.
+- Global `~/.codex/auth.json` was never read or modified. `18787`/`19777` have no listener.
+
+New authoritative signed candidate: v0.1.4 build 5, built from frozen HEAD `e9ecd63`.
+- `dist/github-release/v0.1.4/RelayKitApp-0.1.4-signed.zip`, SHA-256 `5d423688d9feb1263234dfac9bea36e1c64ffea59467b6a30a7c28029ac741ab`.
+- Developer ID signed, hardened runtime, notarized (Accepted, submission `68737f4b-c034-4be7-bf2d-f4f4a8d57b35`), stapled, Gatekeeper `Notarized Developer ID accepted`; signed-zip re-extraction re-verified.
+- manifest binds `source_commit_sha=e9ecd63`, `source_clean=true`.
+- Supersedes stale v0.1.1 (c26aef4), v0.1.2 (3fb65fb), v0.1.3 (aacf51a); none were built from HEAD.
+
+Source gates on HEAD e9ecd63 all pass: `go test ./... -count=1`, `go vet`, `gofmt -l`, `swift build`, `RelayKitAppValidationTests` (run inside the console GUI session for Keychain), `public-boundary-check.sh`, `git diff --check`, clean worktree.
+
+Pending (needs user-in-the-loop per objective): install v0.1.4 to `/Applications` (currently v0.1.3), then real ordinary Codex Desktop same-thread E2E (Case 4/5) with a real third-party provider credential.
+
 ## Signed Beta v0.1.0 Current Candidate
 
 Status: **signed beta candidate complete; public release unpublished**. The current artifact is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `116928bda89b6ca9a266bd7e1b3b820fc811d45f6ba118be16a367c619cf1a78`. It uses release/trimmed-path binaries and passed the archive personal-path scan, Developer ID signing, hardened runtime, fresh notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle. The redacted release verification is `dist/signed-beta-v0.1.0/path-clean-six-stage-20260720T162614Z/replacement-release-evidence.redacted.json`.
