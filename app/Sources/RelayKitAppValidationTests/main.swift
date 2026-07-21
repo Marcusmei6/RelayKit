@@ -622,12 +622,14 @@ func expectCodexCatalogMerge() throws {
           models.count == 2,
           let officialModel = models.first,
           (officialModel["preserved_metadata"] as? [String: String])?["kind"] == "official",
+          officialModel["supports_reasoning_summaries"] as? Bool == true,
           let provider = models.last,
           provider["slug"] as? String == "provider/healthy",
           provider["display_name"] as? String == "Healthy Provider",
           provider["context_window"] as? Int == 128000,
           provider["protocol"] as? String == "responses",
           provider["transport"] as? String == "local_relaykit",
+          provider["supports_reasoning_summaries"] as? Bool == true,
           provider["supported_in_api"] as? Bool == true else {
         fatalError("Codex catalog merge did not preserve official metadata and add only healthy RelayKit models")
     }
@@ -642,8 +644,26 @@ func expectCodexCatalogMerge() throws {
     let providerOnly = try CodexModelCatalog.merge(officialCatalog: official, gatewayModels: gateway, includeOfficialModels: false)
     let providerOnlyRoot = try JSONSerialization.jsonObject(with: providerOnly) as? [String: Any]
     let providerOnlyModels = providerOnlyRoot?["models"] as? [[String: Any]]
-    if providerOnlyModels?.map({ $0["slug"] as? String }) != ["provider/healthy"] {
+    if providerOnlyModels?.map({ $0["slug"] as? String }) != ["provider/healthy"] ||
+        providerOnlyModels?.first?["supports_reasoning_summaries"] as? Bool != true {
         fatalError("provider-only catalog exposed unavailable official routes")
+    }
+
+    let explicitFalseOfficial = Data(#"""
+    {
+      "models": [
+        {
+          "slug": "gpt-explicit-false",
+          "supports_reasoning_summaries": false
+        }
+      ]
+    }
+    """#.utf8)
+    let explicitFalse = try CodexModelCatalog.merge(officialCatalog: explicitFalseOfficial, gatewayModels: gateway, includeOfficialModels: true)
+    let explicitFalseRoot = try JSONSerialization.jsonObject(with: explicitFalse) as? [String: Any]
+    let explicitFalseModels = explicitFalseRoot?["models"] as? [[String: Any]]
+    if explicitFalseModels?.contains(where: { $0["supports_reasoning_summaries"] as? Bool != false }) != false {
+        fatalError("catalog merge overwrote an explicit reasoning-summary capability")
     }
 
     let collidingGateway = Data(#"{"data":[{"id":"gpt-official","owned_by":"provider"}]}"#.utf8)

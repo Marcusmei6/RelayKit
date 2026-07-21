@@ -4,6 +4,14 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-22, Codex catalog schema compatibility)
+
+The installed v0.1.5 build 10 passed the original reopened long-thread provider -> official remote-compaction-v2 gate and returned the exact Desktop marker, but the model picker exposed only one previously selected provider model instead of both configured provider models. Runtime config, `/v1/models`, and the generated catalog all contained both entries; the failure occurred when Codex core loaded the generated catalog.
+
+The active Mini app-server (`~/.local/bin/codex 0.142.3`) emits `configWarning: Invalid configuration; using defaults` because every generated model lacks the older schema's required boolean `supports_reasoning_summaries`. The apparent five-model result is the built-in fallback catalog, not item-level filtering. A temporary catalog that adds only this field loads successfully and `model/list` returns all ten catalog entries, including both provider models; `max` and `ultra` reasoning levels are accepted and are not the cause.
+
+The source fix normalizes every official template entry by adding `supports_reasoning_summaries=true` only when absent, preserves an explicit value, and derives provider entries from that compatible template. A focused TDD regression failed before the fix and passes afterward; the full SSH validation executable then proceeds to the known GUI-Keychain-only fixture (`-25308`). Build, sign, notarize, and install v0.1.5 build 11, then fully restart Codex and verify both provider models appear and can each complete a turn before final release handoff.
+
 ## Current Truth (2026-07-22, provider-to-official remote-compaction-v2 fallback)
 
 The notarized v0.1.5 build 9 package from 8ce3a54 passed isolated compact transport and same-thread short-history switching, but a real reopened long Desktop thread disproved the release claim. On provider -> official switching, Codex 0.145 performs pre-turn remote compaction v2 with the previous provider model. RelayKit's Anthropic/chat adapters treated the reserved compaction_trigger as ordinary chat input, returned normal message items, and Codex terminated with `remote compaction v2 expected exactly one compaction output item, got 0`. Build 9 is therefore invalidated and must remain running only until its signed replacement is installed.

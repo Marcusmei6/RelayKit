@@ -34,7 +34,7 @@ public enum CodexModelCatalog {
     public static func merge(officialCatalog: Data, gatewayModels: Data, includeOfficialModels: Bool) throws -> Data {
         guard var root = try JSONSerialization.jsonObject(with: officialCatalog) as? [String: Any],
               let official = root["models"] as? [[String: Any]],
-              let template = official.first else {
+              !official.isEmpty else {
             throw CodexModelCatalogError.invalidOfficialCatalog
         }
         guard let gatewayRoot = try JSONSerialization.jsonObject(with: gatewayModels) as? [String: Any],
@@ -42,13 +42,21 @@ public enum CodexModelCatalog {
             throw CodexModelCatalogError.invalidGatewayModels
         }
 
+        let compatibleOfficial = official.map { source in
+            var model = source
+            if model["supports_reasoning_summaries"] == nil {
+                model["supports_reasoning_summaries"] = true
+            }
+            return model
+        }
+        let template = compatibleOfficial[0]
         let officialIDs = includeOfficialModels ? Set(official.compactMap { $0["slug"] as? String }) : []
         let hiddenIDs = Set(
             ((gatewayRoot["model_health"] as? [String: Any])?["hidden"] as? [[String: Any]] ?? [])
                 .compactMap { $0["id"] as? String }
         )
         var addedIDs = Set<String>()
-        var merged = includeOfficialModels ? official : []
+        var merged = includeOfficialModels ? compatibleOfficial : []
         for gatewayModel in models {
             guard let id = clean(gatewayModel["id"] as? String), !hiddenIDs.contains(id) else { continue }
             guard addedIDs.insert(id).inserted else {
