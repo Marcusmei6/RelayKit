@@ -1446,6 +1446,7 @@ func expectSignedBetaAppContracts() throws {
         "try configuredProvidersExist()",
         "try CodexModelCatalog.gatewayModelsNeedRetry(models)",
         "Task.sleep(nanoseconds: 700_000_000)",
+        "OfficialCodexAuthState.isConnected(data:)",
         "let providers = root[\"providers\"] as? [[String: Any]]",
         "includeOfficialModels: includeOfficial",
         "var codexIntegrationHasManagedState: Bool",
@@ -1470,6 +1471,9 @@ func expectSignedBetaAppContracts() throws {
     }
     if gateway.contains("activate-codex-config") || appModel.contains("activateCodexConfig") {
         fatalError("legacy Codex activation command must not remain reachable")
+    }
+    if appModel.contains("runCodex(arguments: [\"login\", \"status\"]") {
+        fatalError("ordinary official status must not depend on a Codex subprocess")
     }
     if !app.contains("model.startGatewayOnOrdinaryLaunch()") {
         fatalError("ordinary App launch must evaluate bundled gateway startup")
@@ -1596,6 +1600,7 @@ expectExplicitUpstreamProtocolSelectionWins()
 expectRedactedProviderSaveAndGatewayGuidance()
 try expectGatewayDisplayStateContract()
 try expectOfficialChannelPresentationLabels()
+try expectOfficialCodexAuthState()
 expectOfficialChannelSnapshots()
 try expectProviderSaveTransactions()
 expectOfficialAuthURLSanitizer()

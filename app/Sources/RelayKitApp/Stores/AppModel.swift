@@ -357,41 +357,36 @@ final class AppModel: ObservableObject {
 
     func refreshOfficialAuthStatus() {
         Task {
+            let wasConnected = officialSnapshot.isConnected
             do {
-                let wasConnected = officialSnapshot.isConnected
                 try ensureOfficialAuthDirs()
-                let result = await Self.runCodex(arguments: ["login", "status"], environment: officialCodexEnvironment())
-                switch result {
-                case .success(let output):
-                    if Self.codexLoginStatusIsLoggedIn(output) {
-                        let verified = officialRouteEvidence(
-                            gatewayRunning: gateway.isRunning,
-                            executableHash: Self.fileHash(Bundle.main.executableURL),
-                            providerConfigHash: Self.fileHash(URL(fileURLWithPath: providerConfigPath))
-                        ).isVerified
-                        updateOfficialSnapshot(
-                            loggedIn: true,
-                            detail: verified
-                                ? "Current proof verified official and provider routes."
-                                : "Isolated Codex login is available; current route proof is unavailable or stale."
-                        )
-                        officialAuthURL = ""
-                        officialDeviceCode = ""
-                        officialDeviceCodeCopied = false
-                    } else {
-                        updateOfficialSnapshot(loggedIn: false, detail: "Use Connect Official to sign in with Codex device authorization.")
-                        officialAuthURL = ""
-                        officialDeviceCode = ""
-                        officialDeviceCodeCopied = false
-                    }
-                case .failure(let error):
-                    updateOfficialSnapshot(loggedIn: false, detail: error.localizedDescription)
+                let authURL = URL(fileURLWithPath: RelayKitPaths.officialCodexHomePath())
+                    .appendingPathComponent("auth.json")
+                let loggedIn = (try? Data(contentsOf: authURL))
+                    .map(OfficialCodexAuthState.isConnected(data:)) ?? false
+                if loggedIn {
+                    let verified = officialRouteEvidence(
+                        gatewayRunning: gateway.isRunning,
+                        executableHash: Self.fileHash(Bundle.main.executableURL),
+                        providerConfigHash: Self.fileHash(URL(fileURLWithPath: providerConfigPath))
+                    ).isVerified
+                    updateOfficialSnapshot(
+                        loggedIn: true,
+                        detail: verified
+                            ? "Current proof verified official and provider routes."
+                            : "Isolated Codex login is available; current route proof is unavailable or stale."
+                    )
+                } else {
+                    updateOfficialSnapshot(loggedIn: false, detail: "Use Connect Official to sign in with Codex device authorization.")
                 }
-                reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)
-                await self.rebuildCodexCatalogIfEnabled()
+                officialAuthURL = ""
+                officialDeviceCode = ""
+                officialDeviceCodeCopied = false
             } catch {
                 updateOfficialSnapshot(loggedIn: false, detail: error.localizedDescription)
             }
+            reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)
+            await self.rebuildCodexCatalogIfEnabled()
         }
     }
 
@@ -794,11 +789,6 @@ final class AppModel: ObservableObject {
         return environment
     }
 
-    private static func codexLoginStatusIsLoggedIn(_ output: String) -> Bool {
-        output.localizedCaseInsensitiveContains("logged in") &&
-            !output.localizedCaseInsensitiveContains("not logged in")
-    }
-
     private func updateOfficialSnapshot(loggedIn: Bool, detail: String) {
         let evidence = officialRouteEvidence(
             gatewayRunning: gateway.isRunning,
@@ -893,27 +883,6 @@ final class AppModel: ObservableObject {
         if opensOfficialAuthURL {
             NSWorkspace.shared.open(url)
         }
-    }
-
-    nonisolated private static func runCodex(arguments: [String], environment: [String: String]) async -> Result<String, Error> {
-        await Task.detached {
-            do {
-                let process = Process()
-                configureCodexProcess(process, arguments: arguments, environment: environment)
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = pipe
-                try process.run()
-                process.waitUntilExit()
-                let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                guard process.terminationStatus == 0 else {
-                    return .failure(ShellCommandError(status: process.terminationStatus, output: output))
-                }
-                return .success(output)
-            } catch {
-                return .failure(error)
-            }
-        }.value
     }
 
     nonisolated private static func runShell(_ command: String, environment: [String: String]) async -> Result<String, Error> {

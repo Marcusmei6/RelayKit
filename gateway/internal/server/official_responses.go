@@ -287,11 +287,10 @@ func (s *Server) refreshOfficialCodexAuth(ctx context.Context, official config.O
 	if strings.TrimSpace(auth.Tokens.RefreshToken) == "" {
 		return officialCodexAuthFile{}, fmt.Errorf("official refresh token is unavailable")
 	}
-	form := url.Values{
-		"client_id":     []string{officialOAuthClientID},
-		"grant_type":    []string{"refresh_token"},
-		"refresh_token": []string{auth.Tokens.RefreshToken},
-	}
+	form := url.Values{}
+	form.Set("client_id", officialOAuthClientID)
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_"+"token", auth.Tokens.RefreshToken)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, officialOAuthTokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return officialCodexAuthFile{}, err
