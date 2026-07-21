@@ -390,6 +390,110 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+func TestAdapterCompactionTriggerFallsBackToOfficialOverHTTPAndWebSocket(t *testing.T) {
+	const accessToken = "test-access-token"
+	const accountID = "test-account-id"
+	var officialHits int
+	var compactionHits int
+	officialUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		officialHits++
+		if r.URL.Path != "/responses" {
+			t.Fatalf("official path = %s", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "official-upstream" || body["stream"] != true {
+			t.Fatalf("official fallback body = %#v", body)
+		}
+		input, _ := json.Marshal(body["input"])
+		if strings.Contains(string(input), "compaction_trigger") {
+			compactionHits++
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_compact\",\"object\":\"response\",\"model\":\"official-upstream\",\"status\":\"in_progress\",\"output\":[]}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_compact\",\"object\":\"response\",\"model\":\"official-upstream\",\"status\":\"completed\",\"output\":[{\"id\":\"cmp_1\",\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}]}}\n\n")
+	}))
+	defer officialUpstream.Close()
+
+	var providerHits int
+	providerUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerHits++
+		http.Error(w, "provider must not receive compaction", http.StatusInternalServerError)
+	}))
+	defer providerUpstream.Close()
+
+	dir := t.TempDir()
+	codexHome := filepath.Join(dir, "codex-home")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	authBody := `{"auth_mode":"chatgpt","tokens":{"access_token":"` + accessToken + `","refresh_token":"test-refresh","account_id":"` + accountID + `"}}`
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(authBody), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]any{
+		"official_passthrough": map[string]any{
+			"base_url":       "https://chatgpt.com/backend-api/codex",
+			"credential_ref": map[string]string{"kind": "codex_home", "value": codexHome},
+			"models": []map[string]string{
+				{"id": "unused-official", "upstream_model": "unused-upstream"},
+				{"id": "public-official", "upstream_model": "official-upstream"},
+			},
+		},
+		"providers": []map[string]any{{
+			"id": "provider", "name": "Provider", "base_url": providerUpstream.URL,
+			"api_format": "anthropic_messages", "auth_env": "RELAYKIT_TEST_PROVIDER_TOKEN",
+			"models": []map[string]string{{"id": "public-provider", "upstream_model": "provider-upstream"}},
+		}},
+	}
+	cfgBody, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "providers.json")
+	if err := os.WriteFile(cfgPath, cfgBody, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAYKIT_TEST_PROVIDER_TOKEN", "test-provider-token")
+	h, err := newServerWithOfficialEndpoint(cfgPath, filepath.Join(dir, "usage.jsonl"), nil, true, officialUpstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpPrewarm := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"public-official","input":[],"stream":true,"client_metadata":{"session_id":"http-session","thread_id":"http-thread","x-codex-turn-metadata":"{\"request_kind\":\"prewarm\"}"}}`))
+	httpPrewarm.Header.Set("Content-Type", "application/json")
+	httpPrewarmRec := httptest.NewRecorder()
+	h.ServeHTTP(httpPrewarmRec, httpPrewarm)
+	if httpPrewarmRec.Code != http.StatusOK {
+		t.Fatalf("official HTTP prewarm = %d %s", httpPrewarmRec.Code, httpPrewarmRec.Body.String())
+	}
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"public-provider","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"history"}]},{"type":"compaction_trigger"}],"stream":true,"client_metadata":{"session_id":"http-session","thread_id":"http-thread","x-codex-turn-metadata":"{\"request_kind\":\"compaction\"}"}}`))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, httpReq)
+	if httpRec.Code != http.StatusOK || !strings.Contains(httpRec.Body.String(), `"type":"compaction"`) || !strings.Contains(httpRec.Body.String(), `"model":"public-official"`) {
+		t.Fatalf("official HTTP compaction fallback = %d %s", httpRec.Code, httpRec.Body.String())
+	}
+
+	gateway := httptest.NewServer(h)
+	defer gateway.Close()
+	prewarmConn, prewarmReader := openTestWebSocket(t, gateway.URL, "/v1/responses")
+	writeTestWebSocketText(t, prewarmConn, `{"model":"public-official","input":[],"client_metadata":{"session_id":"ws-session","thread_id":"ws-thread","x-codex-turn-metadata":"{\"request_kind\":\"prewarm\"}"}}`)
+	_ = readTestWebSocketUntil(t, prewarmReader, "response.completed")
+	_ = prewarmConn.Close()
+	conn, reader := openTestWebSocket(t, gateway.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, `{"model":"public-provider","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"history"}]},{"type":"compaction_trigger"}],"client_metadata":{"session_id":"ws-session","thread_id":"ws-thread","x-codex-turn-metadata":"{\"request_kind\":\"compaction\"}"}}`)
+	got := readTestWebSocketUntil(t, reader, "response.completed")
+	if !strings.Contains(got, `"type":"compaction"`) || !strings.Contains(got, `"model":"public-official"`) {
+		t.Fatalf("official compaction fallback stream = %s", got)
+	}
+	if officialHits != 4 || compactionHits != 2 || providerHits != 0 {
+		t.Fatalf("official hits = %d, compaction hits = %d, provider hits = %d", officialHits, compactionHits, providerHits)
+	}
+}
+
 func newOfficialCodexHomeTestHandler(t *testing.T, baseURL, accessToken, accountID string) (http.Handler, string) {
 	t.Helper()
 	dir := t.TempDir()

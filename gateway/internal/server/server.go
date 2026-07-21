@@ -35,6 +35,8 @@ type Server struct {
 	keychainCredentials      map[string]string
 	allowKeychainCLIFallback bool
 	officialAuthRefreshMu    sync.Mutex
+	compactionTargetMu       sync.Mutex
+	compactionTargets        map[string]compactionTargetHint
 	officialCodexBaseURL     string
 }
 
@@ -552,6 +554,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, body)
 		return
 	}
+	officialCompaction, officialCompactionModel, officialCompactionOK := s.observeOfficialCompactionTarget(req)
 	if model, ok := s.officialModelForModel(req.Model); ok && officialUsesCodexHome(*s.config.OfficialPassthrough) {
 		s.officialOpenAIResponses(w, r, rawRequest, req, *s.config.OfficialPassthrough, model, start, false)
 		return
@@ -561,6 +564,11 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if provider, _, ok := s.providerForModel(req.Model); ok && responsesInputHasCompactionTrigger(req.Input) {
+		if officialCompactionOK {
+			req.Model = officialCompactionModel.ID
+			s.officialOpenAIResponses(w, r, rawRequest, req, officialCompaction, officialCompactionModel, start, false)
+			return
+		}
 		s.recordFailedUsage(provider.ID, req.Model, "invalid_request_error", http.StatusBadRequest, start, "responses_http")
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "provider adapter does not support Responses compaction"))
 		return
@@ -732,6 +740,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
+			officialCompaction, officialCompactionModel, officialCompactionOK := s.observeOfficialCompactionTarget(req)
 			requestCtx, cancelRequest := context.WithCancel(r.Context())
 			monitorDone := monitorWebSocketClientClose(conn, rw.Reader, cancelRequest)
 			defer func() {
@@ -750,6 +759,12 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if provider, _, ok := s.providerForModel(req.Model); ok && responsesInputHasCompactionTrigger(req.Input) {
+				if officialCompactionOK {
+					req.Model = officialCompactionModel.ID
+					s.officialOpenAIResponsesWebSocket(rw.Writer, requestCtx, r.Header, requestBody, req, officialCompaction, officialCompactionModel, start)
+					_ = writeWebSocketClose(rw.Writer)
+					return
+				}
 				s.recordFailedUsage(provider.ID, req.Model, "invalid_request_error", http.StatusBadRequest, start, "responses_websocket")
 				_ = writeWebSocketFailedEvent(rw.Writer, req.Model, errorBody("invalid_request_error", "provider adapter does not support Responses compaction"))
 				_ = writeWebSocketClose(rw.Writer)
@@ -1370,6 +1385,11 @@ func decodeResponsesRequest(body io.Reader) (map[string]json.RawMessage, respons
 			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
 		}
 	}
+	if raw["client_metadata"] != nil {
+		if err := json.Unmarshal(raw["client_metadata"], &req.ClientMetadata); err != nil {
+			return nil, responsesRequest{}, fmt.Errorf("invalid request body")
+		}
+	}
 	req.raw = raw
 	return raw, req, nil
 }
@@ -1687,12 +1707,36 @@ func upstreamModelName(model config.Model) string {
 }
 
 type responsesRequest struct {
-	Model  string          `json:"model"`
-	Input  json.RawMessage `json:"input"`
-	Stream bool            `json:"stream"`
-	Tools  []responsesTool `json:"tools,omitempty"`
-	raw    map[string]json.RawMessage
+	Model          string                  `json:"model"`
+	Input          json.RawMessage         `json:"input"`
+	Stream         bool                    `json:"stream"`
+	Tools          []responsesTool         `json:"tools,omitempty"`
+	ClientMetadata responsesClientMetadata `json:"client_metadata,omitempty"`
+	raw            map[string]json.RawMessage
 }
+
+type responsesClientMetadata struct {
+	SessionID    string `json:"session_id"`
+	ThreadID     string `json:"thread_id"`
+	TurnMetadata string `json:"x-codex-turn-metadata"`
+}
+
+type responsesTurnMetadata struct {
+	RequestKind string `json:"request_kind"`
+	SessionID   string `json:"session_id"`
+	ThreadID    string `json:"thread_id"`
+}
+
+type compactionTargetHint struct {
+	model     string
+	expiresAt time.Time
+}
+
+const (
+	compactionTargetHintTTL    = 30 * time.Second
+	maximumCompactionTargetIDs = 256
+	maximumCompactionTargets   = 256
+)
 
 type responsesTool struct {
 	Type        string         `json:"type"`
@@ -1704,6 +1748,67 @@ type responsesTool struct {
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+func (s *Server) observeOfficialCompactionTarget(req responsesRequest) (config.OfficialPassthrough, config.Model, bool) {
+	var metadata responsesTurnMetadata
+	if err := json.Unmarshal([]byte(req.ClientMetadata.TurnMetadata), &metadata); err != nil {
+		return config.OfficialPassthrough{}, config.Model{}, false
+	}
+	outerSessionID := strings.TrimSpace(req.ClientMetadata.SessionID)
+	innerSessionID := strings.TrimSpace(metadata.SessionID)
+	outerThreadID := strings.TrimSpace(req.ClientMetadata.ThreadID)
+	innerThreadID := strings.TrimSpace(metadata.ThreadID)
+	if (outerSessionID != "" && innerSessionID != "" && outerSessionID != innerSessionID) ||
+		(outerThreadID != "" && innerThreadID != "" && outerThreadID != innerThreadID) {
+		return config.OfficialPassthrough{}, config.Model{}, false
+	}
+	sessionID := outerSessionID
+	if sessionID == "" {
+		sessionID = innerSessionID
+	}
+	threadID := outerThreadID
+	if threadID == "" {
+		threadID = innerThreadID
+	}
+	if sessionID == "" || threadID == "" || len(sessionID) > maximumCompactionTargetIDs || len(threadID) > maximumCompactionTargetIDs {
+		return config.OfficialPassthrough{}, config.Model{}, false
+	}
+	key := sessionID + "\x00" + threadID
+	now := time.Now()
+	s.compactionTargetMu.Lock()
+	defer s.compactionTargetMu.Unlock()
+	if s.compactionTargets == nil {
+		s.compactionTargets = make(map[string]compactionTargetHint)
+	}
+	for candidate, hint := range s.compactionTargets {
+		if !hint.expiresAt.After(now) {
+			delete(s.compactionTargets, candidate)
+		}
+	}
+	switch metadata.RequestKind {
+	case "prewarm":
+		if _, exists := s.compactionTargets[key]; !exists && len(s.compactionTargets) >= maximumCompactionTargets {
+			return config.OfficialPassthrough{}, config.Model{}, false
+		}
+		s.compactionTargets[key] = compactionTargetHint{model: req.Model, expiresAt: now.Add(compactionTargetHintTTL)}
+		return config.OfficialPassthrough{}, config.Model{}, false
+	case "compaction":
+		hint, ok := s.compactionTargets[key]
+		delete(s.compactionTargets, key)
+		if !ok || s.config.OfficialPassthrough == nil || !officialUsesCodexHome(*s.config.OfficialPassthrough) {
+			return config.OfficialPassthrough{}, config.Model{}, false
+		}
+		for _, model := range s.config.OfficialPassthrough.Models {
+			if model.ID == hint.model {
+				return *s.config.OfficialPassthrough, model, true
+			}
+		}
+		return config.OfficialPassthrough{}, config.Model{}, false
+	default:
+		delete(s.compactionTargets, key)
+		return config.OfficialPassthrough{}, config.Model{}, false
+	}
 }
 
 func responsesInputHasCompactionTrigger(input json.RawMessage) bool {

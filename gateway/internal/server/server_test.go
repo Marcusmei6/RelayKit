@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+
+	"relaykit/gateway/internal/config"
 )
 
 func testBearerCredential(parts ...string) string {
@@ -93,6 +95,84 @@ func TestAnthropicMixedResponsesHistoryPreservesAssistantOutputText(t *testing.T
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("messages = %#v, want %#v", got, want)
+	}
+}
+
+func TestOfficialCompactionTargetRequiresMatchingOneShotPrewarm(t *testing.T) {
+	s := &Server{config: &config.Config{
+		OfficialPassthrough: &config.OfficialPassthrough{
+			CredentialRef: &config.CredentialRef{Kind: config.CredentialKindCodexHome, Value: "/tmp/test-codex-home"},
+			Models:        []config.Model{{ID: "official-one"}, {ID: "official-target"}},
+		},
+		Providers: []config.ProviderProfile{{ID: "provider", Models: []config.Model{{ID: "provider-model"}}}},
+	}}
+	prewarm := responsesRequest{
+		Model: "official-target",
+		ClientMetadata: responsesClientMetadata{
+			SessionID: "session-one", ThreadID: "thread-one",
+			TurnMetadata: `{"request_kind":"prewarm"}`,
+		},
+	}
+	if _, _, ok := s.observeOfficialCompactionTarget(prewarm); ok {
+		t.Fatal("prewarm must record a target without routing itself")
+	}
+	compact := responsesRequest{
+		Model: "provider-model",
+		Input: json.RawMessage(`[{"type":"compaction_trigger"}]`),
+		ClientMetadata: responsesClientMetadata{
+			SessionID: "session-one", ThreadID: "thread-one",
+			TurnMetadata: `{"request_kind":"compaction"}`,
+		},
+	}
+	official, model, ok := s.observeOfficialCompactionTarget(compact)
+	if !ok || model.ID != "official-target" || official.Models[1].ID != "official-target" {
+		t.Fatalf("matching official target = %#v %#v %v", official, model, ok)
+	}
+	if _, _, ok := s.observeOfficialCompactionTarget(compact); ok {
+		t.Fatal("official compaction target must be consumed once")
+	}
+
+	providerPrewarm := prewarm
+	providerPrewarm.Model = "provider-model"
+	s.observeOfficialCompactionTarget(providerPrewarm)
+	if _, _, ok := s.observeOfficialCompactionTarget(compact); ok {
+		t.Fatal("provider prewarm must never authorize Official compaction")
+	}
+
+	missingMetadata := compact
+	missingMetadata.ClientMetadata = responsesClientMetadata{}
+	if _, _, ok := s.observeOfficialCompactionTarget(missingMetadata); ok {
+		t.Fatal("missing session/thread metadata must never authorize Official compaction")
+	}
+
+	overlong := prewarm
+	overlong.ClientMetadata.SessionID = strings.Repeat("s", 257)
+	s.observeOfficialCompactionTarget(overlong)
+	overlongCompact := compact
+	overlongCompact.ClientMetadata.SessionID = overlong.ClientMetadata.SessionID
+	if _, _, ok := s.observeOfficialCompactionTarget(overlongCompact); ok {
+		t.Fatal("overlong route metadata must never authorize Official compaction")
+	}
+
+	conflicting := prewarm
+	conflicting.ClientMetadata.TurnMetadata = `{"request_kind":"prewarm","session_id":"different","thread_id":"thread-one"}`
+	s.observeOfficialCompactionTarget(conflicting)
+	if _, _, ok := s.observeOfficialCompactionTarget(compact); ok {
+		t.Fatal("conflicting duplicate route metadata must never authorize Official compaction")
+	}
+
+	for i := 0; i < 256; i++ {
+		candidate := prewarm
+		candidate.ClientMetadata.SessionID = fmt.Sprintf("capacity-%d", i)
+		s.observeOfficialCompactionTarget(candidate)
+	}
+	overflow := prewarm
+	overflow.ClientMetadata.SessionID = "capacity-overflow"
+	s.observeOfficialCompactionTarget(overflow)
+	overflowCompact := compact
+	overflowCompact.ClientMetadata.SessionID = overflow.ClientMetadata.SessionID
+	if _, _, ok := s.observeOfficialCompactionTarget(overflowCompact); ok {
+		t.Fatal("hint capacity overflow must fail closed")
 	}
 }
 
