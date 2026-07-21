@@ -96,6 +96,43 @@ func TestAnthropicMixedResponsesHistoryPreservesAssistantOutputText(t *testing.T
 	}
 }
 
+func TestResponsesWebSocketRejectsAdapterCompactionTriggerForModelFallback(t *testing.T) {
+	var hits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg_normal","model":"upstream","content":[{"type":"text","text":"normal response"}],"stop_reason":"end_turn"}`)
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeTestProviderConfig(t, upstream.URL, "anthropic_messages", "claude-example"))
+	if err != nil {
+		t.Fatalf("New err = %v", err)
+	}
+	gateway := httptest.NewServer(h)
+	defer gateway.Close()
+	conn, reader := openTestWebSocket(t, gateway.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, `{"model":"claude-example","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"history"}]},{"type":"compaction_trigger"}],"client_metadata":{"x-codex-turn-metadata":"{\"request_kind\":\"compaction\"}"}}`)
+
+	var got strings.Builder
+	for i := 0; i < 20; i++ {
+		opcode, payload := readTestWebSocketFrame(t, reader)
+		if opcode == websocketOpcodeClose {
+			break
+		}
+		if opcode == websocketOpcodeText {
+			got.Write(payload)
+		}
+	}
+	if !strings.Contains(got.String(), `"type":"response.failed"`) || !strings.Contains(got.String(), `"type":"invalid_request_error"`) {
+		t.Fatalf("adapter compaction response = %s", got.String())
+	}
+	if hits != 0 {
+		t.Fatalf("provider upstream hits = %d, want 0", hits)
+	}
+}
+
 func TestModels(t *testing.T) {
 	cfgPath := filepath.Join("..", "..", "..", "examples", "providers.example.json")
 	h, err := New(cfgPath)

@@ -560,6 +560,11 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		s.nativeOpenAIResponses(w, r, rawRequest, req, provider, model, start)
 		return
 	}
+	if provider, _, ok := s.providerForModel(req.Model); ok && responsesInputHasCompactionTrigger(req.Input) {
+		s.recordFailedUsage(provider.ID, req.Model, "invalid_request_error", http.StatusBadRequest, start, "responses_http")
+		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", "provider adapter does not support Responses compaction"))
+		return
+	}
 	messages, err := chatMessages(req.Input)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody("invalid_request_error", err.Error()))
@@ -741,6 +746,12 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if provider, model, ok := s.providerForModel(req.Model); ok && provider.APIFormat == config.APIFormatOpenAIResponses {
 				s.nativeOpenAIResponsesWebSocket(rw.Writer, requestCtx, requestBody, req, provider, model, start)
+				_ = writeWebSocketClose(rw.Writer)
+				return
+			}
+			if provider, _, ok := s.providerForModel(req.Model); ok && responsesInputHasCompactionTrigger(req.Input) {
+				s.recordFailedUsage(provider.ID, req.Model, "invalid_request_error", http.StatusBadRequest, start, "responses_websocket")
+				_ = writeWebSocketFailedEvent(rw.Writer, req.Model, errorBody("invalid_request_error", "provider adapter does not support Responses compaction"))
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
@@ -1693,6 +1704,22 @@ type responsesTool struct {
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+func responsesInputHasCompactionTrigger(input json.RawMessage) bool {
+	var items []json.RawMessage
+	if err := json.Unmarshal(input, &items); err != nil {
+		return false
+	}
+	for _, rawItem := range items {
+		var item struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(rawItem, &item) == nil && item.Type == "compaction_trigger" {
+			return true
+		}
+	}
+	return false
 }
 
 func chatMessages(input json.RawMessage) ([]chatMessage, error) {
