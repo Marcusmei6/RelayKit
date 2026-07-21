@@ -71,7 +71,7 @@ func (s *Server) officialOpenAIResponses(w http.ResponseWriter, r *http.Request,
 	defer resp.Body.Close()
 
 	if req.Stream {
-		if !isSSEContentType(resp.Header.Get("Content-Type")) {
+		if contentType := strings.TrimSpace(resp.Header.Get("Content-Type")); contentType != "" && !isSSEContentType(contentType) {
 			s.recordFailedUsageRoute("openai", req.Model, "protocol_error", http.StatusBadGateway, start, "responses_http", route)
 			writeJSON(w, http.StatusBadGateway, errorBody("protocol_error", "official upstream returned an invalid streaming response"))
 			return
@@ -117,7 +117,7 @@ func (s *Server) officialOpenAIResponsesWebSocket(w *bufio.Writer, ctx context.C
 		return
 	}
 	defer resp.Body.Close()
-	if !isSSEContentType(resp.Header.Get("Content-Type")) {
+	if contentType := strings.TrimSpace(resp.Header.Get("Content-Type")); contentType != "" && !isSSEContentType(contentType) {
 		s.recordFailedUsage("openai", req.Model, "protocol_error", http.StatusBadGateway, start, "responses_websocket")
 		_ = writeWebSocketJSON(w, nativeResponsesErrorEvent("protocol_error"))
 		return

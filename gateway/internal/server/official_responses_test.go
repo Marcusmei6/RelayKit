@@ -145,6 +145,43 @@ func TestOfficialCodexHomeStreamsNativeResponsesOverHTTPAndWebSocket(t *testing.
 	}
 }
 
+func TestOfficialCodexHomeAcceptsHeaderlessNativeResponsesStream(t *testing.T) {
+	var hits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Fatalf("Accept = %q", got)
+		}
+		w.Header()["Content-Type"] = []string{}
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_headerless\",\"object\":\"response\",\"model\":\"official-upstream\",\"status\":\"in_progress\",\"output\":[]}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_headerless\",\"object\":\"response\",\"model\":\"official-upstream\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer upstream.Close()
+
+	h, _ := newOfficialCodexHomeTestHandler(t, upstream.URL, "test-access-token", "test-account-id")
+	httpReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\"public-official\",\"input\":\"stream\",\"stream\":true}"))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, httpReq)
+	if httpRec.Code != http.StatusOK || !strings.Contains(httpRec.Body.String(), "\"type\":\"response.completed\"") || !strings.Contains(httpRec.Body.String(), "\"model\":\"public-official\"") {
+		t.Fatalf("headerless HTTP stream = %d %s", httpRec.Code, httpRec.Body.String())
+	}
+
+	gateway := httptest.NewServer(h)
+	defer gateway.Close()
+	conn, reader := openTestWebSocket(t, gateway.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, "{\"model\":\"public-official\",\"input\":\"stream\"}")
+	got := readTestWebSocketUntil(t, reader, "response.completed")
+	if !strings.Contains(got, "\"model\":\"public-official\"") || !strings.Contains(got, "\"delta\":\"OK\"") {
+		t.Fatalf("headerless WebSocket stream = %s", got)
+	}
+	if hits != 2 {
+		t.Fatalf("upstream hits = %d, want 2", hits)
+	}
+}
+
 func TestOfficialCodexHomeRefreshesAfterUnauthorizedAndRetriesOnce(t *testing.T) {
 	const oldAccess = "test-old-access"
 	const newAccess = "test-new-access"
