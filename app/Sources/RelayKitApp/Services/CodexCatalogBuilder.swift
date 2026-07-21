@@ -9,13 +9,7 @@ enum CodexCatalogBuilder {
     }
 
     static func catalog(accountProjection: Bool) throws -> Catalog {
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") else {
-            throw CodexCatalogBuilderError.desktopUnavailable
-        }
-        let binary = appURL.appendingPathComponent("Contents/Resources/codex")
-        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
-            throw CodexCatalogBuilderError.bundledCLIUnavailable
-        }
+        let binary = try codexBinary()
 
         let process = Process()
         let output = Pipe()
@@ -43,24 +37,41 @@ enum CodexCatalogBuilder {
         }
         return Catalog(data: data, binaryPath: binary.path)
     }
+
+    private static func codexBinary() throws -> URL {
+        var candidates: [String] = []
+        if let override = ProcessInfo.processInfo.environment["RELAYKIT_CODEX_BINARY"] {
+            candidates.append(override)
+        }
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") {
+            candidates.append(appURL.appendingPathComponent("Contents/Resources/codex").path)
+        }
+        candidates.append(NSHomeDirectory() + "/.local/bin/codex")
+        candidates.append("/opt/homebrew/bin/codex")
+        candidates.append("/usr/local/bin/codex")
+        var seen = Set<String>()
+        for candidate in candidates where seen.insert(candidate).inserted {
+            guard candidate.hasPrefix("/"), !candidate.contains("\n"),
+                  FileManager.default.isExecutableFile(atPath: candidate) else { continue }
+            return URL(fileURLWithPath: candidate)
+        }
+        throw CodexCatalogBuilderError.desktopUnavailable
+    }
 }
 
 private enum CodexCatalogBuilderError: LocalizedError {
     case desktopUnavailable
-    case bundledCLIUnavailable
     case commandFailed
     case invalidCatalog
 
     var errorDescription: String? {
         switch self {
         case .desktopUnavailable:
-            "Codex Desktop is required to build the RelayKit model catalog."
-        case .bundledCLIUnavailable:
-            "Codex Desktop bundled CLI is unavailable; reinstall or update Codex Desktop."
+            "Codex Desktop or an installed Codex CLI is required to build the RelayKit model catalog."
         case .commandFailed:
-            "Codex Desktop could not provide its bundled model catalog."
+            "Codex CLI could not provide its bundled model catalog."
         case .invalidCatalog:
-            "Codex Desktop returned an invalid bundled model catalog."
+            "Codex CLI returned an invalid bundled model catalog."
         }
     }
 }

@@ -702,6 +702,10 @@ func expectCodexCatalogProcessDrainContract() throws {
           drain.lowerBound < wait.lowerBound else {
         fatalError("Codex catalog output must be drained before waiting so a large catalog cannot deadlock")
     }
+    guard source.contains(".local/bin/codex"),
+          source.contains("FileManager.default.isExecutableFile") else {
+        fatalError("Codex catalog builder must use a controlled installed-CLI fallback")
+    }
 }
 
 func expectCredentialRefContract() throws {
