@@ -783,6 +783,21 @@ func expectProviderConfigPathRecoversStaleTemporaryPreference() {
     if unrelatedTmp != "/tmp/user-selected-providers.json" {
         fatalError("unrelated tmp provider config should remain explicit: \(unrelatedTmp)")
     }
+    let historicalDist = "/opt/relaykit-fixture/RelayKit/dist/signed-beta-v0.1.0/run/runtime/providers.json"
+    let resolvedHistoricalDist = RelayKitPaths.resolvedProviderConfigPath(savedPath: historicalDist) { $0 == historicalDist }
+    if resolvedHistoricalDist != RelayKitPaths.providerConfigPath() {
+        fatalError("historical RelayKit dist provider config should recover to App Support: \(resolvedHistoricalDist)")
+    }
+    let desktopProof = "/opt/relaykit-fixture/Library/Application Support/RelayKit/DesktopProof/home/Library/Application Support/RelayKit/providers.json"
+    let resolvedDesktopProof = RelayKitPaths.resolvedProviderConfigPath(savedPath: desktopProof) { $0 == desktopProof }
+    if resolvedDesktopProof != RelayKitPaths.providerConfigPath() {
+        fatalError("DesktopProof provider config should recover to App Support: \(resolvedDesktopProof)")
+    }
+    let unrelatedDist = "/opt/relaykit-fixture/AnotherProject/dist/providers.json"
+    let preservedUnrelatedDist = RelayKitPaths.resolvedProviderConfigPath(savedPath: unrelatedDist) { $0 == unrelatedDist }
+    if preservedUnrelatedDist != unrelatedDist {
+        fatalError("unrelated dist provider config should remain explicit: \(preservedUnrelatedDist)")
+    }
 }
 
 func expectOfficialProofRootOverride() {

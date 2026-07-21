@@ -25,6 +25,9 @@ public enum RelayKitPaths {
         if isRelayKitTemporaryProviderConfigPath(savedPath) {
             return providerConfigPath()
         }
+        if isRelayKitGeneratedProviderConfigPath(savedPath) {
+            return providerConfigPath()
+        }
         if savedPath.hasPrefix("/tmp/") && !fileExists(savedPath) {
             return providerConfigPath()
         }
@@ -40,6 +43,23 @@ public enum RelayKitPaths {
 
     private static func isRelayKitTemporaryProviderConfigPath(_ path: String) -> Bool {
         path.hasPrefix("/tmp/relaykit-") || path.hasPrefix("/private/tmp/relaykit-")
+    }
+
+    private static func isRelayKitGeneratedProviderConfigPath(_ path: String) -> Bool {
+        let components = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        for index in components.indices where components[index] == "RelayKit" {
+            if index + 1 < components.count, components[index + 1] == "dist" {
+                return true
+            }
+        }
+        for index in components.indices where components[index] == "Application Support" {
+            if index + 2 < components.count,
+               components[index + 1] == "RelayKit",
+               components[index + 2] == "DesktopProof" {
+                return true
+            }
+        }
+        return false
     }
 
     public static func userProviderConfigPath() -> String {
