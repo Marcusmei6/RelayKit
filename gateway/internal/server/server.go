@@ -712,6 +712,11 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 						_ = writeWebSocketClose(rw.Writer)
 						return
 					}
+					if len(payload)-len(rawResponse) > maximumResponsesWebSocketEnvelopeBytes {
+						_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
+						_ = writeWebSocketClose(rw.Writer)
+						return
+					}
 					requestJSON = rawResponse
 				} else {
 					requestBody := make(map[string]json.RawMessage, len(envelope)-1)

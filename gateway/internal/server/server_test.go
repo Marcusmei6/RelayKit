@@ -3900,6 +3900,61 @@ func TestNativeOpenAIResponsesWebSocketRejectsUnknownTypedEnvelope(t *testing.T)
 	}
 }
 
+func TestResponsesWebSocketCapsNestedResponseCreateEnvelopeBeforeUpstream(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_envelope\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeNativeResponsesConfig(t, upstream.URL, "public/native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	response := `{"model":"public/native","input":"typed"}`
+	prefix := `{"type":"response.create","padding":"`
+	suffix := `","response":` + response + `}`
+
+	for _, tc := range []struct {
+		name     string
+		overhead int
+		wantOK   bool
+	}{
+		{name: "exact envelope limit", overhead: maximumResponsesWebSocketEnvelopeBytes, wantOK: true},
+		{name: "envelope limit plus one", overhead: maximumResponsesWebSocketEnvelopeBytes + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			padding := strings.Repeat("x", tc.overhead-len(prefix)-len(suffix)+len(response))
+			payload := prefix + padding + suffix
+			if got := len(payload) - len(response); got != tc.overhead {
+				t.Fatalf("envelope overhead = %d, want %d", got, tc.overhead)
+			}
+
+			conn, reader := openTestWebSocket(t, srv.URL, "/v1/responses")
+			defer conn.Close()
+			writeTestWebSocketText(t, conn, payload)
+			events := readNativeWebSocketAllEvents(t, reader)
+			if tc.wantOK {
+				if len(events) != 1 || events[0]["type"] != "response.completed" {
+					t.Fatalf("accepted envelope events = %#v", events)
+				}
+				return
+			}
+			if len(events) != 1 || events[0]["type"] != "response.error" || events[0]["error"].(map[string]any)["type"] != "protocol_error" {
+				t.Fatalf("over-limit envelope events = %#v", events)
+			}
+		})
+	}
+
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d, want 1", upstreamHits)
+	}
+}
+
 type nativeTerminalEnvelopeCase struct {
 	name       string
 	eventType  string
