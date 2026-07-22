@@ -40,7 +40,12 @@ type Server struct {
 	officialCodexBaseURL     string
 }
 
-const maximumResponsesRequestBytes = 16 << 20
+const (
+	maximumResponsesRequestBytes           = 32 << 20
+	maximumResponsesWebSocketEnvelopeBytes = 64 << 10
+	maximumWebSocketControlPayloadBytes    = 125
+	maximumProviderTestRequestBytes        = 64 << 10
+)
 
 var runSecurityFindGenericPassword = func(args ...string) ([]byte, error) {
 	return exec.Command("/usr/bin/security", args...).Output()
@@ -230,8 +235,8 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeProviderTestRequest(body io.Reader) (providerTestRequest, error) {
-	encoded, err := io.ReadAll(io.LimitReader(body, maximumResponsesRequestBytes+1))
-	if err != nil || len(encoded) > maximumResponsesRequestBytes {
+	encoded, err := io.ReadAll(io.LimitReader(body, maximumProviderTestRequestBytes+1))
+	if err != nil || len(encoded) > maximumProviderTestRequestBytes {
 		return providerTestRequest{}, fmt.Errorf("invalid provider test request")
 	}
 	raw, err := strictJSONObject(encoded)
@@ -676,7 +681,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	for {
-		opcode, payload, err := readWebSocketFrame(rw.Reader)
+		opcode, payload, err := readWebSocketFrame(rw.Reader, maximumResponsesRequestBytes+maximumResponsesWebSocketEnvelopeBytes)
 		if err != nil {
 			_ = writeWebSocketClose(rw.Writer)
 			return
@@ -693,7 +698,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
-			requestBody := envelope
+			requestJSON := payload
 			if rawType, hasType := envelope["type"]; hasType {
 				var eventType string
 				if err := json.Unmarshal(rawType, &eventType); err != nil || eventType != "response.create" {
@@ -701,32 +706,30 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 					_ = writeWebSocketClose(rw.Writer)
 					return
 				}
-				if envelope["response"] != nil {
-					requestBody, err = strictJSONObject(envelope["response"])
-					if err != nil {
+				if rawResponse, hasResponse := envelope["response"]; hasResponse {
+					if _, err := strictJSONObject(rawResponse); err != nil {
 						_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
 						_ = writeWebSocketClose(rw.Writer)
 						return
 					}
+					requestJSON = rawResponse
 				} else {
-					requestBody = make(map[string]json.RawMessage, len(envelope)-1)
+					requestBody := make(map[string]json.RawMessage, len(envelope)-1)
 					for key, value := range envelope {
 						if key != "type" {
 							requestBody[key] = value
 						}
 					}
+					var encoded bytes.Buffer
+					encoder := json.NewEncoder(&encoded)
+					encoder.SetEscapeHTML(false)
+					if err := encoder.Encode(requestBody); err != nil {
+						_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
+						_ = writeWebSocketClose(rw.Writer)
+						return
+					}
+					requestJSON = bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'})
 				}
-				if requestBody == nil {
-					_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
-					_ = writeWebSocketClose(rw.Writer)
-					return
-				}
-			}
-			requestJSON, err := json.Marshal(requestBody)
-			if err != nil {
-				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
-				_ = writeWebSocketClose(rw.Writer)
-				return
 			}
 			parsedBody, req, err := decodeResponsesRequest(bytes.NewReader(requestJSON))
 			if err != nil {
@@ -734,7 +737,7 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = writeWebSocketClose(rw.Writer)
 				return
 			}
-			requestBody = parsedBody
+			requestBody := parsedBody
 			if body := s.validateResponsesModel(req.Model, start, "responses_websocket"); body != nil {
 				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("invalid_request_error"))
 				_ = writeWebSocketClose(rw.Writer)
@@ -2965,7 +2968,7 @@ func monitorWebSocketClientClose(conn net.Conn, reader *bufio.Reader, cancel con
 	go func() {
 		defer close(done)
 		for {
-			opcode, _, err := readWebSocketFrame(reader)
+			opcode, _, err := readWebSocketFrame(reader, maximumWebSocketControlPayloadBytes)
 			if err != nil || opcode == websocketOpcodeClose {
 				cancel()
 				_ = conn.Close()
@@ -2981,7 +2984,7 @@ func websocketAcceptKey(key string) string {
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
-func readWebSocketFrame(r *bufio.Reader) (byte, []byte, error) {
+func readWebSocketFrame(r *bufio.Reader, maximumPayloadBytes uint64) (byte, []byte, error) {
 	header, err := r.ReadByte()
 	if err != nil {
 		return 0, nil, err
@@ -3007,7 +3010,10 @@ func readWebSocketFrame(r *bufio.Reader) (byte, []byte, error) {
 		}
 		length = binary.BigEndian.Uint64(extended[:])
 	}
-	if length > 1<<20 {
+	if opcode&0x8 != 0 && length > maximumWebSocketControlPayloadBytes {
+		return 0, nil, fmt.Errorf("websocket control frame too large")
+	}
+	if length > maximumPayloadBytes {
 		return 0, nil, fmt.Errorf("websocket frame too large")
 	}
 	var mask [4]byte
@@ -3016,7 +3022,7 @@ func readWebSocketFrame(r *bufio.Reader) (byte, []byte, error) {
 			return 0, nil, err
 		}
 	}
-	payload := make([]byte, length)
+	payload := make([]byte, int(length))
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return 0, nil, err
 	}

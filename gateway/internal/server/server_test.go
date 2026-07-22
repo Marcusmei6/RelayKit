@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -4010,6 +4011,210 @@ func TestResponsesRejectsOversizedOrAmbiguousRequestBeforeUpstream(t *testing.T)
 	}
 }
 
+func TestResponsesAcceptsLongRequestsAcrossHTTPZstdAndWebSocket(t *testing.T) {
+	var nativeHits, adapterHits int
+	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nativeHits++
+		var request struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode native upstream request: %v", err)
+		}
+		if request.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"resp_native","object":"response","status":"completed","output":[]}`)
+	}))
+	defer native.Close()
+	adapter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		adapterHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chat_adapter","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer adapter.Close()
+
+	nativeHandler, err := New(writeNativeResponsesConfig(t, native.URL, "public/native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterHandler, err := New(writeTestProviderConfig(t, adapter.URL, config.APIFormatOpenAIChat, "public/adapter"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	longNative := responsesRequestJSON("public/native", 17<<20)
+	longAdapter := responsesRequestJSON("public/adapter", 17<<20)
+
+	for _, tc := range []struct {
+		name    string
+		handler http.Handler
+		body    []byte
+		zstd    bool
+	}{
+		{name: "http identity native", handler: nativeHandler, body: []byte(longNative)},
+		{name: "http zstd native", handler: nativeHandler, body: zstdResponsesRequest(t, []byte(longNative)), zstd: true},
+		{name: "http identity adapter", handler: adapterHandler, body: []byte(longAdapter)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			if tc.zstd {
+				req.Header.Set("Content-Encoding", "zstd")
+			}
+			rec := httptest.NewRecorder()
+			tc.handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	srv := httptest.NewServer(nativeHandler)
+	defer srv.Close()
+	exactNative := responsesRequestJSONWithHTML("public/native", maximumResponsesRequestBytes)
+	conn, reader := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, exactNative)
+	readTestWebSocketUntil(t, reader, "response.completed")
+
+	conn, reader = openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, `{"type":"response.create","response":`+exactNative+`}`)
+	readTestWebSocketUntil(t, reader, "response.completed")
+
+	if nativeHits != 4 || adapterHits != 1 {
+		t.Fatalf("upstream hits native=%d adapter=%d, want 4 and 1", nativeHits, adapterHits)
+	}
+}
+
+func TestResponsesRejectsRequestsOverSharedDecodedLimitBeforeUpstream(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"resp_limit","object":"response","status":"completed","output":[]}`)
+	}))
+	defer upstream.Close()
+	h, err := New(writeNativeResponsesConfig(t, upstream.URL, "public/native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact := []byte(responsesRequestJSON("public/native", 32<<20))
+	over := []byte(responsesRequestJSON("public/native", 32<<20+1))
+
+	for _, tc := range []struct {
+		name string
+		body []byte
+		zstd bool
+		want int
+	}{
+		{name: "exact semantic limit", body: exact, want: http.StatusOK},
+		{name: "zstd exact decoded limit", body: zstdResponsesRequest(t, exact), zstd: true, want: http.StatusOK},
+		{name: "identity over limit", body: over, want: http.StatusRequestEntityTooLarge},
+		{name: "zstd over decoded limit", body: zstdResponsesRequest(t, over), zstd: true, want: http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			if tc.zstd {
+				req.Header.Set("Content-Encoding", "zstd")
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
+			}
+			if tc.want == http.StatusOK {
+				var response struct {
+					Status string `json:"status"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil || response.Status != "completed" {
+					t.Fatalf("completed response = %#v, err = %v", response, err)
+				}
+				return
+			}
+			if !strings.Contains(rec.Body.String(), `"type":"invalid_request_error"`) {
+				t.Fatalf("missing invalid request error: %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	conn, reader := openTestWebSocket(t, srv.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, string(over))
+	events := readNativeWebSocketAllEvents(t, reader)
+	if len(events) != 1 || events[0]["type"] != "response.error" {
+		t.Fatalf("websocket events = %#v", events)
+	}
+	errorValue, ok := events[0]["error"].(map[string]any)
+	if !ok || errorValue["type"] != "protocol_error" {
+		t.Fatalf("websocket error = %#v", events[0]["error"])
+	}
+	if upstreamHits != 2 {
+		t.Fatalf("upstream hits = %d, want 2", upstreamHits)
+	}
+}
+
+func TestReadWebSocketFrameRejectsOversizedPayloadBeforeAllocation(t *testing.T) {
+	var requestHeader bytes.Buffer
+	requestHeader.Write([]byte{0x81, 0x80 | 127})
+	var declared [8]byte
+	maximumPayloadBytes := uint64(maximumResponsesRequestBytes + maximumResponsesWebSocketEnvelopeBytes)
+	binary.BigEndian.PutUint64(declared[:], maximumPayloadBytes+1)
+	requestHeader.Write(declared[:])
+	if _, _, err := readWebSocketFrame(bufio.NewReader(&requestHeader), maximumPayloadBytes); err == nil {
+		t.Fatal("oversized declared request payload was accepted")
+	}
+
+	controlPayload := bytes.Repeat([]byte{'x'}, 126)
+	var controlFrame bytes.Buffer
+	controlFrame.Write([]byte{0x89, 126, 0, byte(len(controlPayload))})
+	controlFrame.Write(controlPayload)
+	if _, _, err := readWebSocketFrame(bufio.NewReader(&controlFrame), 32<<20); err == nil {
+		t.Fatal("oversized control frame was accepted")
+	}
+
+	var reservedControlFrame bytes.Buffer
+	reservedControlFrame.Write([]byte{0x8B, 126, 0, 126})
+	if _, _, err := readWebSocketFrame(bufio.NewReader(&reservedControlFrame), 32<<20); err == nil {
+		t.Fatal("oversized reserved control frame was accepted")
+	}
+}
+
+func responsesRequestJSON(model string, totalBytes int) string {
+	prefix := `{"model":"` + model + `","input":"`
+	suffix := `"}`
+	return prefix + strings.Repeat("x", totalBytes-len(prefix)-len(suffix)) + suffix
+}
+
+func responsesRequestJSONWithHTML(model string, totalBytes int) string {
+	prefix := `{"model":"` + model + `","input":"`
+	suffix := `"}`
+	inputBytes := totalBytes - len(prefix) - len(suffix)
+	return prefix + strings.Repeat("<>&", inputBytes/3) + strings.Repeat("<", inputBytes%3) + suffix
+}
+
+func zstdResponsesRequest(t *testing.T, request []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	encoder, err := zstd.NewWriter(&compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := encoder.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
+}
+
 func TestRewriteNativeResponsesResponseRejectsExactMaxPlusOne(t *testing.T) {
 	prefix := `{"id":"resp_limit","object":"response","status":"completed","output":[],"future":"`
 	suffix := `"}`
@@ -4295,7 +4500,10 @@ func writeTestWebSocketText(t *testing.T, conn net.Conn, text string) {
 	case len(payload) <= 65535:
 		frame = append(frame, 0x80|126, byte(len(payload)>>8), byte(len(payload)))
 	default:
-		t.Fatalf("test payload too large")
+		var extended [8]byte
+		binary.BigEndian.PutUint64(extended[:], uint64(len(payload)))
+		frame = append(frame, 0x80|127)
+		frame = append(frame, extended[:]...)
 	}
 	mask := []byte{1, 2, 3, 4}
 	frame = append(frame, mask...)

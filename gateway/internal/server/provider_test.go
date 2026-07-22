@@ -52,6 +52,45 @@ func TestProviderTestRejectsAmbiguousOrSensitiveRequestBeforeUpstream(t *testing
 	}
 }
 
+func TestProviderTestRequestBodyLimitBeforeUpstream(t *testing.T) {
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"resp_unexpected","object":"response","status":"completed","output":[]}`)
+	}))
+	defer upstream.Close()
+
+	h, err := NewWithUsageLogAndCredentials(writeProviderTestNativeConfig(t, upstream.URL), "", map[string]string{"relaykit.test.snapshot": "snapshot-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := `{"provider_id":"native","model_id":"public/native"}`
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "exact limit", body: base + strings.Repeat(" ", maximumProviderTestRequestBytes-len(base)), want: http.StatusOK},
+		{name: "limit plus one", body: base + strings.Repeat(" ", maximumProviderTestRequestBytes+1-len(base)), want: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/_relaykit/provider-test", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if tc.want != http.StatusOK && !strings.Contains(rec.Body.String(), `"type":"invalid_request_error"`) {
+				t.Fatalf("missing invalid request error: %s", rec.Body.String())
+			}
+		})
+	}
+	if got := upstreamHits.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+}
+
 func TestProviderTestUsesSnapshotCredentialAndSanitizesResult(t *testing.T) {
 	var gotBody map[string]any
 	var gotAuthorization string

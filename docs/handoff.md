@@ -4,6 +4,14 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-22, Responses request limit source closeout)
+
+The Responses request-size source change is closed out at source level and is pending a fresh packaged release candidate. Installed Developer-ID/notarized v0.1.5 build 14 remains the current release candidate; no package, GUI, full Desktop E2E, live query, signing, installation, or release completion is claimed for this newer source.
+
+Responses requests now share one 32 MiB decoded-body ceiling across identity HTTP, zstd HTTP, and WebSocket. WebSocket rejects a declared oversized frame before payload allocation and permits only the bounded 64 KiB envelope overhead needed for `response.create`; control payloads retain the 125-byte WebSocket protocol ceiling. `/_relaykit/provider-test` uses an independent 64 KiB request limit.
+
+Focused exact-boundary, over-limit, zstd, WebSocket-envelope, pre-allocation, and no-upstream-on-rejection tests passed. The bound source-only diff SHA-256 remains `51ef04bafed6a0a7bbf429c6d95b0597d262df55d18fc45f332105c7dbcf4cbd`; the authorized Test/check result passed, and Final CR passed with Critical/High/Medium/Low all clear. Because the complete candidate includes `gateway/**`, the next validation cycle must begin with a fresh selector plan before Test, CR, and any Release lane proceed sequentially.
+
 ## Current Truth (2026-07-22, Codex catalog schema compatibility)
 
 The installed v0.1.5 build 10 passed the original reopened long-thread provider -> official remote-compaction-v2 gate and returned the exact Desktop marker, but the model picker exposed only one previously selected provider model instead of both configured provider models. Runtime config, `/v1/models`, and the generated catalog all contained both entries; the failure occurred when Codex core loaded the generated catalog.

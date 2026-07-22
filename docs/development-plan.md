@@ -336,6 +336,16 @@ Status: complete in installed Developer-ID/notarized v0.1.5 build 14. Earlier bu
 - Current Mini runtime is installed v0.1.5 build 14 with its App-owned `19777` helper healthy (Official 7, configured models 2). The immutable signed package is bound to clean source `971d052`; rollback backup remains under `/Applications/.RelayKitApp.backup.20260721T200307Z.6933` until release handoff is accepted.
 - Installed release gates are complete: both provider models are present in real `model/list`, each completed a turn, and one isolated persisted thread completed provider 1 -> Official -> provider 2 -> Official with both natural provider -> Official compactions succeeding. Global config/auth and isolated Official auth hashes remained unchanged; port 18787 was untouched.
 
+## Phase 7.12: Responses Request Size Boundary Source Closeout
+
+Status: source implementation and focused review are complete; a fresh packaged release candidate is pending. Installed Developer-ID/notarized v0.1.5 build 14 remains the current release candidate and does not include this source change.
+
+- Responses requests use one 32 MiB decoded-body ceiling across identity HTTP, zstd HTTP, and WebSocket transports.
+- WebSocket rejects a declared oversized frame before payload allocation. It permits only the bounded 64 KiB envelope overhead needed for `response.create`, while WebSocket control payloads retain the protocol ceiling of 125 bytes.
+- `/_relaykit/provider-test` has an independent 64 KiB request limit.
+- Focused exact-boundary, over-limit, zstd, WebSocket-envelope, pre-allocation, and no-upstream-on-rejection tests passed. The bound source-only diff SHA-256 is `51ef04bafed6a0a7bbf429c6d95b0597d262df55d18fc45f332105c7dbcf4cbd`; the authorized Test/check result and Final CR both passed with no findings.
+- This closeout does not claim a package, GUI run, full Desktop E2E, live query, signing, installation, or release. The selector path remains required for the complete candidate because it includes `gateway/**`.
+
 ## Release Gate
 
 First public release requires:
