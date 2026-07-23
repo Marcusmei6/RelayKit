@@ -443,6 +443,102 @@ func TestIntegrationStatusDistinguishesEnabledDriftedAndDisabled(t *testing.T) {
 	}
 }
 
+func TestRecoveryDecision(t *testing.T) {
+	t.Run("disabled shuts down", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		decision, err := RecoveryDecisionForParentLoss(path, filepath.Join(t.TempDir(), "state.json"))
+		if err != nil || decision != RecoveryShutdown {
+			t.Fatalf("decision=%q err=%v", decision, err)
+		}
+	})
+
+	t.Run("partial catalog drift removes the still-managed base URL", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "config.toml")
+		state := filepath.Join(dir, "state.json")
+		if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: filepath.Join(dir, "catalog.json"), StatePath: state}); err != nil {
+			t.Fatal(err)
+		}
+		later := []byte("model = \"keep\"\nopenai_base_url = \"http://127.0.0.1:19777/v1\"\nmodel_catalog_json = \"/later/catalog.json\"\n")
+		if err := os.WriteFile(target, later, 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		decision, err := RecoveryDecisionForParentLoss(target, state)
+		if err != nil || decision != RecoveryShutdown {
+			t.Fatalf("decision=%q err=%v", decision, err)
+		}
+		disabled := loadTOML(t, target)
+		if got := disabled.Get("openai_base_url"); got != nil {
+			t.Fatalf("managed base URL remains after recovery: %#v", got)
+		}
+		if got := disabled.Get("model_catalog_json"); got != "/later/catalog.json" {
+			t.Fatalf("later catalog changed: %#v", got)
+		}
+		if _, err := os.Stat(state); !os.IsNotExist(err) {
+			t.Fatalf("state should be removed, stat err = %v", err)
+		}
+	})
+
+	t.Run("enabled restores original values before shutdown", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "config.toml")
+		state := filepath.Join(dir, "state.json")
+		original := []byte("model = \"keep\"\nopenai_base_url = \"http://127.0.0.1:11434/v1\"\n")
+		if err := os.WriteFile(target, original, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: filepath.Join(dir, "catalog.json"), StatePath: state}); err != nil {
+			t.Fatal(err)
+		}
+
+		decision, err := RecoveryDecisionForParentLoss(target, state)
+		if err != nil || decision != RecoveryShutdown {
+			t.Fatalf("decision=%q err=%v", decision, err)
+		}
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != string(original) {
+			t.Fatalf("original values not restored: %q, %v", got, err)
+		}
+	})
+
+	t.Run("partial drift restore failure retains listener", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "config.toml")
+		state := filepath.Join(dir, "state.json")
+		if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: filepath.Join(dir, "catalog.json"), StatePath: state}); err != nil {
+			t.Fatal(err)
+		}
+		partial := loadTOML(t, target)
+		partial.Set("model_catalog_json", "/later/catalog.json")
+		body, err := partial.ToTomlString()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0500); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(dir, 0700)
+
+		decision, err := RecoveryDecisionForParentLoss(target, state)
+		if err == nil || decision != RecoveryRetainListener {
+			t.Fatalf("decision=%q err=%v", decision, err)
+		}
+		if status, statusErr := IntegrationStatus(target, state); statusErr != nil || status != StatusDrifted {
+			t.Fatalf("status=%q err=%v", status, statusErr)
+		}
+	})
+}
+
 func TestEnableRefusesAuthJSONPathsWithoutReadingOrWritingThem(t *testing.T) {
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")

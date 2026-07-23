@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -250,30 +251,76 @@ func TestParseParentPIDRequiresPositiveInteger(t *testing.T) {
 	}
 }
 
-func TestGatewayStopsWhenParentExits(t *testing.T) {
-	if os.Getenv("RELAYKIT_TEST_PARENT") == "1" {
+func TestGatewayParentLossRejectsIncompleteManagedRouteFlags(t *testing.T) {
+	configPath := writeGatewayConfig(t)
+	target := filepath.Join(t.TempDir(), "config.toml")
+	state := filepath.Join(t.TempDir(), "state.json")
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"-listen", randomLoopbackAddress(t), "-config", configPath, "-managed-codex-target", target}, want: "managed Codex target and state"},
+		{args: []string{"-listen", randomLoopbackAddress(t), "-config", configPath, "-managed-codex-target", target, "-managed-codex-state", state}, want: "positive parent PID"},
+	} {
+		err := runServer(tc.args, strings.NewReader(""), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("runServer(%q) error = %v, want %q", tc.args, err, tc.want)
+		}
+	}
+}
+
+func TestGatewayParentLossRejectsAuthAndSymlinkManagedPaths(t *testing.T) {
+	dir := t.TempDir()
+	authPath := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"fixture":"RELAYKIT_FAKE_SENTINEL_DO_NOT_USE"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateManagedCodexRecoveryPaths(os.Getpid(), authPath, filepath.Join(dir, "state.json")); err == nil || !strings.Contains(err.Error(), "must not be auth.json") {
+		t.Fatalf("auth target error = %v", err)
+	}
+	link := filepath.Join(dir, "config.toml")
+	if err := os.Symlink(filepath.Join(dir, "target.toml"), link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateManagedCodexRecoveryPaths(os.Getpid(), link, filepath.Join(dir, "state.json")); err == nil || !strings.Contains(err.Error(), "must not be a symbolic link") {
+		t.Fatalf("symlink target error = %v", err)
+	}
+}
+
+func TestGatewayParentLossRestoresManagedRouteBeforeStopping(t *testing.T) {
+	if os.Getenv("RELAYKIT_TEST_PARENT") == "restore" {
 		time.Sleep(300 * time.Millisecond)
 		os.Exit(0)
 	}
 
-	parent := exec.Command(os.Args[0], "-test.run=^TestGatewayStopsWhenParentExits$")
-	parent.Env = append(os.Environ(), "RELAYKIT_TEST_PARENT=1")
+	parent := exec.Command(os.Args[0], "-test.run=^TestGatewayParentLossRestoresManagedRouteBeforeStopping$")
+	parent.Env = append(os.Environ(), "RELAYKIT_TEST_PARENT=restore")
 	if err := parent.Start(); err != nil {
 		t.Fatal(err)
 	}
 
-	configPath := filepath.Join(t.TempDir(), "providers.json")
-	config := `{"providers":[{"id":"test","name":"Test","base_url":"http://127.0.0.1:9/v1","api_format":"openai_chat","models":[{"id":"test-model"}]}]}`
-	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	state := filepath.Join(dir, "state.json")
+	original := []byte("model = \"keep\"\n")
+	if err := os.WriteFile(target, original, 0600); err != nil {
 		t.Fatal(err)
 	}
+	if code := run([]string{"enable-codex-config", "-target", target, "-catalog", filepath.Join(dir, "catalog.json"), "-state", state}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("could not create managed route")
+	}
+	configPath := writeGatewayConfig(t)
+	listenAddress := randomLoopbackAddress(t)
+	usagePath := filepath.Join(t.TempDir(), "usage.jsonl")
 	done := make(chan error, 1)
 	go func() {
 		done <- runServer([]string{
-			"-listen", "127.0.0.1:0",
+			"-listen", listenAddress,
 			"-config", configPath,
-			"-usage-log", filepath.Join(t.TempDir(), "usage.jsonl"),
+			"-usage-log", usagePath,
 			"-parent-pid", strconv.Itoa(parent.Process.Pid),
+			"-managed-codex-target", target,
+			"-managed-codex-state", state,
 		}, strings.NewReader(""), io.Discard)
 	}()
 	if err := parent.Wait(); err != nil {
@@ -287,4 +334,97 @@ func TestGatewayStopsWhenParentExits(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("gateway did not stop after parent exited")
 	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != string(original) {
+		t.Fatalf("managed route was not restored: %q, %v", got, err)
+	}
+}
+
+func TestGatewayParentLossRetainsListenerWhenRecoveryIsUnsafe(t *testing.T) {
+	if os.Getenv("RELAYKIT_TEST_PARENT") == "retain" {
+		time.Sleep(300 * time.Millisecond)
+		os.Exit(0)
+	}
+
+	parent := exec.Command(os.Args[0], "-test.run=^TestGatewayParentLossRetainsListenerWhenRecoveryIsUnsafe$")
+	parent.Env = append(os.Environ(), "RELAYKIT_TEST_PARENT=retain")
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	state := filepath.Join(dir, "state.json")
+	catalog := filepath.Join(dir, "catalog.json")
+	if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"enable-codex-config", "-target", target, "-catalog", catalog, "-state", state}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("could not create managed route")
+	}
+	configured, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := strings.Replace(string(configured), "model_catalog_json = "+strconv.Quote(catalog), "model_catalog_json = \"/later/catalog.json\"", 1)
+	if partial == string(configured) {
+		t.Fatal("could not create partial catalog drift")
+	}
+	if err := os.WriteFile(target, []byte(partial), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0700)
+	address := randomLoopbackAddress(t)
+	configPath := writeGatewayConfig(t)
+	usagePath := filepath.Join(t.TempDir(), "usage.jsonl")
+	go func() {
+		_ = runServer([]string{
+			"-listen", address,
+			"-config", configPath,
+			"-usage-log", usagePath,
+			"-parent-pid", strconv.Itoa(parent.Process.Pid),
+			"-managed-codex-target", target,
+			"-managed-codex-state", state,
+		}, strings.NewReader(""), io.Discard)
+	}()
+	if err := parent.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(600 * time.Millisecond)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("gateway listener was not retained after unsafe recovery")
+}
+
+func writeGatewayConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "providers.json")
+	config := `{"providers":[{"id":"test","name":"Test","base_url":"http://127.0.0.1:9/v1","api_format":"openai_chat","models":[{"id":"test-model"}]}]}`
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func randomLoopbackAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return address
 }

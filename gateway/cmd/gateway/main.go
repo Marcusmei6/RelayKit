@@ -269,6 +269,25 @@ func parseParentPID(value string) (int, error) {
 	return pid, nil
 }
 
+func validateManagedCodexRecoveryPaths(parentPID int, targetPath, statePath string) error {
+	if (targetPath == "") != (statePath == "") {
+		return fmt.Errorf("managed Codex target and state must be supplied together")
+	}
+	if targetPath == "" {
+		return nil
+	}
+	if parentPID <= 0 {
+		return fmt.Errorf("managed Codex recovery requires a positive parent PID")
+	}
+	if codexconfig.IsAuthJSONPath(targetPath) || codexconfig.IsAuthJSONPath(statePath) {
+		return fmt.Errorf("managed Codex recovery paths must not be auth.json")
+	}
+	if _, err := codexconfig.IntegrationStatus(targetPath, statePath); err != nil {
+		return fmt.Errorf("managed Codex recovery paths are invalid: %w", err)
+	}
+	return nil
+}
+
 func parentProcessAlive(pid int) bool {
 	process, err := os.FindProcess(pid)
 	if err != nil {
@@ -321,6 +340,8 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	usageLogPath := fs.String("usage-log", defaultUsageLogPath(), "local usage JSONL path")
 	credentialStdin := fs.Bool("credential-stdin", false, "read App-provided credentials from standard input")
 	parentPIDValue := fs.String("parent-pid", "", "optional positive parent process ID")
+	managedCodexTarget := fs.String("managed-codex-target", "", "optional managed Codex config TOML path for parent-loss recovery")
+	managedCodexState := fs.String("managed-codex-state", "", "optional RelayKit managed-state JSON path for parent-loss recovery")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -335,7 +356,9 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 			return fmt.Errorf("parent process is not running")
 		}
 	}
-
+	if err := validateManagedCodexRecoveryPaths(parentPID, *managedCodexTarget, *managedCodexState); err != nil {
+		return err
+	}
 	var handler http.Handler
 	var err error
 	if *credentialStdin {
@@ -383,9 +406,7 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 					return
 				case <-ticker.C:
 					if !parentProcessAlive(parentPID) {
-						cancelRoot()
 						close(parentLost)
-						_ = listener.Close()
 						return
 					}
 				}
@@ -403,20 +424,34 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(stop)
 
-	select {
-	case sig := <-stop:
-		log.Printf("shutting down after %s", sig)
-	case <-parentLost:
-		log.Printf("shutting down after parent process exited")
-	case err := <-errCh:
-		if rootCtx.Err() != nil {
-			break
+	for {
+		select {
+		case sig := <-stop:
+			log.Printf("shutting down after %s", sig)
+			goto shutdown
+		case <-parentLost:
+			if *managedCodexTarget != "" {
+				decision, recoveryErr := codexconfig.RecoveryDecisionForParentLoss(*managedCodexTarget, *managedCodexState)
+				if decision == codexconfig.RecoveryRetainListener {
+					log.Printf("parent process exited; gateway listener retained (At risk): %v", recoveryErr)
+					parentLost = nil
+					continue
+				}
+			}
+			log.Printf("shutting down after parent process exited")
+			goto shutdown
+		case err := <-errCh:
+			if rootCtx.Err() != nil {
+				goto shutdown
+			}
+			if err != nil && err != http.ErrServerClosed {
+				return fmt.Errorf("gateway failed: %w", err)
+			}
+			return nil
 		}
-		if err != nil && err != http.ErrServerClosed {
-			return fmt.Errorf("gateway failed: %w", err)
-		}
-		return nil
 	}
+
+shutdown:
 	cancelRoot()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

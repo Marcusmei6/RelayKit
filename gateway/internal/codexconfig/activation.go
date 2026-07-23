@@ -52,6 +52,16 @@ const (
 	StatusDrifted  Status = "drifted"
 )
 
+// RecoveryDecision determines whether a parent-bound gateway can safely stop
+// after the parent exits. Retaining the listener prevents a still-managed
+// Codex route from becoming a dead port.
+type RecoveryDecision string
+
+const (
+	RecoveryShutdown       RecoveryDecision = "shutdown"
+	RecoveryRetainListener RecoveryDecision = "retain_listener"
+)
+
 type managedValues struct {
 	OpenAIBaseURL    string `json:"openai_base_url"`
 	ModelCatalogJSON string `json:"model_catalog_json"`
@@ -282,6 +292,78 @@ func IntegrationStatus(targetPath, statePath string) (Status, error) {
 		return StatusEnabled, nil
 	}
 	return StatusDrifted, nil
+}
+
+// RecoveryDecisionForParentLoss performs the smallest safe recovery for a
+// parent-bound gateway. It never reads auth.json. A disabled route is already
+// safe to stop; enabled or drifted routes use the normal field-level
+// restoration. If that cannot be proven safe, the caller must retain its
+// listener.
+func RecoveryDecisionForParentLoss(targetPath, statePath string) (RecoveryDecision, error) {
+	status, err := IntegrationStatus(targetPath, statePath)
+	if err != nil {
+		return RecoveryRetainListener, fmt.Errorf("inspect managed Codex route: %w", err)
+	}
+	switch status {
+	case StatusDisabled:
+		return RecoveryShutdown, nil
+	case StatusEnabled, StatusDrifted:
+		_, err := Disable(targetPath, statePath)
+		if err == nil {
+			return RecoveryShutdown, nil
+		}
+		stillManaged, proofErr := managedBaseURLStillConfigured(targetPath, statePath)
+		if proofErr != nil {
+			return RecoveryRetainListener, fmt.Errorf("recover managed Codex route: %w; verify managed base URL: %v", err, proofErr)
+		}
+		if !stillManaged {
+			return RecoveryShutdown, nil
+		}
+		return RecoveryRetainListener, fmt.Errorf("recover managed Codex route: %w; managed base URL remains", err)
+	default:
+		return RecoveryRetainListener, fmt.Errorf("inspect managed Codex route: unknown status %q", status)
+	}
+}
+
+// managedBaseURLStillConfigured proves whether the current target still
+// points at the base URL recorded in RelayKit's managed state. It reads only
+// the explicit TOML/state paths and applies the same auth and symlink guards
+// as the managed config operations.
+func managedBaseURLStillConfigured(targetPath, statePath string) (bool, error) {
+	targetPath, err := absolutePath(targetPath, "target path")
+	if err != nil {
+		return false, err
+	}
+	statePath, err = absolutePath(statePath, "state path")
+	if err != nil {
+		return false, err
+	}
+	if IsAuthJSONPath(targetPath) || IsAuthJSONPath(statePath) {
+		return false, fmt.Errorf("auth.json paths are not allowed")
+	}
+	if err := rejectSymlinkPath(targetPath, "target path"); err != nil {
+		return false, err
+	}
+	if err := rejectSymlinkPath(statePath, "state path"); err != nil {
+		return false, err
+	}
+	state, err := readManagedState(statePath)
+	if err != nil {
+		return false, err
+	}
+	if state.Target != targetPath {
+		return false, fmt.Errorf("RelayKit state target does not match target path")
+	}
+	content, err := os.ReadFile(targetPath)
+	if err != nil {
+		return false, err
+	}
+	tree, err := toml.LoadBytes(content)
+	if err != nil {
+		return false, fmt.Errorf("invalid target TOML")
+	}
+	baseURL, ok := tree.Get("openai_base_url").(string)
+	return ok && baseURL == state.Managed.OpenAIBaseURL, nil
 }
 
 // Disable removes only values still equal to the values recorded by Enable.
