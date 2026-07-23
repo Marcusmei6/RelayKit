@@ -98,6 +98,28 @@ app_executable() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${app}/Contents/Info.plist"
 }
 
+scan_release_binary_for_personal_paths() {
+  local role="$1"
+  local binary="$2"
+  local count
+
+  if ! count="$(python3 - "${binary}" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], "rb") as binary:
+    data = binary.read()
+patterns = (b"/" + b"Users/[^/\x00]+/", b"/" + b"home/[^/\x00]+/")
+print(sum(len(re.findall(pattern, data)) for pattern in patterns))
+PY
+  )"; then
+    fail "release binary personal-path scan unavailable: ${role}"
+  fi
+  if [[ ! "${count}" =~ ^[0-9]+$ ]] || (( count > 0 )); then
+    fail "release binary personal-path scan failed: ${role} (rule=personal-absolute-path count=${count})"
+  fi
+}
+
 verify_app_metadata() {
   local app="$1"
   local executable version build bundle_id
@@ -119,6 +141,8 @@ verify_signed_app() {
   local app="$1"
   local signature_details designated_requirement
   verify_app_metadata "${app}"
+  scan_release_binary_for_personal_paths app-executable "${app}/Contents/MacOS/${APP_PROCESS_NAME}"
+  scan_release_binary_for_personal_paths bundled-relay "${app}/Contents/MacOS/relay"
   "${CODESIGN_BIN}" --verify --deep --strict --verbose=4 "${app}" >/dev/null
   signature_details="$("${CODESIGN_BIN}" -dvvv --verbose=4 "${app}" 2>&1)" || fail "could not inspect App signature"
   grep -Fqx "Identifier=${BUNDLE_ID}" <<<"${signature_details}" || fail "signed App identifier is not ${BUNDLE_ID}"

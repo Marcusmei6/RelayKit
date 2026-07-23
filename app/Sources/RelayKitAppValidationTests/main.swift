@@ -1613,6 +1613,53 @@ func expectStatusPopoverContract() throws {
     }
 }
 
+func expectGracefulTerminationRestoresCodexRouteBeforeStoppingGateway() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let app = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift"), encoding: .utf8)
+
+    guard let shutdownStart = appModel.range(of: "func prepareForGracefulTermination() -> Bool"),
+          let statusStart = appModel.range(of: "gateway.codexConfigStatus(", range: shutdownStart.upperBound..<appModel.endIndex),
+          let disableStart = appModel.range(of: "gateway.disableCodexConfig(", range: statusStart.upperBound..<appModel.endIndex),
+          statusStart.lowerBound < disableStart.lowerBound else {
+        fatalError("graceful termination must check guarded Codex state before guarded restoration")
+    }
+    let shutdown = appModel[shutdownStart.lowerBound..<appModel.endIndex]
+    for required in ["case \"enabled\"", "case \"disabled\"", "case \"drifted\"", "RelayKitPaths.defaultCodexConfigPath()", "RelayKitPaths.codexConfigStatePath()"] {
+        if !shutdown.contains(required) {
+            fatalError("graceful termination guard is missing \(required)")
+        }
+    }
+    guard let disabledStart = shutdown.range(of: "case \"disabled\":"),
+          let disabledReturn = shutdown.range(of: "return true", range: disabledStart.upperBound..<shutdown.endIndex),
+          let driftedStart = shutdown.range(of: "case \"drifted\":"),
+          let driftedReturn = shutdown.range(of: "return false", range: driftedStart.upperBound..<shutdown.endIndex),
+          disabledStart.lowerBound < disabledReturn.lowerBound,
+          driftedStart.lowerBound < driftedReturn.lowerBound,
+          shutdown.contains("guard codexIntegrationHasManagedState else") else {
+        fatalError("graceful termination must allow disabled integration and cancel on guarded restoration failure")
+    }
+
+    guard let shouldTerminateStart = app.range(of: "func applicationShouldTerminate"),
+          let willTerminateStart = app.range(of: "func applicationWillTerminate", range: shouldTerminateStart.upperBound..<app.endIndex),
+          shouldTerminateStart.lowerBound < willTerminateStart.lowerBound else {
+        fatalError("application termination guard is missing")
+    }
+    let shouldTerminate = app[shouldTerminateStart.lowerBound..<willTerminateStart.lowerBound]
+    for required in ["model.prepareForGracefulTermination()", ".terminateCancel", ".terminateNow"] {
+        if !shouldTerminate.contains(required) {
+            fatalError("application termination must cancel on guarded Codex restoration failure")
+        }
+    }
+
+    let termination = app[willTerminateStart.lowerBound..<app.endIndex]
+    guard let gatewayStop = termination.range(of: "model.stopGateway()"),
+          let authStop = termination.range(of: "model.stopOfficialAuthProcessForShutdown()"),
+          gatewayStop.lowerBound < authStop.lowerBound else {
+        fatalError("successful termination must retain gateway then auth shutdown ordering")
+    }
+}
+
 try expectValid(validConfig)
 try expectProviderDraftWriter()
 try expectProviderDraftWriterWithPrototypeMetadata()
@@ -1650,6 +1697,7 @@ expectProviderConnectionClassification()
 expectUsageAnalytics()
 try expectSignedBetaAppContracts()
 try expectStatusPopoverContract()
+try expectGracefulTerminationRestoresCodexRouteBeforeStoppingGateway()
 try expectKeychainCredentialStore()
 try expectGatewayCredentialHandoff()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {

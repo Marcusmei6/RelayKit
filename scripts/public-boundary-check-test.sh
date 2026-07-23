@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHECK="${ROOT}/scripts/public-boundary-check.sh"
 BUILD_SCRIPT="${ROOT}/script/build_app_bundle.sh"
+DOGFOOD_SCRIPT="${ROOT}/scripts/local-beta-dogfood-smoke.sh"
 
 fail() {
   printf 'public boundary contract test failed: %s\n' "$*" >&2
@@ -15,8 +16,63 @@ grep -Fq 'go build -trimpath' "${BUILD_SCRIPT}" || fail "bundled gateway build m
 grep -Fq -- '-c release' "${BUILD_SCRIPT}" || fail "bundled App must use the release Swift configuration"
 grep -Fq -- '-debug-prefix-map' "${BUILD_SCRIPT}" || fail "bundled App must remap debug source paths"
 grep -Fq -- '-file-prefix-map' "${BUILD_SCRIPT}" || fail "bundled App must remap file source paths"
-grep -Fq "Release binary contains a machine-local user path" "${BUILD_SCRIPT}" ||
-  fail "bundle build must fail before signing when a binary exposes a local user path"
+grep -Fq '"${HOME}=~"' "${BUILD_SCRIPT}" || fail "bundled App must remap home-derived build paths"
+grep -Fq 'mktemp -d /tmp/relaykit-swift-build.XXXXXX' "${BUILD_SCRIPT}" ||
+  fail "bundled App must create a fresh Swift scratch directory outside the home directory"
+grep -Fq 'rm -rf -- "${swift_scratch}"' "${BUILD_SCRIPT}" ||
+  fail "bundled App must clean only its bounded Swift scratch directory"
+grep -Fq -- '--scratch-path "${swift_scratch}"' "${BUILD_SCRIPT}" ||
+  fail "bundled App must use its scratch directory for every Swift invocation"
+grep -Fq -- '-module-cache-path' "${BUILD_SCRIPT}" ||
+  fail "bundled App must bind the Swift module cache to its scratch directory"
+grep -Fq -- '-fmodules-cache-path=${clang_module_cache}' "${BUILD_SCRIPT}" ||
+  fail "bundled App must bind the Clang module cache to its scratch directory"
+for clang_prefix_map in debug file macro; do
+  grep -Fq -- "-Xcc \"-f${clang_prefix_map}-prefix-map=\${prefix_map}\"" "${BUILD_SCRIPT}" ||
+    fail "bundled App must remap Clang ${clang_prefix_map} paths"
+done
+grep -Fq 'scan_release_binary_for_personal_paths' "${BUILD_SCRIPT}" ||
+  fail "bundle build must raw-scan binaries before signing"
+if grep -Fq 'strings "${binary}"' "${BUILD_SCRIPT}"; then
+  fail "bundle build must not depend on strings output for personal-path scanning"
+fi
+
+for forbidden_build_runtime_action in \
+  'pkill' \
+  'killall' \
+  'lsof' \
+  'launchctl' \
+  '/Applications/' \
+  '19777' \
+  '18787' \
+  'LaunchAgents' \
+  '.codex/' \
+  'agent-local-gateway'; do
+  if grep -Fq "${forbidden_build_runtime_action}" "${BUILD_SCRIPT}"; then
+    fail "bundle build/package entry must not inspect or terminate App, port, LaunchAgent, or shared runtime state: ${forbidden_build_runtime_action}"
+  fi
+done
+if grep -Eq '(^|[^[:alnum:]_])(kill|killall|pkill)([[:space:]]|$)' "${BUILD_SCRIPT}"; then
+  fail "bundle build/package entry must not terminate processes"
+fi
+
+grep -Fq 'APP_BUNDLE="${INSTALL_DIR}/RelayKitApp.app"' "${DOGFOOD_SCRIPT}" ||
+  fail "dogfood must bind App ownership to its extracted artifact"
+grep -Fq 'APP_REAL="${APP_BUNDLE}/Contents/MacOS/RelayKitApp.bin"' "${DOGFOOD_SCRIPT}" ||
+  fail "dogfood must bind executable ownership to its extracted artifact"
+grep -Fq 'BUNDLED_RELAY="${APP_BUNDLE}/Contents/MacOS/relay"' "${DOGFOOD_SCRIPT}" ||
+  fail "dogfood must bind helper ownership to its extracted artifact"
+grep -Fq 'APP_PID="$(pgrep -f "^${APP_REAL}$" | tail -1 || true)"' "${DOGFOOD_SCRIPT}" ||
+  fail "dogfood must capture only its exact extracted App PID"
+grep -Fq 'pkill -f "^${BUNDLED_RELAY} -listen 127.0.0.1:19777 "' "${DOGFOOD_SCRIPT}" ||
+  fail "dogfood cleanup must target only its exact extracted helper"
+grep -Fq 'pgrep -x RelayKitApp.bin' "${DOGFOOD_SCRIPT}" ||
+  fail "dogfood must fail closed when another RelayKit App is running"
+grep -Fq 'port_free 19777 || fail' "${DOGFOOD_SCRIPT}" ||
+  fail "dogfood must fail closed when another 19777 listener exists"
+if grep -Eq 'pkill[[:space:]]+-x[[:space:]]+("?RelayKitApp|"?RelayKitApp\.bin)' "${DOGFOOD_SCRIPT}"; then
+  fail "dogfood must not terminate an unrelated RelayKit App by process name"
+fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/relaykit-public-boundary-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT

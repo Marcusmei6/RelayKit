@@ -4,6 +4,18 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-23, Codex 0.145 persistent Responses WebSocket and graceful quit)
+
+The current Codex Desktop embedded CLI `0.145.0-alpha.30` keeps one Responses WebSocket open and serially reuses it. RelayKit previously closed the connection after every terminal response event, so the next turn on that same connection failed with `Broken pipe` or `Connection reset`.
+
+The source fix gives one reader ownership of inbound frames for the connection lifetime and permits sequential `response.create` requests to reuse the connection. Closing the client during an in-flight response cancels its upstream request. Ping/pong behavior and the existing request-size, protocol, routing, and sanitization invariants remain intact.
+
+Graceful App quit now uses the existing guarded `codex-config-status` / disable state. If RelayKit is enabled, the App restores the RelayKit-managed Codex config fields before helper shutdown. Config drift or restore failure cancels quit and keeps the gateway alive instead of leaving Codex pointed at a stopped helper. Codex auth remains untouched.
+
+Focused native and Official sequential regressions passed, as did focused race coverage including client-close cancellation, full `go test ./...`, `go vet`, Swift build with the macOS 15.4 SDK, and GUI Terminal `RelayKitAppValidationTests`. These are source-level implementation results only: selector, menu, package, dogfood, live Desktop, install, signing, notarization, publication, and release gates are not yet claimed.
+
+Build 15 remains immutable, historical, and ineligible. Build 16 has not been built. The existing personal-path and package-isolation remediation truth below remains authoritative and must be carried into the next selector, CR, and Release sequence.
+
 ## Current Truth (2026-07-22, Responses request limit source closeout)
 
 The Responses request-size source change is closed out at source level and is pending a fresh packaged release candidate. Installed Developer-ID/notarized v0.1.5 build 14 remains the current release candidate; no package, GUI, full Desktop E2E, live query, signing, installation, or release completion is claimed for this newer source.
@@ -143,6 +155,16 @@ Current product scope:
 - `gateway/`: local HTTP/WebSocket gateway, model catalog, provider adapters, official credential reference support, and sanitized usage events.
 - `scripts/`: public-safe smoke/proof scripts that use isolated state and loopback ports.
 - `docs/`: public product, engineering, beta, and release-readiness notes.
+
+### Build 15 Personal-Path Source Remediation
+
+This source closeout supersedes any earlier candidate wording above for Build 15 only. Build 15 is immutable, historical, and ineligible: the formal candidate scan found a personal absolute path in its primary executable. Do not re-sign, overwrite, relabel, or reuse Build 15 or its evidence. The failed diagnostic did not provide an independent rule ID, hit count, or byte position, but that missing source attribution does not alter the fail-closed classification.
+
+After the formal failure, the source remediation was revised: each Swift release build now uses a newly empty `/tmp` scratch path with dedicated Swift and Clang module caches; it maps workspace and home-derived prefixes through Swift frontend debug/file maps and Clang importer debug/file/macro maps. The raw-byte scanner remains fail-closed for both release executables before signing and for prepared, staged, retained, and extracted signed-release payloads. The regression fixture is unmistakably synthetic, is rejected while `strings` is unavailable, and confirms the rejection reports only binary role, rule ID, and count.
+
+The selector package/dogfood isolation remediation is now source-complete and pending formal Test/CR. The headless bundle build/verify entry no longer stops processes or inspects installed-App, port-owner, LaunchAgent, or shared-runtime state. Focused source contracts preserve dogfood's fail-closed checks for an already-running App or occupied `19777` and constrain cleanup to the exact extracted App PID and bundled helper path. This lane did not run package, dogfood, GUI, network, signing, notarization, install, release, or runtime commands.
+
+No successful clean release build, Build 16, package, signing, notarization, installation, GUI, network, live, or publication result is claimed here. Fresh selector Test and sequential `relaykit_cr` and `relaykit_release` gates remain pending before a new Build 16 can be created.
 
 ## Public Boundary
 

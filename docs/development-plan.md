@@ -346,6 +346,27 @@ Status: source implementation and focused review are complete; a fresh packaged 
 - Focused exact-boundary, over-limit, zstd, WebSocket-envelope, pre-allocation, and no-upstream-on-rejection tests passed. The bound source-only diff SHA-256 is `51ef04bafed6a0a7bbf429c6d95b0597d262df55d18fc45f332105c7dbcf4cbd`; the authorized Test/check result and Final CR both passed with no findings.
 - This closeout does not claim a package, GUI run, full Desktop E2E, live query, signing, installation, or release. The selector path remains required for the complete candidate because it includes `gateway/**`.
 
+## Phase 7.13: Signed Beta Personal-Path Source Closeout
+
+Status: source remediation was revised after formal failure; fresh selector Test and CR remain pending.
+
+- Build 15 is immutable, historical, and ineligible because the formal candidate scan found a personal absolute path in its primary executable. Do not re-sign, overwrite, relabel, or reuse Build 15 or its evidence. The earlier diagnostic did not yield a separate rule identifier or byte offset; that missing provenance does not weaken the fail-closed disposition.
+- The revised source routes every Swift release build through a newly empty `/tmp` scratch path, with dedicated Swift and Clang module caches. It maps both workspace and home-derived prefixes through Swift frontend debug/file maps and Clang importer debug/file/macro maps. The bundle build raw-scans the App executable and bundled relay helper before signing, without emitting any matched path bytes.
+- Signed-release finalization applies the same raw-byte invariant to the prepared App, staged App, retained release App, and extracted signed-zip payload. A rejection reports only binary role, a sanitized rule identifier, and count.
+- Focused regression coverage uses an unmistakably synthetic path fixture while `strings` is unavailable, and proves that finalization rejects it before creating an immutable release directory.
+- Selector package isolation remediation removes all process termination from the headless bundle build/verify entry. Its focused source contract forbids process-name, installed-App, port-owner, LaunchAgent, and shared-runtime termination there, while preserving dogfood's fail-closed preflight for an existing App or `19777` listener and its exact extracted-artifact cleanup boundary. No package or dogfood runtime was executed; formal selector Test and CR remain pending.
+- This revised source closeout does not claim a successful clean release build, Build 16, package creation, signing, notarization, installation, GUI validation, network validation, publication, or runtime acceptance. A fresh selector Test followed by CR and Release gates is required before any new Build 16 release operation.
+
+## Phase 7.14: Codex 0.145 Persistent Responses WebSocket and Graceful Quit
+
+Status: source implementation and focused validation are complete; selector/menu/package/dogfood/live/install/release gates remain pending.
+
+- Verified root cause: the Codex Desktop embedded CLI `0.145.0-alpha.30` keeps one Responses WebSocket open and serially reuses it. RelayKit closed the connection after each terminal response event, so the next turn failed with `Broken pipe` or `Connection reset`.
+- One reader now owns inbound WebSocket frames for the lifetime of the connection. Sequential `response.create` requests reuse that connection, while an in-flight client close cancels the corresponding upstream request. Ping/pong handling and existing request-size, protocol, routing, and sanitization invariants remain unchanged.
+- Graceful App termination now uses the existing guarded `codex-config-status` / disable state. When RelayKit is enabled, termination restores the RelayKit-managed Codex config fields before shutting down the helper. Config drift or restore failure cancels termination and keeps the gateway alive; Codex auth is not read or modified.
+- Focused native and Official sequential regressions passed. Focused race validation, including client-close cancellation, passed. Full `go test ./...`, `go vet`, Swift build with the macOS 15.4 SDK, and the GUI Terminal `RelayKitAppValidationTests` run passed.
+- These source-level results do not claim selector completion, menu or package validation, dogfood, live Desktop proof, installation, signing, notarization, publication, or release. Build 15 remains immutable and ineligible, and Build 16 has not been built. The existing Build 15/Build 16 packaging-remediation gates remain in force.
+
 ## Release Gate
 
 First public release requires:

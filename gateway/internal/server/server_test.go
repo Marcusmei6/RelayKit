@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -196,18 +197,9 @@ func TestResponsesWebSocketRejectsAdapterCompactionTriggerForModelFallback(t *te
 	defer conn.Close()
 	writeTestWebSocketText(t, conn, `{"model":"claude-example","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"history"}]},{"type":"compaction_trigger"}],"client_metadata":{"x-codex-turn-metadata":"{\"request_kind\":\"compaction\"}"}}`)
 
-	var got strings.Builder
-	for i := 0; i < 20; i++ {
-		opcode, payload := readTestWebSocketFrame(t, reader)
-		if opcode == websocketOpcodeClose {
-			break
-		}
-		if opcode == websocketOpcodeText {
-			got.Write(payload)
-		}
-	}
-	if !strings.Contains(got.String(), `"type":"response.failed"`) || !strings.Contains(got.String(), `"type":"invalid_request_error"`) {
-		t.Fatalf("adapter compaction response = %s", got.String())
+	got := readTestWebSocketUntil(t, reader, "response.failed")
+	if !strings.Contains(got, `"type":"response.failed"`) || !strings.Contains(got, `"type":"invalid_request_error"`) {
+		t.Fatalf("adapter compaction response = %s", got)
 	}
 	if hits != 0 {
 		t.Fatalf("provider upstream hits = %d, want 0", hits)
@@ -767,6 +759,77 @@ func TestResponsesWebSocketRoutesProviderRequest(t *testing.T) {
 	if event.ProviderID != "test" || event.Model != "public/coder" || event.Route != "/v1/responses" || event.Transport != "responses_websocket" || event.Status != "completed" || event.HTTPStatus != http.StatusOK {
 		t.Fatalf("event = %+v", event)
 	}
+}
+
+func TestResponsesWebSocketSupportsSequentialNativeAndOfficialRequests(t *testing.T) {
+	t.Run("native provider", func(t *testing.T) {
+		var inputs []string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request struct {
+				Input string `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			inputs = append(inputs, request.Input)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native_%s\",\"object\":\"response\",\"model\":\"native-upstream\",\"status\":\"completed\",\"output\":[]}}\n\n", request.Input)
+		}))
+		defer upstream.Close()
+
+		h, err := New(writeNativeResponsesConfig(t, upstream.URL, "public/native"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gateway := httptest.NewServer(h)
+		defer gateway.Close()
+
+		conn, reader := openTestWebSocket(t, gateway.URL, "/v1/responses")
+		defer conn.Close()
+		for _, input := range []string{"first", "second"} {
+			writeTestWebSocketText(t, conn, `{"type":"response.create","response":{"model":"public/native","input":"`+input+`"}}`)
+			got := readTestWebSocketUntil(t, reader, "response.completed")
+			if !strings.Contains(got, `"id":"resp_native_`+input+`"`) || !strings.Contains(got, `"model":"public/native"`) {
+				t.Fatalf("native %s response = %s", input, got)
+			}
+		}
+		if got, want := strings.Join(inputs, ","), "first,second"; got != want {
+			t.Fatalf("native upstream inputs = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("official codex home", func(t *testing.T) {
+		var inputs []string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request struct {
+				Input string `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			inputs = append(inputs, request.Input)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_official_%s\",\"object\":\"response\",\"model\":\"official-upstream\",\"status\":\"completed\",\"output\":[]}}\n\n", request.Input)
+		}))
+		defer upstream.Close()
+
+		h, _ := newOfficialCodexHomeTestHandler(t, upstream.URL, "test-access-token", "test-account-id")
+		gateway := httptest.NewServer(h)
+		defer gateway.Close()
+
+		conn, reader := openTestWebSocket(t, gateway.URL, "/v1/responses")
+		defer conn.Close()
+		for _, input := range []string{"first", "second"} {
+			writeTestWebSocketText(t, conn, `{"type":"response.create","response":{"model":"public-official","input":"`+input+`"}}`)
+			got := readTestWebSocketUntil(t, reader, "response.completed")
+			if !strings.Contains(got, `"id":"resp_official_`+input+`"`) || !strings.Contains(got, `"model":"public-official"`) {
+				t.Fatalf("official %s response = %s", input, got)
+			}
+		}
+		if got, want := strings.Join(inputs, ","), "first,second"; got != want {
+			t.Fatalf("official upstream inputs = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestResponsesWebSocketEmitsAnthropicXMLToolCallItem(t *testing.T) {
@@ -3574,7 +3637,7 @@ func TestNativeOpenAIResponsesRejectsMalformedTerminalEnvelope(t *testing.T) {
 			wsEvents := readNativeWebSocketAllEvents(t, reader)
 			_ = conn.Close()
 
-			usage := readNativeUsageEvents(t, usagePath)
+			usage := waitForNativeUsageEvents(t, usagePath, 2)
 			if tc.valid {
 				for transport, events := range map[string][]map[string]any{"http": httpEvents, "websocket": wsEvents} {
 					if len(events) != 1 || events[0]["type"] != tc.eventType {
@@ -3737,7 +3800,7 @@ func TestNativeOpenAIResponsesRejectsSSEHeaderPayloadTypeMismatch(t *testing.T) 
 						}
 					}
 				}
-				usage := readNativeUsageEvents(t, usagePath)
+				usage := waitForNativeUsageEvents(t, usagePath, 2)
 				if len(usage) != 2 {
 					t.Fatalf("mismatch usage count = %d: %#v", len(usage), usage)
 				}
@@ -3799,7 +3862,7 @@ func TestNativeOpenAIResponsesRejectsEventWithoutHeaderOrPayloadType(t *testing.
 			wsEvents := readNativeWebSocketAllEvents(t, reader)
 			_ = conn.Close()
 
-			usage := readNativeUsageEvents(t, usagePath)
+			usage := waitForNativeUsageEvents(t, usagePath, 2)
 			if tc.valid {
 				for transport, events := range map[string][]map[string]any{"http": httpEvents, "websocket": wsEvents} {
 					if len(events) != 1 || events[0]["type"] != "response.completed" {
@@ -4018,6 +4081,10 @@ func readNativeWebSocketAllEvents(t *testing.T, reader *bufio.Reader) []map[stri
 			t.Fatalf("decode websocket event: %v: %s", err, body)
 		}
 		events = append(events, event)
+		switch event["type"] {
+		case "response.completed", "response.failed", "response.incomplete", "response.error":
+			return events
+		}
 	}
 	t.Fatalf("websocket did not close: %#v", events)
 	return nil
@@ -4326,19 +4393,48 @@ func TestNativeResponsesWebSocketClientCloseCancelsUpstream(t *testing.T) {
 
 func readNativeUsageEvents(t *testing.T, path string) []map[string]any {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	events, err := nativeUsageEvents(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return events
+}
+
+func waitForNativeUsageEvents(t *testing.T, path string, expected int) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events, err := nativeUsageEvents(path)
+		if err == nil && len(events) == expected {
+			return events
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("read usage events after waiting for %d events: %v", expected, err)
+			}
+			t.Fatalf("usage event count after waiting = %d, want %d: %#v", len(events), expected, events)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func nativeUsageEvents(path string) ([]map[string]any, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
 	var events []map[string]any
 	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
 		var event map[string]any
 		if err := json.Unmarshal(line, &event); err != nil {
-			t.Fatalf("decode usage: %v: %s", err, line)
+			return nil, fmt.Errorf("decode usage: %w: %s", err, line)
 		}
 		events = append(events, event)
 	}
-	return events
+	return events, nil
 }
 
 type streamReadError struct{}

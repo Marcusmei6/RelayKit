@@ -668,7 +668,6 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
 	if !isWebSocketUpgrade(r) {
 		writeJSON(w, http.StatusUpgradeRequired, errorBody("invalid_request_error", "websocket upgrade required"))
 		return
@@ -680,18 +679,74 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	for {
-		opcode, payload, err := readWebSocketFrame(rw.Reader, maximumResponsesRequestBytes+maximumResponsesWebSocketEnvelopeBytes)
-		if err != nil {
-			_ = writeWebSocketClose(rw.Writer)
-			return
+	type inboundFrame struct {
+		opcode  byte
+		payload []byte
+	}
+	frames := make(chan inboundFrame, 1)
+	readerResult := make(chan error, 1)
+	var cancelMu sync.Mutex
+	var cancelInFlight context.CancelFunc
+	cancelCurrent := func() {
+		cancelMu.Lock()
+		cancel := cancelInFlight
+		cancelMu.Unlock()
+		if cancel != nil {
+			cancel()
 		}
-		switch opcode {
-		case websocketOpcodeClose:
+	}
+	setCancel := func(cancel context.CancelFunc) {
+		cancelMu.Lock()
+		cancelInFlight = cancel
+		cancelMu.Unlock()
+	}
+	clearCancel := func() {
+		cancelMu.Lock()
+		cancelInFlight = nil
+		cancelMu.Unlock()
+	}
+	go func() {
+		for {
+			opcode, payload, err := readWebSocketFrame(rw.Reader, maximumResponsesRequestBytes+maximumResponsesWebSocketEnvelopeBytes)
+			if err != nil {
+				cancelCurrent()
+				readerResult <- err
+				return
+			}
+			if opcode == websocketOpcodeClose {
+				cancelCurrent()
+				readerResult <- nil
+				return
+			}
+			if opcode == websocketOpcodePong {
+				continue
+			}
+			select {
+			case frames <- inboundFrame{opcode: opcode, payload: payload}:
+			default:
+				cancelCurrent()
+				readerResult <- fmt.Errorf("websocket client sent concurrent frames")
+				return
+			}
+		}
+	}()
+
+	for {
+		var frame inboundFrame
+		select {
+		case err := <-readerResult:
+			if err != nil {
+				_ = writeWebSocketClose(rw.Writer)
+			}
 			return
+		case frame = <-frames:
+		}
+		opcode, payload := frame.opcode, frame.payload
+		switch opcode {
 		case websocketOpcodePing:
 			_ = writeWebSocketFrame(rw.Writer, websocketOpcodePong, payload)
 		case websocketOpcodeText, websocketOpcodeBinary:
+			start := time.Now()
 			envelope, err := strictJSONObject(payload)
 			if err != nil {
 				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("protocol_error"))
@@ -750,49 +805,48 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			officialCompaction, officialCompactionModel, officialCompactionOK := s.observeOfficialCompactionTarget(req)
 			requestCtx, cancelRequest := context.WithCancel(r.Context())
-			monitorDone := monitorWebSocketClientClose(conn, rw.Reader, cancelRequest)
-			defer func() {
+			setCancel(cancelRequest)
+			finishRequest := func() {
+				clearCancel()
 				cancelRequest()
-				_ = conn.Close()
-				<-monitorDone
-			}()
+			}
 			if model, ok := s.officialModelForModel(req.Model); ok && officialUsesCodexHome(*s.config.OfficialPassthrough) {
 				s.officialOpenAIResponsesWebSocket(rw.Writer, requestCtx, r.Header, requestBody, req, *s.config.OfficialPassthrough, model, start)
-				_ = writeWebSocketClose(rw.Writer)
-				return
+				finishRequest()
+				continue
 			}
 			if provider, model, ok := s.providerForModel(req.Model); ok && provider.APIFormat == config.APIFormatOpenAIResponses {
 				s.nativeOpenAIResponsesWebSocket(rw.Writer, requestCtx, requestBody, req, provider, model, start)
-				_ = writeWebSocketClose(rw.Writer)
-				return
+				finishRequest()
+				continue
 			}
 			if provider, _, ok := s.providerForModel(req.Model); ok && responsesInputHasCompactionTrigger(req.Input) {
 				if officialCompactionOK {
 					req.Model = officialCompactionModel.ID
 					s.officialOpenAIResponsesWebSocket(rw.Writer, requestCtx, r.Header, requestBody, req, officialCompaction, officialCompactionModel, start)
-					_ = writeWebSocketClose(rw.Writer)
-					return
+					finishRequest()
+					continue
 				}
 				s.recordFailedUsage(provider.ID, req.Model, "invalid_request_error", http.StatusBadRequest, start, "responses_websocket")
 				_ = writeWebSocketFailedEvent(rw.Writer, req.Model, errorBody("invalid_request_error", "provider adapter does not support Responses compaction"))
-				_ = writeWebSocketClose(rw.Writer)
-				return
+				finishRequest()
+				continue
 			}
 			messages, err := chatMessages(req.Input)
 			if err != nil {
 				_ = writeWebSocketJSON(rw.Writer, map[string]any{"type": "response.error", "message": err.Error()})
 				_ = writeWebSocketClose(rw.Writer)
+				finishRequest()
 				return
 			}
 			result, status, body := s.completeResponse(requestCtx, req, messages, start, "responses_websocket")
 			if status != http.StatusOK {
 				_ = writeWebSocketFailedEvent(rw.Writer, req.Model, body)
-				_ = writeWebSocketClose(rw.Writer)
-				return
+				finishRequest()
+				continue
 			}
 			_ = writeWebSocketResponseEvents(rw.Writer, result)
-			_ = writeWebSocketClose(rw.Writer)
-			return
+			finishRequest()
 		}
 	}
 }
@@ -2966,22 +3020,6 @@ func acceptWebSocket(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.R
 		return nil, nil, err
 	}
 	return conn, rw, nil
-}
-
-func monitorWebSocketClientClose(conn net.Conn, reader *bufio.Reader, cancel context.CancelFunc) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			opcode, _, err := readWebSocketFrame(reader, maximumWebSocketControlPayloadBytes)
-			if err != nil || opcode == websocketOpcodeClose {
-				cancel()
-				_ = conn.Close()
-				return
-			}
-		}
-	}()
-	return done
 }
 
 func websocketAcceptKey(key string) string {

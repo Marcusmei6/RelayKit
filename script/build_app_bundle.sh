@@ -3,7 +3,6 @@ set -euo pipefail
 
 MODE="${1:-build}"
 APP_NAME="RelayKitApp"
-APP_PROCESS_NAME="${APP_NAME}.bin"
 BUNDLE_ID="dev.relaykit.app"
 MIN_SYSTEM_VERSION="14.0"
 APP_MARKETING_VERSION="${RELAYKIT_APP_VERSION:-0.1.1}"
@@ -23,12 +22,27 @@ usage() {
   echo "usage: $0 [build|--verify]" >&2
 }
 
-stop_app() {
-  pkill -x "${APP_NAME}" >/dev/null 2>&1 || true
-  pkill -x "${APP_PROCESS_NAME}" >/dev/null 2>&1 || true
-  pkill -f "${APP_REAL_BINARY}" >/dev/null 2>&1 || true
-  if [[ "${RELAYKIT_KEEP_GATEWAY:-0}" != "1" ]]; then
-    pkill -f "${BUNDLED_GATEWAY}" >/dev/null 2>&1 || true
+scan_release_binary_for_personal_paths() {
+  local role="$1"
+  local binary="$2"
+  local count
+
+  if ! count="$(python3 - "${binary}" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], "rb") as binary:
+    data = binary.read()
+patterns = (b"/" + b"Users/[^/\x00]+/", b"/" + b"home/[^/\x00]+/")
+print(sum(len(re.findall(pattern, data)) for pattern in patterns))
+PY
+  )"; then
+    echo "release binary personal-path scan unavailable: ${role}" >&2
+    exit 1
+  fi
+  if [[ ! "${count}" =~ ^[0-9]+$ ]] || (( count > 0 )); then
+    echo "release binary personal-path scan failed: ${role} (rule=personal-absolute-path count=${count})" >&2
+    exit 1
   fi
 }
 
@@ -37,14 +51,30 @@ build_bundle() {
   go build -trimpath -o bin/relay ./cmd/gateway
 
   cd "${ROOT_DIR}/app"
+  local swift_scratch
+  swift_scratch="$(mktemp -d /tmp/relaykit-swift-build.XXXXXX)"
+  trap 'rm -rf -- "${swift_scratch}"' RETURN
+  local swift_module_cache="${swift_scratch}/swift-module-cache"
+  local clang_module_cache="${swift_scratch}/clang-module-cache"
+  mkdir -p "${swift_module_cache}" "${clang_module_cache}"
   local -a swift_build_args=(
     -c release
-    -Xswiftc -debug-prefix-map -Xswiftc "${ROOT_DIR}=."
-    -Xswiftc -file-prefix-map -Xswiftc "${ROOT_DIR}=."
+    -Xswiftc -module-cache-path -Xswiftc "${swift_module_cache}"
+    -Xcc "-fmodules-cache-path=${clang_module_cache}"
   )
-  swift build "${swift_build_args[@]}"
+  local prefix_map
+  for prefix_map in "${ROOT_DIR}=." "${HOME}=~"; do
+    swift_build_args+=(
+      -Xswiftc -debug-prefix-map -Xswiftc "${prefix_map}"
+      -Xswiftc -file-prefix-map -Xswiftc "${prefix_map}"
+      -Xcc "-fdebug-prefix-map=${prefix_map}"
+      -Xcc "-ffile-prefix-map=${prefix_map}"
+      -Xcc "-fmacro-prefix-map=${prefix_map}"
+    )
+  done
+  swift build --scratch-path "${swift_scratch}" "${swift_build_args[@]}"
   local build_binary
-  build_binary="$(swift build "${swift_build_args[@]}" --show-bin-path)/${APP_NAME}"
+  build_binary="$(swift build --scratch-path "${swift_scratch}" "${swift_build_args[@]}" --show-bin-path)/${APP_NAME}"
 
   rm -rf "${APP_BUNDLE}"
   mkdir -p "${APP_MACOS}" "${APP_RESOURCES}"
@@ -56,15 +86,8 @@ build_bundle() {
   chmod +x "${APP_REAL_BINARY}"
   chmod +x "${BUNDLED_GATEWAY}"
 
-  local binary local_path_hits
-  local users_path_prefix='/''Users/'
-  for binary in "${APP_REAL_BINARY}" "${BUNDLED_GATEWAY}"; do
-    local_path_hits="$(LC_ALL=C strings "${binary}" | grep -E "${users_path_prefix}[^/]+/" || true)"
-    if [[ -n "${local_path_hits}" ]]; then
-      echo "Release binary contains a machine-local user path: ${binary}" >&2
-      exit 1
-    fi
-  done
+  scan_release_binary_for_personal_paths app-executable "${APP_REAL_BINARY}"
+  scan_release_binary_for_personal_paths bundled-relay "${BUNDLED_GATEWAY}"
 
   cat >"${INFO_PLIST}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -142,11 +165,9 @@ verify_bundle() {
 
 case "${MODE}" in
   build)
-    stop_app
     build_bundle
     ;;
   --verify|verify)
-    stop_app
     build_bundle
     verify_bundle
     ;;

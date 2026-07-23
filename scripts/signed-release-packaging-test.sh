@@ -29,6 +29,8 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
   'if [[ "${RELAYKIT_TEST_FAIL_ROLLBACK_MOVE:-0}" == "1" && "${1:-}" == *".RelayKitApp.backup."* ]]; then exit 73; fi' \
   'exec /bin/mv "$@"' >"${MOCK_BIN}/mv"
 chmod +x "${MOCK_BIN}/mv"
+printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exit 99' >"${MOCK_BIN}/strings"
+chmod +x "${MOCK_BIN}/strings"
 
 APP="${TMP_DIR}/prepared/RelayKitApp.app"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
@@ -69,6 +71,24 @@ if env -u RELAYKIT_SIGNED_RELEASE_TEST_MODE -u RELAYKIT_TEST_CODESIGN_BIN -u REL
   fail "credential-free signed release path unexpectedly succeeded"
 fi
 [[ ! -e "${TMP_DIR}/release-root/v0.1.1" ]] || fail "missing-credential path created a release directory"
+
+LEAK_APP="${TMP_DIR}/prepared-with-synthetic-path/RelayKitApp.app"
+SYNTHETIC_ROOT="/""Users"
+SYNTHETIC_PATH="${SYNTHETIC_ROOT}/RELAYKIT_FAKE_X0_USER_DO_NOT_USE/workspace"
+mkdir -p "$(dirname "${LEAK_APP}")"
+cp -R "${APP}" "${LEAK_APP}"
+printf '%s' "${SYNTHETIC_PATH}" >>"${LEAK_APP}/Contents/MacOS/RelayKitApp.bin"
+leak_log="${TMP_DIR}/synthetic-path-rejection.log"
+if "${TEST_ENV[@]}" "${ROOT_DIR}/script/package_signed_release.sh" --finalize-prepared-app "${LEAK_APP}" >"${TMP_DIR}/synthetic-path-rejection.stdout" 2>"${leak_log}"; then
+  fail "prepared App with a synthetic personal path was accepted"
+fi
+grep -Fq 'release binary personal-path scan failed: app-executable' "${leak_log}" ||
+  fail "prepared App rejection did not identify the binary role"
+if grep -Fq "${SYNTHETIC_PATH}" "${leak_log}"; then
+  fail "prepared App rejection exposed the matched path"
+fi
+[[ ! -e "${TMP_DIR}/release-root/v0.1.1" ]] || fail "synthetic path rejection created a release directory"
+
 "${TEST_ENV[@]}" "${ROOT_DIR}/script/package_signed_release.sh" --finalize-prepared-app "${APP}"
 
 RELEASE_DIR="${TMP_DIR}/release-root/v0.1.1"

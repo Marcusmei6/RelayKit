@@ -682,6 +682,44 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func prepareForGracefulTermination() -> Bool {
+        do {
+            let status = try gateway.codexConfigStatus(
+                binaryPath: gatewayBinaryPath,
+                target: RelayKitPaths.defaultCodexConfigPath(),
+                state: RelayKitPaths.codexConfigStatePath()
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            switch status {
+            case "enabled":
+                _ = try gateway.disableCodexConfig(
+                    binaryPath: gatewayBinaryPath,
+                    target: RelayKitPaths.defaultCodexConfigPath(),
+                    state: RelayKitPaths.codexConfigStatePath()
+                )
+                refreshCodexConnectionStatus()
+                return true
+            case "drifted":
+                message = "Quit canceled: RelayKit could not safely restore managed Codex settings. Resolve the Codex integration status before quitting."
+                return false
+            case "disabled":
+                return true
+            default:
+                guard codexIntegrationHasManagedState else {
+                    return true
+                }
+                message = "Quit canceled: RelayKit could not verify or restore managed Codex settings. Resolve the Codex integration status before quitting."
+                return false
+            }
+        } catch {
+            guard codexIntegrationHasManagedState else {
+                return true
+            }
+            message = "Quit canceled: RelayKit could not verify or restore managed Codex settings. Resolve the Codex integration status before quitting."
+            return false
+        }
+    }
+
     var codexConnectionIsConfigured: Bool {
         codexConnectionStatus.hasPrefix("Enabled")
     }

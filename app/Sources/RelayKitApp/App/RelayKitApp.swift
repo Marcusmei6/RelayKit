@@ -113,6 +113,10 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         popover.close()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        model.prepareForGracefulTermination() ? .terminateNow : .terminateCancel
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
