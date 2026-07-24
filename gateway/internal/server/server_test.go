@@ -956,7 +956,7 @@ func TestResponsesWebSocketRoutesProviderRequest(t *testing.T) {
 	}
 }
 
-func TestResponsesWebSocketSupportsSequentialNativeAndOfficialRequests(t *testing.T) {
+func TestResponsesP0PersistentWebSocketSupportsSequentialNativeAndOfficialRequests(t *testing.T) {
 	t.Run("native provider", func(t *testing.T) {
 		var inputs []string
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2057,7 +2057,7 @@ func TestResponsesStreamsFakeOpenAIChatSSE(t *testing.T) {
 	}
 }
 
-func TestResponsesStreamMalformedChunkEmitsError(t *testing.T) {
+func TestResponsesP0MalformedChunkEmitsError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		if _, err := w.Write([]byte("data: {not json}\n\n")); err != nil {
@@ -2093,7 +2093,7 @@ func TestResponsesStreamMalformedChunkEmitsError(t *testing.T) {
 	}
 }
 
-func TestResponsesStreamTruncationEmitsError(t *testing.T) {
+func TestResponsesP0UpstreamTruncationEmitsError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		if _, err := w.Write([]byte(`data: {"id":"chatcmpl-stream","model":"qwen3-coder","choices":[{"delta":{"content":"hi"}}]}` + "\n\n")); err != nil {
@@ -3626,7 +3626,7 @@ func TestNativeOpenAIResponsesCatalogProbeRequiresExactJSONContentType(t *testin
 	}
 }
 
-func TestNativeOpenAIResponsesStreamErrorIsSingleTerminalFailure(t *testing.T) {
+func TestResponsesP0UpstreamErrorIsSingleTerminalFailure(t *testing.T) {
 	cases := []struct {
 		name        string
 		contentType string
@@ -3687,6 +3687,64 @@ func TestNativeOpenAIResponsesStreamErrorIsSingleTerminalFailure(t *testing.T) {
 	joined := string(bytes.Join(sent, []byte("\n")))
 	if result.ErrorKind == "" || strings.Count(joined, `"type":"response.error"`) != 1 || strings.Contains(joined, "response.completed") {
 		t.Fatalf("scanner failure result=%+v events=%s", result, joined)
+	}
+}
+
+func TestResponsesP0ForwardingAllowsOneTerminalAndDropsLaterEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		terminal string
+		body     string
+		wantType string
+	}{
+		{"completed", "response.completed", `{"type":"response.completed","response":{"id":"resp_p0","object":"response","status":"completed","output":[]}}`, "response.completed"},
+		{"failed", "response.failed", `{"type":"response.failed","response":{"id":"resp_p0","object":"response","status":"failed","output":[]}}`, "response.failed"},
+		{"incomplete", "response.incomplete", `{"type":"response.incomplete","response":{"id":"resp_p0","object":"response","status":"incomplete","output":[]}}`, "response.incomplete"},
+		{"error", "response.error", `{"type":"response.error","error":{"type":"upstream_error"}}`, "response.error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_p0\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[]}}\n\n" +
+				"event: " + tc.terminal + "\ndata: " + tc.body + "\n\n" +
+				"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"must not forward\"}\n\n" +
+				"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_later\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n"
+			var types []string
+			result := forwardNativeResponsesSSE(strings.NewReader(stream), "public/native", func(event string, _ []byte) bool {
+				types = append(types, event)
+				return true
+			})
+			if !result.Terminal || len(types) != 2 || types[0] != "response.created" || types[1] != tc.wantType {
+				t.Fatalf("terminal result=%+v types=%#v", result, types)
+			}
+		})
+	}
+}
+
+func TestResponsesP0WebSocketDoesNotAttemptHTTPFallback(t *testing.T) {
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Fatalf("unexpected fallback route %s", r.URL.Path)
+		}
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	h, err := New(writeNativeResponsesConfig(t, upstream.URL, "public/native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := httptest.NewServer(h)
+	defer gateway.Close()
+	conn, reader := openTestWebSocket(t, gateway.URL, "/v1/responses")
+	defer conn.Close()
+	writeTestWebSocketText(t, conn, `{"model":"public/native","input":"no fallback"}`)
+	events := readNativeWebSocketAllEvents(t, reader)
+	if len(events) != 1 || events[0]["type"] != "response.error" {
+		t.Fatalf("websocket failure events = %#v", events)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := upstreamHits.Load(); got != 1 {
+		t.Fatalf("upstream requests = %d, want one without HTTP fallback", got)
 	}
 }
 
@@ -3753,7 +3811,7 @@ func TestNativeOpenAIResponsesNonStreamingRejectsErrorEnvelopeAndInvalidShape(t 
 	}
 }
 
-func TestNativeOpenAIResponsesStreamsCompleteLifecycle(t *testing.T) {
+func TestResponsesP0ToolCallLifecycle(t *testing.T) {
 	const providerToken = "LIFECYCLE_PROVIDER_TOKEN"
 	fixture := nativeResponsesLifecycleFixture()
 	requestChecks := 0
@@ -3766,13 +3824,21 @@ func TestNativeOpenAIResponsesStreamsCompleteLifecycle(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
-		for _, field := range []string{"instructions", "input", "reasoning", "tools", "tool_choice", "parallel_tool_calls", "metadata", "include", "future_field"} {
-			if request[field] == nil {
-				t.Fatalf("request field %q missing: %#v", field, request)
+		if requestChecks <= 2 {
+			for _, field := range []string{"instructions", "input", "reasoning", "tools", "tool_choice", "parallel_tool_calls", "metadata", "include", "future_field"} {
+				if request[field] == nil {
+					t.Fatalf("request field %q missing: %#v", field, request)
+				}
+			}
+			if request["model"] != "native-upstream" || request["stream"] != true {
+				t.Fatalf("request projection = %#v", request)
 			}
 		}
-		if request["model"] != "native-upstream" || request["stream"] != true {
-			t.Fatalf("request projection = %#v", request)
+		if requestChecks == 3 {
+			input, err := json.Marshal(request["input"])
+			if err != nil || !strings.Contains(string(input), `"type":"function_call_output"`) || !strings.Contains(string(input), `"call_id":"call_lifecycle"`) {
+				t.Fatalf("tool output was not forwarded into next turn: %s, %v", input, err)
+			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		writeNativeResponsesLifecycleFixture(t, w, fixture)
@@ -3798,8 +3864,10 @@ func TestNativeOpenAIResponsesStreamsCompleteLifecycle(t *testing.T) {
 	defer conn.Close()
 	writeTestWebSocketText(t, conn, `{"type":"response.create","response":`+requestBody+`}`)
 	assertNativeLifecycleEvents(t, readNativeWebSocketEvents(t, reader))
-	if requestChecks != 2 {
-		t.Fatalf("upstream request checks = %d, want 2", requestChecks)
+	writeTestWebSocketText(t, conn, `{"type":"response.create","response":{"model":"public/native","input":[{"type":"function_call_output","call_id":"call_lifecycle","output":"matched"}],"stream":true}}`)
+	assertNativeLifecycleEvents(t, readNativeWebSocketEvents(t, reader))
+	if requestChecks != 3 {
+		t.Fatalf("upstream request checks = %d, want 3", requestChecks)
 	}
 }
 
@@ -4551,7 +4619,7 @@ func TestRewriteNativeResponsesResponseRejectsExactMaxPlusOne(t *testing.T) {
 	}
 }
 
-func TestNativeResponsesWebSocketClientCloseCancelsUpstream(t *testing.T) {
+func TestResponsesP0ClientCancelCancelsUpstream(t *testing.T) {
 	upstreamStarted := make(chan struct{})
 	upstreamCanceled := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

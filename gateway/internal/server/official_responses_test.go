@@ -390,7 +390,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
-func TestAdapterCompactionTriggerFallsBackToOfficialOverHTTPAndWebSocket(t *testing.T) {
+func TestResponsesP0CompactionFallsBackToOfficialOverHTTPAndWebSocket(t *testing.T) {
 	const accessToken = "test-access-token"
 	const accountID = "test-account-id"
 	var officialHits int
