@@ -38,6 +38,7 @@ type Server struct {
 	compactionTargetMu       sync.Mutex
 	compactionTargets        map[string]compactionTargetHint
 	officialCodexBaseURL     string
+	catalogState             *catalogState
 }
 
 const (
@@ -92,6 +93,7 @@ func newServerWithOfficialEndpoint(configPath, usageLogPath string, credentials 
 		keychainCredentials:      credentialCopy,
 		allowKeychainCLIFallback: allowKeychainCLIFallback,
 		officialCodexBaseURL:     officialCodexBaseURL,
+		catalogState:             newCatalogState(),
 	}
 	s.usageLogPath = usageLogPath
 	if configPath != "" {
@@ -231,6 +233,7 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) {
 		writeProviderTestResult(w, http.StatusBadGateway, request, "failed", "responses_unavailable")
 		return
 	}
+	s.catalogState.markProviderTestReachable(provider.ID, model.ID, catalogConfigFingerprint(provider, model), time.Now())
 	writeProviderTestResult(w, http.StatusOK, request, "ok", "")
 }
 
@@ -324,41 +327,71 @@ func (s *Server) catalogModels() ([]map[string]any, map[string]any) {
 			})
 		}
 	}
-	healthy := make([]bool, len(candidates))
-	reasons := make([]string, len(candidates))
+	configured := make([]map[string]any, 0, len(candidates))
+	discovered := make([]map[string]any, 0, len(candidates))
+	routeReachable := make([]map[string]any, 0, len(candidates))
+	temporarilyUnavailable := make([]map[string]any, 0)
+	lastKnownGood := make([]map[string]any, 0)
 	probed := false
-	for i, candidate := range candidates {
-		if candidate.provider.ID == "" {
-			healthy[i] = true
-			continue
-		}
-		if !shouldProbeCatalogModel(candidate.provider) {
-			healthy[i] = true
-			continue
-		}
-		probed = true
-		healthy[i], reasons[i] = s.probeModel(candidate.provider, candidate.model)
-	}
-
 	data := make([]map[string]any, 0, len(candidates))
 	unhealthyCount := 0
 	hidden := make([]map[string]any, 0)
-	for i, candidate := range candidates {
-		if !healthy[i] {
+	for _, candidate := range candidates {
+		configured = append(configured, map[string]any{"id": candidate.model.ID})
+		if candidate.provider.ID == "" || !shouldProbeCatalogModel(candidate.provider) {
+			data = append(data, candidate.entry)
+			continue
+		}
+		probed = true
+		fingerprint := catalogConfigFingerprint(candidate.provider, candidate.model)
+		probe := s.probeModel(candidate.provider, candidate.model)
+		if probe.discovered {
+			discovered = append(discovered, map[string]any{"id": candidate.model.ID})
+		}
+		if probe.routeReachable {
+			s.catalogState.markRouteReachable(candidate.provider.ID, candidate.model.ID, fingerprint, time.Now())
+		}
+		snapshot, hasSnapshot := s.catalogState.lastKnownGood(candidate.provider.ID, candidate.model.ID, fingerprint)
+		if hasSnapshot {
+			lastKnownGood = append(lastKnownGood, map[string]any{
+				"id":                 candidate.model.ID,
+				"timestamp":          snapshot.Timestamp.Format(time.RFC3339Nano),
+				"config_fingerprint": snapshot.ConfigFingerprint,
+				"stale":              snapshot.Stale,
+			})
+		}
+		providerTestReachable := s.catalogState.providerTestReachable(candidate.provider.ID, candidate.model.ID, fingerprint)
+		if probe.routeReachable || providerTestReachable {
+			routeReachable = append(routeReachable, map[string]any{"id": candidate.model.ID})
+		}
+		if probe.routeReachable || providerTestReachable || (hasSnapshot && !snapshot.Stale) {
+			data = append(data, candidate.entry)
+			continue
+		}
+		if probe.routeAttempted {
 			unhealthyCount++
 			hidden = append(hidden, map[string]any{
 				"id":     candidate.model.ID,
-				"reason": healthReason(reasons[i]),
+				"reason": healthReason(probe.routeFailure),
 			})
 			continue
 		}
+		temporarilyUnavailable = append(temporarilyUnavailable, map[string]any{
+			"id":     candidate.model.ID,
+			"reason": healthReason(probe.discoveryFailure),
+		})
 		data = append(data, candidate.entry)
 	}
 	return data, map[string]any{
-		"probed":    probed,
-		"healthy":   len(data),
-		"unhealthy": unhealthyCount,
-		"hidden":    hidden,
+		"probed":                  probed,
+		"healthy":                 len(data),
+		"unhealthy":               unhealthyCount,
+		"configured":              configured,
+		"discovered":              discovered,
+		"route_reachable":         routeReachable,
+		"temporarily_unavailable": temporarilyUnavailable,
+		"hidden":                  hidden,
+		"last_known_good":         lastKnownGood,
 	}
 }
 
@@ -367,38 +400,46 @@ func shouldProbeCatalogModel(provider config.ProviderProfile) bool {
 		(provider.CredentialRef.Kind == config.CredentialKindKeyFile || provider.CredentialRef.Kind == config.CredentialKindKeychain)
 }
 
-func (s *Server) probeModel(provider config.ProviderProfile, model config.Model) (bool, string) {
+type catalogProbeResult struct {
+	discovered       bool
+	discoveryFailure string
+	routeAttempted   bool
+	routeReachable   bool
+	routeFailure     string
+}
+
+func (s *Server) probeModel(provider config.ProviderProfile, model config.Model) catalogProbeResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	modelsURL, err := providerModelsURL(provider)
 	if err != nil {
-		return false, "network failed"
+		return catalogProbeResult{discoveryFailure: "network failed"}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
 	if err != nil {
-		return false, "network failed"
+		return catalogProbeResult{discoveryFailure: "network failed"}
 	}
 	if err := s.applyProviderAuth(req, provider); err != nil {
-		return false, "auth failed"
+		return catalogProbeResult{discoveryFailure: "auth failed"}
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return false, "network failed"
+		return catalogProbeResult{discoveryFailure: "network failed"}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return false, "auth failed"
+		return catalogProbeResult{discoveryFailure: "auth failed"}
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return false, "unsupported model"
+		return catalogProbeResult{discoveryFailure: "discovery unavailable"}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return false, fmt.Sprintf("upstream non-success (HTTP %d)", resp.StatusCode)
+		return catalogProbeResult{discoveryFailure: fmt.Sprintf("upstream non-success (HTTP %d)", resp.StatusCode)}
 	}
 	if !modelListContains(body, upstreamModelName(model)) {
-		return false, "unsupported model"
+		return catalogProbeResult{discoveryFailure: "model not discovered"}
 	}
 
 	probeRoute := func() (bool, string) {
@@ -462,9 +503,9 @@ func (s *Server) probeModel(provider config.ProviderProfile, model config.Model)
 	ok, reason := probeRoute()
 	if provider.APIFormat != config.APIFormatOpenAIResponses && !ok && strings.HasPrefix(reason, "upstream non-success") {
 		time.Sleep(700 * time.Millisecond)
-		return probeRoute()
+		ok, reason = probeRoute()
 	}
-	return ok, reason
+	return catalogProbeResult{discovered: true, routeAttempted: true, routeReachable: ok, routeFailure: reason}
 }
 
 func healthReason(reason string) string {
@@ -472,7 +513,7 @@ func healthReason(reason string) string {
 		return reason
 	}
 	switch reason {
-	case "auth failed", "network failed", "upstream non-success", "unsupported model", "upstream decode error", "upstream response not completed":
+	case "auth failed", "network failed", "discovery unavailable", "model not discovered", "upstream non-success", "unsupported model", "upstream decode error", "upstream response not completed":
 		return reason
 	default:
 		return "upstream non-success"

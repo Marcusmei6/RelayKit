@@ -248,7 +248,7 @@ func TestModels(t *testing.T) {
 	}
 }
 
-func TestModelsProbesKeyFileProvidersAndHidesUnhealthyModels(t *testing.T) {
+func TestModelsProbesKeyFileProvidersAndHidesOnlyRouteFailures(t *testing.T) {
 	healthyUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -323,31 +323,37 @@ func TestModelsProbesKeyFileProvidersAndHidesUnhealthyModels(t *testing.T) {
 				ID     string `json:"id"`
 				Reason string `json:"reason"`
 			} `json:"hidden"`
+			TemporarilyUnavailable []struct {
+				ID     string `json:"id"`
+				Reason string `json:"reason"`
+			} `json:"temporarily_unavailable"`
 		} `json:"model_health"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode models body err = %v", err)
 	}
 	for _, model := range body.Data {
-		if model.ID == "public/slow" || model.ID == "public/route-503" {
-			t.Fatalf("unhealthy model should be hidden from data: %s", got)
+		if model.ID == "public/route-503" {
+			t.Fatalf("route failure should be hidden from data: %s", got)
 		}
 	}
-	if !strings.Contains(got, `"probed":true`) || !strings.Contains(got, `"unhealthy":2`) {
+	if !strings.Contains(got, `"probed":true`) || !strings.Contains(got, `"unhealthy":1`) {
 		t.Fatalf("redacted health counts missing: %s", got)
 	}
 	foundSlow := false
 	foundRoute503 := false
 	for _, model := range body.ModelHealth.Hidden {
-		if model.ID == "public/slow" && model.Reason == "upstream non-success (HTTP 504)" {
-			foundSlow = true
-		}
 		if model.ID == "public/route-503" && model.Reason == "upstream non-success (HTTP 503)" {
 			foundRoute503 = true
 		}
 	}
+	for _, model := range body.ModelHealth.TemporarilyUnavailable {
+		if model.ID == "public/slow" && model.Reason == "upstream non-success (HTTP 504)" {
+			foundSlow = true
+		}
+	}
 	if !foundSlow || !foundRoute503 {
-		t.Fatalf("hidden model reason missing: %s", got)
+		t.Fatalf("model health reason missing: %s", got)
 	}
 }
 
@@ -376,6 +382,195 @@ func TestModelsHidesDisabledProviders(t *testing.T) {
 	if !strings.Contains(got, "visible-model") {
 		t.Fatalf("enabled model missing: %s", got)
 	}
+}
+
+func TestCatalogP0KeepsConfiguredModelVisibleOnDiscoveryAuthFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("unexpected upstream request %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeCatalogP0Config(t, upstream.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := catalogP0Models(t, h)
+	if !catalogP0ContainsID(root["data"], "public/catalog") {
+		t.Fatalf("configured model disappeared: %#v", root)
+	}
+	health := catalogP0Health(t, root)
+	if !catalogP0ContainsID(health["configured"], "public/catalog") || !catalogP0ContainsID(health["temporarily_unavailable"], "public/catalog") {
+		t.Fatalf("missing configured/discovery-failure state: %#v", health)
+	}
+	if catalogP0ContainsID(health["route_reachable"], "public/catalog") || catalogP0ContainsID(health["hidden"], "public/catalog") {
+		t.Fatalf("discovery auth failure implied route failure: %#v", health)
+	}
+	for _, forbidden := range []string{upstream.URL, "catalog-p0-token", "catalog-p0-key"} {
+		if strings.Contains(string(mustJSON(root)), forbidden) {
+			t.Fatalf("catalog leaked %q: %#v", forbidden, root)
+		}
+	}
+}
+
+func TestCatalogP0UsesMatchingLastKnownGoodAndMarksStaleFingerprint(t *testing.T) {
+	var discoveryUnauthorized atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			if discoveryUnauthorized.Load() {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"catalog-upstream"}]}`))
+		case "/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		default:
+			t.Fatalf("unexpected upstream request %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	h, err := New(writeCatalogP0Config(t, upstream.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := catalogP0Health(t, catalogP0Models(t, h))
+	if !catalogP0ContainsID(first["route_reachable"], "public/catalog") || !catalogP0ContainsID(first["last_known_good"], "public/catalog") {
+		t.Fatalf("successful route did not create reachable LKG: %#v", first)
+	}
+	discoveryUnauthorized.Store(true)
+	matchingRoot := catalogP0Models(t, h)
+	matching := catalogP0Health(t, matchingRoot)
+	if !catalogP0ContainsID(matchingRoot["data"], "public/catalog") || catalogP0ContainsID(matching["route_reachable"], "public/catalog") || catalogP0LastKnownGoodStale(t, matching["last_known_good"], "public/catalog") {
+		t.Fatalf("matching fingerprint did not expose only LKG visibility: %#v", matching)
+	}
+}
+
+func TestCatalogP0LastKnownGoodMarksDifferentFingerprintStale(t *testing.T) {
+	state := newCatalogState()
+	state.markRouteReachable("catalog", "public/catalog", "first-fingerprint", time.Unix(1, 0))
+	snapshot, ok := state.lastKnownGood("catalog", "public/catalog", "second-fingerprint")
+	if !ok || !snapshot.Stale || snapshot.ConfigFingerprint != "first-fingerprint" || !snapshot.Timestamp.Equal(time.Unix(1, 0)) {
+		t.Fatalf("stale snapshot = %#v, found=%v", snapshot, ok)
+	}
+}
+
+func TestCatalogP0ProviderTestMarksExactModelReachable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			w.WriteHeader(http.StatusForbidden)
+		case "/responses":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_catalog","object":"response","model":"catalog-upstream","status":"completed","output":[]}`))
+		default:
+			t.Fatalf("unexpected upstream request %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "provider.key")
+	if err := os.WriteFile(keyPath, []byte("catalog-p0-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "providers.json")
+	cfg := `{"providers":[{"id":"catalog","name":"Catalog","base_url":"` + upstream.URL + `","api_format":"openai_responses","credential_ref":{"kind":"key_file","value":"` + keyPath + `"},"models":[{"id":"public/catalog","upstream_model":"catalog-upstream"}]}]}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewWithUsageLogAndCredentials(cfgPath, "", map[string]string{keyPath: "catalog-p0-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/_relaykit/provider-test", strings.NewReader(`{"provider_id":"catalog","model_id":"public/catalog"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("provider test = %d %s", rec.Code, rec.Body.String())
+	}
+	health := catalogP0Health(t, catalogP0Models(t, h))
+	if !catalogP0ContainsID(health["route_reachable"], "public/catalog") {
+		t.Fatalf("provider test reachability missing: %#v", health)
+	}
+}
+
+func writeCatalogP0Config(t *testing.T, baseURL string) string {
+	t.Helper()
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "provider.key")
+	if err := os.WriteFile(keyPath, []byte("catalog-p0-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "providers.json")
+	content := `{"providers":[{"id":"catalog","name":"Catalog","base_url":"` + baseURL + `","api_format":"openai_chat","credential_ref":{"kind":"key_file","value":"` + keyPath + `"},"models":[{"id":"public/catalog","upstream_model":"catalog-upstream"}]}]}`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func catalogP0Models(t *testing.T, h http.Handler) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("catalog response = %d %s", rec.Code, rec.Body.String())
+	}
+	var root map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &root); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func catalogP0Health(t *testing.T, root map[string]any) map[string]any {
+	t.Helper()
+	health, ok := root["model_health"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing model health: %#v", root)
+	}
+	return health
+}
+
+func catalogP0ContainsID(value any, want string) bool {
+	items, _ := value.([]any)
+	for _, item := range items {
+		entry, _ := item.(map[string]any)
+		if entry["id"] == want {
+			return true
+		}
+	}
+	return false
+}
+
+func catalogP0LastKnownGoodStale(t *testing.T, value any, want string) bool {
+	t.Helper()
+	items, _ := value.([]any)
+	for _, item := range items {
+		entry, _ := item.(map[string]any)
+		if entry["id"] == want {
+			stale, ok := entry["stale"].(bool)
+			if !ok {
+				t.Fatalf("LKG stale flag missing: %#v", entry)
+			}
+			if _, ok := entry["timestamp"].(string); !ok {
+				t.Fatalf("LKG timestamp missing: %#v", entry)
+			}
+			if _, ok := entry["config_fingerprint"].(string); !ok {
+				t.Fatalf("LKG fingerprint missing: %#v", entry)
+			}
+			return stale
+		}
+	}
+	t.Fatalf("missing LKG for %q: %#v", want, value)
+	return false
 }
 
 func TestResponsesRequiresContentType(t *testing.T) {
