@@ -3,8 +3,10 @@ package codexconfig
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -163,6 +165,120 @@ enabled = true
 	}
 	if state.Target != target || state.Backup != result.BackupPath || state.Managed.ModelCatalogJSON != catalogPath {
 		t.Fatalf("state = %+v", state)
+	}
+}
+
+func TestEnableManagedOpenAIBaseURLDefaultsAndRestoresCustomLoopback(t *testing.T) {
+	t.Run("default remains the established managed URL", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "config.toml")
+		state := filepath.Join(dir, "state.json")
+		if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: filepath.Join(dir, "catalog.json"), StatePath: state}); err != nil {
+			t.Fatal(err)
+		}
+		if got := loadTOML(t, target).Get("openai_base_url"); got != managedOpenAIBaseURL {
+			t.Fatalf("openai_base_url = %#v", got)
+		}
+		stateBody, err := os.ReadFile(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var managed managedState
+		if err := json.Unmarshal(stateBody, &managed); err != nil {
+			t.Fatal(err)
+		}
+		if managed.Managed.OpenAIBaseURL != managedOpenAIBaseURL {
+			t.Fatalf("managed state base URL = %q", managed.Managed.OpenAIBaseURL)
+		}
+	})
+
+	t.Run("custom loopback is recorded and restored by parent-loss recovery", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "config.toml")
+		state := filepath.Join(dir, "state.json")
+		original := []byte("model = \"keep\"\nopenai_base_url = \"http://127.0.0.1:11434/v1\"\n")
+		if err := os.WriteFile(target, original, 0600); err != nil {
+			t.Fatal(err)
+		}
+		baseURL := randomLoopbackBaseURL(t)
+		if _, err := Enable(EnableOptions{
+			TargetPath:           target,
+			CatalogPath:          filepath.Join(dir, "catalog.json"),
+			StatePath:            state,
+			ManagedOpenAIBaseURL: baseURL,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got := loadTOML(t, target).Get("openai_base_url"); got != baseURL {
+			t.Fatalf("openai_base_url = %#v", got)
+		}
+		stateBody, err := os.ReadFile(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var managed managedState
+		if err := json.Unmarshal(stateBody, &managed); err != nil {
+			t.Fatal(err)
+		}
+		if managed.Managed.OpenAIBaseURL != baseURL {
+			t.Fatalf("managed state base URL = %q", managed.Managed.OpenAIBaseURL)
+		}
+		decision, err := RecoveryDecisionForParentLoss(target, state)
+		if err != nil || decision != RecoveryShutdown {
+			t.Fatalf("decision=%q err=%v", decision, err)
+		}
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != string(original) {
+			t.Fatalf("original values not restored: %q, %v", got, err)
+		}
+	})
+}
+
+func TestEnableRejectsInvalidManagedOpenAIBaseURLWithoutLeak(t *testing.T) {
+	invalidURLs := []string{
+		"https://127.0.0.1:23456/v1",
+		"http://localhost:23456/v1",
+		"http://[::1]:23456/v1",
+		"http://user@127.0.0.1:23456/v1",
+		"http://127.0.0.1:23456/v1?token=secret",
+		"http://127.0.0.1:23456/v1#fragment",
+		"http://127.0.0.1:23456/v1/",
+		"http://127.0.0.1:1023/v1",
+		"http://127.0.0.1:65536/v1",
+		"http://127.0.0.1/v1",
+	}
+	for _, baseURL := range invalidURLs {
+		t.Run(baseURL, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "config.toml")
+			state := filepath.Join(dir, "state.json")
+			original := []byte("model = \"keep\"\n")
+			if err := os.WriteFile(target, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Enable(EnableOptions{
+				TargetPath:           target,
+				CatalogPath:          filepath.Join(dir, "catalog.json"),
+				StatePath:            state,
+				ManagedOpenAIBaseURL: baseURL,
+			})
+			if err == nil || err.Error() != "invalid managed base URL" {
+				t.Fatalf("Enable error = %v", err)
+			}
+			if strings.Contains(err.Error(), baseURL) {
+				t.Fatalf("error leaked managed URL: %q", err)
+			}
+			got, readErr := os.ReadFile(target)
+			if readErr != nil || string(got) != string(original) {
+				t.Fatalf("target changed: %q, %v", got, readErr)
+			}
+			if _, statErr := os.Stat(state); !os.IsNotExist(statErr) {
+				t.Fatalf("state should not exist, stat err = %v", statErr)
+			}
+		})
 	}
 }
 
@@ -712,4 +828,17 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("%s mode = %04o, want %04o", path, got, want)
 	}
+}
+
+func randomLoopbackBaseURL(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return "http://127.0.0.1:" + strconv.Itoa(port) + "/v1"
 }

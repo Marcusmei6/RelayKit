@@ -138,6 +138,33 @@ func TestEnableAndDisableCodexConfigUseExplicitManagedState(t *testing.T) {
 	}
 }
 
+func TestEnableCodexConfigPassesCustomBaseURLWithoutOutputLeak(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	catalog := filepath.Join(dir, "catalog.json")
+	state := filepath.Join(dir, "state.json")
+	baseURL := "http://" + randomLoopbackAddress(t) + "/v1"
+	if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"enable-codex-config", "-target", target, "-catalog", catalog, "-state", state, "-base-url", baseURL}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("enable code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), baseURL) || strings.Contains(stderr.String(), baseURL) {
+		t.Fatalf("enable output leaked base URL: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	configured, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configured), "openai_base_url = "+strconv.Quote(baseURL)) {
+		t.Fatalf("configured target = %q", configured)
+	}
+}
+
 func TestDisableCodexConfigReportsRestoredPreviousValues(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "config.toml")
@@ -306,7 +333,8 @@ func TestGatewayParentLossRestoresManagedRouteBeforeStopping(t *testing.T) {
 	if err := os.WriteFile(target, original, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if code := run([]string{"enable-codex-config", "-target", target, "-catalog", filepath.Join(dir, "catalog.json"), "-state", state}, io.Discard, io.Discard); code != 0 {
+	managedBaseURL := "http://" + randomLoopbackAddress(t) + "/v1"
+	if code := run([]string{"enable-codex-config", "-target", target, "-catalog", filepath.Join(dir, "catalog.json"), "-state", state, "-base-url", managedBaseURL}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("could not create managed route")
 	}
 	configPath := writeGatewayConfig(t)

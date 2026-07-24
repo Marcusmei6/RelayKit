@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,9 +26,10 @@ type ActivationResult struct {
 }
 
 type EnableOptions struct {
-	TargetPath  string
-	CatalogPath string
-	StatePath   string
+	TargetPath           string
+	CatalogPath          string
+	StatePath            string
+	ManagedOpenAIBaseURL string
 }
 
 type EnableResult struct {
@@ -171,6 +173,10 @@ func Enable(options EnableOptions) (EnableResult, error) {
 		return EnableResult{}, fmt.Errorf("catalog path must be absolute")
 	}
 	catalogPath = filepath.Clean(catalogPath)
+	managedBaseURL, err := managedOpenAIBaseURLForEnable(options.ManagedOpenAIBaseURL)
+	if err != nil {
+		return EnableResult{}, err
+	}
 	if targetPath == statePath {
 		return EnableResult{}, fmt.Errorf("state path must differ from target path")
 	}
@@ -200,7 +206,7 @@ func Enable(options EnableOptions) (EnableResult, error) {
 		return EnableResult{}, err
 	}
 	merged, err := rewriteRootStringValues(original, tree, []rootStringUpdate{
-		{name: "openai_base_url", value: stringPointer(managedOpenAIBaseURL)},
+		{name: "openai_base_url", value: stringPointer(managedBaseURL)},
 		{name: "model_catalog_json", value: stringPointer(catalogPath)},
 	})
 	if err != nil {
@@ -230,7 +236,7 @@ func Enable(options EnableOptions) (EnableResult, error) {
 		Target:  targetPath,
 		Backup:  result.BackupPath,
 		Managed: managedValues{
-			OpenAIBaseURL:    managedOpenAIBaseURL,
+			OpenAIBaseURL:    managedBaseURL,
 			ModelCatalogJSON: catalogPath,
 		},
 		Original: originalValues,
@@ -666,6 +672,37 @@ func originalValuesForEnable(tree *toml.Tree, targetPath, statePath string) (ori
 	return originalValues{OpenAIBaseURL: baseURL, ModelCatalogJSON: catalog}, nil
 }
 
+func managedOpenAIBaseURLForEnable(value string) (string, error) {
+	if value == "" {
+		return managedOpenAIBaseURL, nil
+	}
+	if err := validateManagedOpenAIBaseURL(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func validateManagedOpenAIBaseURL(value string) error {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Path != "/v1" || parsed.RawPath != "" || parsed.Opaque != "" {
+		return fmt.Errorf("invalid managed base URL")
+	}
+	port := parsed.Port()
+	if parsed.Hostname() != "127.0.0.1" || port == "" || parsed.Host != "127.0.0.1:"+port {
+		return fmt.Errorf("invalid managed base URL")
+	}
+	for _, digit := range port {
+		if digit < '0' || digit > '9' {
+			return fmt.Errorf("invalid managed base URL")
+		}
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || strconv.Itoa(portNumber) != port || portNumber < 1024 || portNumber > 65535 {
+		return fmt.Errorf("invalid managed base URL")
+	}
+	return nil
+}
+
 func absolutePath(path, name string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -702,7 +739,7 @@ func readManagedState(path string) (managedState, error) {
 	if err := json.Unmarshal(body, &state); err != nil {
 		return managedState{}, fmt.Errorf("invalid RelayKit state")
 	}
-	if state.Version != stateVersion || state.Target == "" || state.Managed.OpenAIBaseURL != managedOpenAIBaseURL || !filepath.IsAbs(state.Managed.ModelCatalogJSON) {
+	if state.Version != stateVersion || state.Target == "" || validateManagedOpenAIBaseURL(state.Managed.OpenAIBaseURL) != nil || !filepath.IsAbs(state.Managed.ModelCatalogJSON) {
 		return managedState{}, fmt.Errorf("invalid RelayKit state")
 	}
 	return state, nil

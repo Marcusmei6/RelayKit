@@ -79,6 +79,7 @@ func enableCodexConfig(args []string, stdout, stderr io.Writer) int {
 	target := fs.String("target", "", "destination Codex config TOML path")
 	catalog := fs.String("catalog", "", "absolute RelayKit model catalog JSON path")
 	state := fs.String("state", "", "RelayKit managed-state JSON path")
+	baseURL := fs.String("base-url", "", "optional managed loopback OpenAI base URL")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -87,9 +88,10 @@ func enableCodexConfig(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	result, err := codexconfig.Enable(codexconfig.EnableOptions{
-		TargetPath:  *target,
-		CatalogPath: *catalog,
-		StatePath:   *state,
+		TargetPath:           *target,
+		CatalogPath:          *catalog,
+		StatePath:            *state,
+		ManagedOpenAIBaseURL: *baseURL,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "enable Codex config failed: %v\n", err)
