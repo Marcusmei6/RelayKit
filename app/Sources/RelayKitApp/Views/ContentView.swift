@@ -383,6 +383,10 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(secondaryText)
                 .lineLimit(1)
+            Text("Route safety: \(model.runtimeSafetyState.rawValue)")
+                .font(.caption2)
+                .foregroundStyle(secondaryText)
+                .lineLimit(1)
             Button(model.codexIntegrationHasManagedState ? "Disable RelayKit" : "Enable RelayKit") {
                 pendingCodexEnable = !model.codexIntegrationHasManagedState
                 showingCodexConfigConfirmation = true

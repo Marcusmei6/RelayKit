@@ -40,6 +40,7 @@ final class AppModel: ObservableObject {
     @Published var codexSourcePath = RelayKitPaths.codexConfigSourcePath()
     @Published var codexConnectionStatus = "target not set"
     @Published var gatewayStatus = "stopped"
+    @Published private(set) var runtimeSafetyState: RuntimeSafetyState = .disabled
     @Published var models: [RelayModel] = []
     @Published var gatewayModelHealth = GatewayModelHealth.empty
     @Published var localCatalog: LocalModelCatalog?
@@ -94,6 +95,8 @@ final class AppModel: ObservableObject {
     private var gatewayStartedAt: Date?
     private var officialAuthProcess: Process?
     private var usesSmokeModelHealthFixture = false
+    private var recoveryRestartInFlight = false
+    private var lastOfficialCatalog: Data?
 
     init() {
         let savedPath = UserDefaults.standard.string(forKey: "providerConfigPath")
@@ -110,6 +113,11 @@ final class AppModel: ObservableObject {
         refreshLaunchAtLoginStatus()
         refreshConfiguredProviders()
         loadOfficialAuthStateFromDisk()
+        gateway.onUnexpectedTermination = { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.recoverUnexpectedManagedGatewayExit()
+            }
+        }
     }
 
     func useTemporaryProviderConfigPath(_ path: String) {
@@ -134,6 +142,19 @@ final class AppModel: ObservableObject {
     }
 
     func startGatewayOnOrdinaryLaunch() async {
+        let managedRouteStatus = managedCodexRouteStatus()
+        if managedRouteStatus == "enabled" {
+            if await gatewayIsHealthy() {
+                applyRuntimeSafety(event: .startupManagedRouteHealthy)
+                message = "RelayKit managed route is protected."
+                return
+            }
+        } else if codexIntegrationHasManagedState, managedRouteStatus != "disabled" {
+            runtimeSafetyState = .atRisk
+            gatewayStatus = "stopped"
+            message = "RelayKit could not verify managed Codex settings. Resolve the integration before changing the route."
+            return
+        }
         guard storedGatewayConfigurationExists() else {
             gatewayStatus = "stopped"
             message = "RelayKit setup required: add a provider or connect Official."
@@ -154,15 +175,21 @@ final class AppModel: ObservableObject {
             message = error.localizedDescription
             return
         }
-        startGateway(officialCatalog: officialCatalog)
-        if gateway.isRunning {
-            await refreshModels(officialCatalog: officialCatalog)
+        if managedRouteStatus == "enabled" {
+            await beginManagedGatewayRecovery(event: .startupManagedRouteUnhealthy, officialCatalog: officialCatalog)
+        } else {
+            startGateway(officialCatalog: officialCatalog)
+            if gateway.isRunning {
+                await refreshModels(officialCatalog: officialCatalog)
+            }
         }
     }
 
     func startGateway(officialCatalog: Data? = nil) {
         do {
-            let runtimeConfig = try makeGatewayRuntimeConfig(officialCatalog: officialCatalog)
+            let resolvedOfficialCatalog = officialCatalog ?? (officialSnapshot.isConnected ? lastOfficialCatalog : nil)
+            lastOfficialCatalog = resolvedOfficialCatalog
+            let runtimeConfig = try makeGatewayRuntimeConfig(officialCatalog: resolvedOfficialCatalog)
             let credentialHandoff = try GatewayCredentialHandoff.encode(configData: runtimeConfig.data) { reference in
                 try KeychainCredentialStore.load(service: reference)
             }
@@ -171,7 +198,9 @@ final class AppModel: ObservableObject {
                 configPath: runtimeConfig.path,
                 usageLogPath: usageLogPath,
                 credentialHandoff: credentialHandoff,
-                parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier
+                parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
+                managedCodexTarget: RelayKitPaths.defaultCodexConfigPath(),
+                managedCodexState: RelayKitPaths.codexConfigStatePath()
             )
             gatewayStatus = "running"
             gatewayStartedAt = Date()
@@ -637,7 +666,7 @@ final class AppModel: ObservableObject {
     nonisolated private static func summarizeUsageOffMainThread(binaryPath: String, usageLogPath: String) async throws -> (rows: [UsageSummary], durationMs: Int) {
         try await Task.detached(priority: .utility) {
             let start = Date()
-            let output = try GatewayProcess().summarizeUsage(binaryPath: binaryPath, usageLogPath: usageLogPath)
+            let output = try GatewayProcess.summarizeUsage(binaryPath: binaryPath, usageLogPath: usageLogPath)
             let rows = try JSONDecoder().decode([UsageSummary].self, from: Data(output.utf8))
             let duration = Int(Date().timeIntervalSince(start) * 1000)
             return (rows, duration)
@@ -662,6 +691,12 @@ final class AppModel: ObservableObject {
             let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
             message = detail.isEmpty ? "RelayKit enabled for Codex. Restart Codex to load the updated route." : "\(detail) Restart Codex to load the updated route."
             refreshCodexConnectionStatus()
+            if await gatewayIsHealthy() {
+                recoveryRestartInFlight = false
+                applyRuntimeSafety(event: .startupManagedRouteHealthy)
+            } else {
+                await beginManagedGatewayRecovery(event: .managedRouteHealthFailed, officialCatalog: lastOfficialCatalog)
+            }
         } catch {
             message = gatewayFailureMessage(error)
         }
@@ -676,6 +711,8 @@ final class AppModel: ObservableObject {
             )
             let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
             message = detail.isEmpty ? "RelayKit disabled for Codex. Restart Codex to restore its previous configuration." : "\(detail) Restart Codex to restore its previous configuration."
+            recoveryRestartInFlight = false
+            applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: false))
             refreshCodexConnectionStatus()
         } catch {
             message = gatewayFailureMessage(error)
@@ -697,12 +734,15 @@ final class AppModel: ObservableObject {
                     target: RelayKitPaths.defaultCodexConfigPath(),
                     state: RelayKitPaths.codexConfigStatePath()
                 )
+                recoveryRestartInFlight = false
+                applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: false))
                 refreshCodexConnectionStatus()
                 return true
             case "drifted":
                 message = "Quit canceled: RelayKit could not safely restore managed Codex settings. Resolve the Codex integration status before quitting."
                 return false
             case "disabled":
+                applyRuntimeSafety(event: .intentionalShutdown)
                 return true
             default:
                 guard codexIntegrationHasManagedState else {
@@ -1148,6 +1188,105 @@ final class AppModel: ObservableObject {
             throw ProviderConfigError.invalid("providers array is required")
         }
         return !providers.isEmpty
+    }
+
+    private func recoverUnexpectedManagedGatewayExit() async {
+        gatewayStartedAt = nil
+        guard managedCodexRouteStatus() == "enabled" else {
+            runtimeSafetyState = codexIntegrationHasManagedState ? .atRisk : .disabled
+            gatewayStatus = "stopped"
+            message = runtimeSafetyState == .atRisk
+                ? "RelayKit helper stopped and managed Codex settings could not be verified."
+                : "Gateway stopped."
+            return
+        }
+        guard !recoveryRestartInFlight else {
+            await safelyDisableFailedManagedRoute()
+            return
+        }
+        await beginManagedGatewayRecovery(event: .helperExited, officialCatalog: lastOfficialCatalog)
+    }
+
+    private func beginManagedGatewayRecovery(event: RuntimeSafetyEvent, officialCatalog: Data?) async {
+        guard !recoveryRestartInFlight else {
+            await safelyDisableFailedManagedRoute()
+            return
+        }
+        recoveryRestartInFlight = true
+        let transition = applyRuntimeSafety(event: event)
+        guard transition.restartHelper else { return }
+        if gateway.isRunning {
+            gateway.stop()
+            gatewayStartedAt = nil
+        }
+        startGateway(officialCatalog: officialCatalog)
+        guard gateway.isRunning else {
+            await safelyDisableFailedManagedRoute()
+            return
+        }
+        await confirmManagedGatewayRecovery(officialCatalog: officialCatalog)
+    }
+
+    private func confirmManagedGatewayRecovery(officialCatalog: Data? = nil) async {
+        guard await gatewayIsHealthy() else {
+            await safelyDisableFailedManagedRoute()
+            return
+        }
+        recoveryRestartInFlight = false
+        applyRuntimeSafety(event: .helperRestartSucceeded)
+        message = "RelayKit managed route is protected."
+        await refreshModels(officialCatalog: officialCatalog)
+    }
+
+    private func safelyDisableFailedManagedRoute() async {
+        let transition = applyRuntimeSafety(event: .helperRestartFailed)
+        guard transition.disableManagedFields else { return }
+        do {
+            _ = try gateway.disableCodexConfig(
+                binaryPath: gatewayBinaryPath,
+                target: RelayKitPaths.defaultCodexConfigPath(),
+                state: RelayKitPaths.codexConfigStatePath()
+            )
+            let disabled = applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: gateway.isRunning))
+            if disabled.stopHelper {
+                gateway.stop()
+                gatewayStartedAt = nil
+            }
+            recoveryRestartInFlight = false
+            gatewayStatus = "stopped"
+            message = "Gateway recovery failed; RelayKit safely disabled its managed Codex route."
+            refreshCodexConnectionStatus()
+        } catch {
+            recoveryRestartInFlight = false
+            applyRuntimeSafety(event: .managedFieldsCouldNotBeRestored(helperIsRunning: gateway.isRunning))
+            gatewayStatus = gateway.isRunning ? "running" : "stopped"
+            message = "Gateway recovery failed; RelayKit kept managed Codex settings unchanged because restoration could not be verified."
+            refreshCodexConnectionStatus()
+        }
+    }
+
+    private func gatewayIsHealthy() async -> Bool {
+        do {
+            gatewayStatus = try await client.health()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func managedCodexRouteStatus() -> String? {
+        try? gateway.codexConfigStatus(
+            binaryPath: gatewayBinaryPath,
+            target: RelayKitPaths.defaultCodexConfigPath(),
+            state: RelayKitPaths.codexConfigStatePath()
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @discardableResult
+    private func applyRuntimeSafety(event: RuntimeSafetyEvent) -> RuntimeSafetyTransition {
+        let transition = RuntimeSafetyReducer.transition(from: runtimeSafetyState, event: event)
+        runtimeSafetyState = transition.state
+        return transition
     }
 
     private func gatewayFailureMessage(_ error: Error) -> String {

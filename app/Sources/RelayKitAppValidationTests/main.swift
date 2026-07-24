@@ -686,6 +686,138 @@ func expectCodexCatalogMerge() throws {
         CodexModelCatalog.gatewayModelsNeedRetry(healthyHealth) {
         fatalError("Codex catalog gateway health retry decision is incorrect")
     }
+
+    let sixStateGateway = Data(#"""
+    {
+      "data": [
+        {"id": "provider/reachable"},
+        {"id": "provider/discovered"},
+        {"id": "provider/temporary"},
+        {"id": "provider/lkg"},
+        {"id": "provider/stale"},
+        {"id": "provider/hidden"}
+      ],
+      "model_health": {
+        "configured": [
+          {"id": "provider/reachable"}, {"id": "provider/discovered"}, {"id": "provider/temporary"},
+          {"id": "provider/lkg"}, {"id": "provider/stale"}, {"id": "provider/hidden"}
+        ],
+        "discovered": [{"id": "provider/reachable"}, {"id": "provider/discovered"}],
+        "route_reachable": [{"id": "provider/reachable"}],
+        "temporarily_unavailable": [{"id": "provider/temporary", "reason": "auth failed"}],
+        "hidden": [{"id": "provider/hidden", "reason": "route unavailable"}],
+        "last_known_good": [
+          {"id": "provider/lkg", "timestamp": "2026-07-24T00:00:00Z", "config_fingerprint": "matching", "stale": false},
+          {"id": "provider/stale", "timestamp": "2026-07-24T00:00:00Z", "config_fingerprint": "old", "stale": true}
+        ]
+      }
+    }
+    """#.utf8)
+    let sixState = try CodexModelCatalog.merge(officialCatalog: official, gatewayModels: sixStateGateway, includeOfficialModels: false)
+    let sixStateRoot = try JSONSerialization.jsonObject(with: sixState) as? [String: Any]
+    let sixStateModels = sixStateRoot?["models"] as? [[String: Any]] ?? []
+    let sixStateByID = Dictionary(uniqueKeysWithValues: sixStateModels.compactMap { model in
+        (model["slug"] as? String).map { ($0, model) }
+    })
+    guard sixStateByID.values.allSatisfy({ $0["status"] as? String == "ready" }),
+          sixStateByID["provider/reachable"]?["relaykit_availability"] as? String == "route_reachable",
+          sixStateByID["provider/discovered"]?["relaykit_availability"] as? String == "configured",
+          sixStateByID["provider/temporary"]?["relaykit_availability"] as? String == "temporarily_unavailable",
+          sixStateByID["provider/lkg"]?["relaykit_availability"] as? String == "last_known_good",
+          sixStateByID["provider/stale"]?["relaykit_availability"] as? String == "configured",
+          sixStateByID["provider/hidden"] == nil,
+          (sixStateByID["provider/lkg"]?["description"] as? String)?.contains("last known good") == true,
+          !(sixStateByID["provider/temporary"]?["description"] as? String ?? "").contains("auth failed") else {
+        fatalError("catalog six-state/LKG projection lost configured visibility or claimed stale availability")
+    }
+}
+
+func expectRuntimeSafetyStateContracts() {
+    let startupHealthy = RuntimeSafetyReducer.transition(from: .disabled, event: .startupManagedRouteHealthy)
+    guard startupHealthy.state == .protected, !startupHealthy.restartHelper, !startupHealthy.disableManagedFields, !startupHealthy.stopHelper else {
+        fatalError("healthy stale-enabled startup must adopt the helper as Protected without churn")
+    }
+
+    let startupUnhealthy = RuntimeSafetyReducer.transition(from: .disabled, event: .startupManagedRouteUnhealthy)
+    guard startupUnhealthy.state == .recovering, startupUnhealthy.restartHelper, !startupUnhealthy.disableManagedFields, !startupUnhealthy.stopHelper else {
+        fatalError("unhealthy stale-enabled startup must begin exactly one bounded recovery")
+    }
+
+    let unexpectedExit = RuntimeSafetyReducer.transition(from: .protected, event: .helperExited)
+    guard unexpectedExit.state == .recovering, unexpectedExit.restartHelper, !unexpectedExit.disableManagedFields, !unexpectedExit.stopHelper else {
+        fatalError("unexpected managed helper exit must request one recovery restart")
+    }
+
+    let restartSuccess = RuntimeSafetyReducer.transition(from: .recovering, event: .helperRestartSucceeded)
+    guard restartSuccess.state == .protected, !restartSuccess.restartHelper, !restartSuccess.disableManagedFields, !restartSuccess.stopHelper else {
+        fatalError("healthy recovery restart must return to Protected")
+    }
+
+    let retryFailure = RuntimeSafetyReducer.transition(from: .recovering, event: .helperRestartFailed)
+    guard retryFailure.state == .recovering, !retryFailure.restartHelper, retryFailure.disableManagedFields, !retryFailure.stopHelper else {
+        fatalError("failed bounded retry must request managed field restoration")
+    }
+
+    let disableSuccess = RuntimeSafetyReducer.transition(from: retryFailure.state, event: .managedFieldsDisabled(helperIsRunning: true))
+    guard disableSuccess.state == .disabled, !disableSuccess.restartHelper, !disableSuccess.disableManagedFields, disableSuccess.stopHelper else {
+        fatalError("failed retry plus safe disable must become Disabled")
+    }
+
+    let disableFailure = RuntimeSafetyReducer.transition(from: retryFailure.state, event: .managedFieldsCouldNotBeRestored(helperIsRunning: true))
+    guard disableFailure.state == .atRisk, !disableFailure.restartHelper, !disableFailure.disableManagedFields, !disableFailure.stopHelper else {
+        fatalError("failed restore must remain At risk instead of claiming a dead route is safe")
+    }
+
+    let activationHealthFailure = RuntimeSafetyReducer.transition(from: .protected, event: .managedRouteHealthFailed)
+    guard activationHealthFailure.state == .recovering, activationHealthFailure.restartHelper, !activationHealthFailure.disableManagedFields else {
+        fatalError("managed route health failure must enter the same bounded recovery restart path")
+    }
+
+    let intentionalShutdown = RuntimeSafetyReducer.transition(from: .protected, event: .intentionalShutdown)
+    guard intentionalShutdown.state == .protected, !intentionalShutdown.restartHelper, !intentionalShutdown.disableManagedFields, !intentionalShutdown.stopHelper else {
+        fatalError("intentional shutdown must never request a helper restart")
+    }
+}
+
+func expectRuntimeSafetyLifecycleSourceContracts() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let gateway = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/GatewayProcess.swift"), encoding: .utf8)
+    let bundledVerifier = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/BundledGatewayVerifier.swift"), encoding: .utf8)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+
+    for required in [
+        "@Published private(set) var runtimeSafetyState: RuntimeSafetyState = .disabled",
+        "await beginManagedGatewayRecovery(event: .managedRouteHealthFailed, officialCatalog: lastOfficialCatalog)",
+        "await beginManagedGatewayRecovery(event: .helperExited, officialCatalog: lastOfficialCatalog)",
+        "if gateway.isRunning {\n            gateway.stop()",
+        "startGateway(officialCatalog: officialCatalog)",
+        "let disabled = applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: gateway.isRunning))",
+        "if disabled.stopHelper {\n                gateway.stop()",
+        "gatewayStatus = gateway.isRunning ? \"running\" : \"stopped\"",
+        "lastOfficialCatalog",
+    ] {
+        if !appModel.contains(required) { fatalError("runtime safety lifecycle contract missing \(required)") }
+    }
+    if appModel.contains("startupRouteReachableButUnowned") {
+        fatalError("startup health contract must retain Protected adoption without an unowned-listener expansion")
+    }
+    for required in ["@MainActor\nfinal class GatewayProcess", "-managed-codex-target", "-managed-codex-state", "Task { @MainActor", "process.terminationHandler = nil", "nonisolated static func summarizeUsage", "nonisolated static func runGatewayCommand", "nonisolated static func appDirectory", "GatewayTerminationRelay: @unchecked Sendable"] {
+        if !gateway.contains(required) { fatalError("gateway lifecycle safety contract missing \(required)") }
+    }
+    if gateway.contains("final class GatewayProcess: @unchecked Sendable") || !bundledVerifier.contains("@MainActor\nenum BundledGatewayVerifier") {
+        fatalError("GatewayProcess actor isolation or bundled verifier actor contract regressed")
+    }
+    guard let stopStart = gateway.range(of: "func stop()"),
+          let stopEnd = gateway.range(of: "func enableCodexConfig", range: stopStart.upperBound..<gateway.endIndex),
+          let detach = gateway.range(of: "process.terminationHandler = nil", range: stopStart.upperBound..<stopEnd.lowerBound),
+          let terminate = gateway.range(of: "terminateAndReap(process)", range: detach.upperBound..<stopEnd.lowerBound),
+          detach.lowerBound < terminate.lowerBound else {
+        fatalError("intentional gateway stop must detach terminationHandler before stopping")
+    }
+    if !content.contains("Route safety: \\(model.runtimeSafetyState.rawValue)") {
+        fatalError("Codex surface must show the observable runtime safety state")
+    }
 }
 
 func expectCodexCatalogProcessDrainContract() throws {
@@ -1675,6 +1807,8 @@ try expectProviderModalAccessibilityContract()
 expectProviderDraftRejectsCredentialValue()
 try expectLocalCatalogSummary()
 try expectCodexCatalogMerge()
+expectRuntimeSafetyStateContracts()
+try expectRuntimeSafetyLifecycleSourceContracts()
 try expectCodexCatalogProcessDrainContract()
 try expectCredentialRefContract()
 try expectCapabilityContract()

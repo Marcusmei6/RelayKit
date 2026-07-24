@@ -51,14 +51,11 @@ public enum CodexModelCatalog {
         }
         let template = compatibleOfficial[0]
         let officialIDs = includeOfficialModels ? Set(official.compactMap { $0["slug"] as? String }) : []
-        let hiddenIDs = Set(
-            ((gatewayRoot["model_health"] as? [String: Any])?["hidden"] as? [[String: Any]] ?? [])
-                .compactMap { $0["id"] as? String }
-        )
+        let health = GatewayHealthProjection(root: gatewayRoot["model_health"] as? [String: Any])
         var addedIDs = Set<String>()
         var merged = includeOfficialModels ? compatibleOfficial : []
         for gatewayModel in models {
-            guard let id = clean(gatewayModel["id"] as? String), !hiddenIDs.contains(id) else { continue }
+            guard let id = clean(gatewayModel["id"] as? String), !health.hidden.contains(id) else { continue }
             guard addedIDs.insert(id).inserted else {
                 throw CodexModelCatalogError.duplicateGatewayModel(id)
             }
@@ -66,7 +63,8 @@ public enum CodexModelCatalog {
             var model = template
             model["slug"] = id
             model["display_name"] = clean(gatewayModel["display_name"] as? String) ?? id
-            model["description"] = "RelayKit local route."
+            let availability = health.availability(for: id)
+            model["description"] = availability.description
             model["source"] = "relaykit"
             model["owned_by"] = clean(gatewayModel["owned_by"] as? String) ?? "relaykit"
             model["visibility"] = "list"
@@ -75,6 +73,7 @@ public enum CodexModelCatalog {
             model["protocol"] = "responses"
             model["transport"] = "local_relaykit"
             model["status"] = "ready"
+            model["relaykit_availability"] = availability.value
             model["object"] = "model"
             model["supported_in_api"] = true
             model["upgrade"] = NSNull()
@@ -91,5 +90,61 @@ public enum CodexModelCatalog {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private struct GatewayHealthProjection {
+    struct Availability {
+        let value: String
+        let description: String
+    }
+
+    let configured: Set<String>
+    let discovered: Set<String>
+    let routeReachable: Set<String>
+    let temporarilyUnavailable: Set<String>
+    let hidden: Set<String>
+    let nonStaleLastKnownGood: Set<String>
+
+    init(root: [String: Any]?) {
+        configured = Self.ids(root?["configured"])
+        discovered = Self.ids(root?["discovered"])
+        routeReachable = Self.ids(root?["route_reachable"])
+        temporarilyUnavailable = Self.ids(root?["temporarily_unavailable"])
+        hidden = Self.ids(root?["hidden"])
+        nonStaleLastKnownGood = Set(
+            (root?["last_known_good"] as? [[String: Any]] ?? []).compactMap { entry in
+                guard let id = entry["id"] as? String,
+                      !(entry["stale"] as? Bool ?? true),
+                      entry["timestamp"] as? String != nil,
+                      entry["config_fingerprint"] as? String != nil else {
+                    return nil
+                }
+                return id
+            }
+        )
+    }
+
+    func availability(for id: String) -> Availability {
+        if routeReachable.contains(id) {
+            return Availability(value: "route_reachable", description: "RelayKit local route.")
+        }
+        if nonStaleLastKnownGood.contains(id) {
+            return Availability(value: "last_known_good", description: "RelayKit local route; last known good availability.")
+        }
+        if temporarilyUnavailable.contains(id) {
+            return Availability(value: "temporarily_unavailable", description: "RelayKit local route; availability is temporarily unavailable.")
+        }
+        if discovered.contains(id) {
+            return Availability(value: "configured", description: "RelayKit local route; reachability is not verified.")
+        }
+        if configured.contains(id) {
+            return Availability(value: "configured", description: "RelayKit local route; availability is not verified.")
+        }
+        return Availability(value: "route_reachable", description: "RelayKit local route.")
+    }
+
+    private static func ids(_ value: Any?) -> Set<String> {
+        Set((value as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
     }
 }

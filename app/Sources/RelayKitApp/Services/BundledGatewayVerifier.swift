@@ -1,6 +1,7 @@
 import Foundation
 import RelayKitCore
 
+@MainActor
 enum BundledGatewayVerifier {
     static func run(arguments: [String]) -> Int32 {
         let gateway = GatewayProcess()
