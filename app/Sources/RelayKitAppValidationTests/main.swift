@@ -779,6 +779,128 @@ func expectRuntimeSafetyStateContracts() {
     }
 }
 
+func expectRuntimeSafetyEndpointContract() throws {
+    let product = try RelayKitRuntimeEndpoint.resolve(environment: [:])
+    guard product.port == 19777,
+          product.listenAddress == "127.0.0.1:19777",
+          product.httpBaseURL.absoluteString == "http://127.0.0.1:19777",
+          product.codexBaseURL.absoluteString == "http://127.0.0.1:19777/v1" else {
+        fatalError("default runtime endpoint must remain exactly 127.0.0.1:19777")
+    }
+
+    let isolated = try RelayKitRuntimeEndpoint.resolve(environment: [
+        "RELAYKIT_RUNTIME_SAFETY_TEST": "1",
+        "RELAYKIT_RUNTIME_SAFETY_PORT": "19790",
+    ])
+    guard isolated.port == 19790,
+          isolated.listenAddress == "127.0.0.1:19790",
+          isolated.httpBaseURL.absoluteString == "http://127.0.0.1:19790",
+          isolated.codexBaseURL.absoluteString == "http://127.0.0.1:19790/v1" else {
+        fatalError("valid runtime safety endpoint did not remain loopback-only")
+    }
+
+    let ignoredTestEnvironment = try RelayKitRuntimeEndpoint.resolve(environment: [
+        "RELAYKIT_RUNTIME_SAFETY_TEST": "0",
+        "RELAYKIT_RUNTIME_SAFETY_PORT": "18787",
+    ])
+    if ignoredTestEnvironment != product {
+        fatalError("runtime endpoint override must require RELAYKIT_RUNTIME_SAFETY_TEST=1")
+    }
+
+    let invalidEnvironments: [[String: String]] = [
+        ["RELAYKIT_RUNTIME_SAFETY_TEST": "1"],
+        ["RELAYKIT_RUNTIME_SAFETY_TEST": "1", "RELAYKIT_RUNTIME_SAFETY_PORT": "not-a-port"],
+        ["RELAYKIT_RUNTIME_SAFETY_TEST": "1", "RELAYKIT_RUNTIME_SAFETY_PORT": "1023"],
+        ["RELAYKIT_RUNTIME_SAFETY_TEST": "1", "RELAYKIT_RUNTIME_SAFETY_PORT": "65536"],
+        ["RELAYKIT_RUNTIME_SAFETY_TEST": "1", "RELAYKIT_RUNTIME_SAFETY_PORT": "18787"],
+        ["RELAYKIT_RUNTIME_SAFETY_TEST": "1", "RELAYKIT_RUNTIME_SAFETY_PORT": "19777"],
+    ]
+    for environment in invalidEnvironments {
+        do {
+            _ = try RelayKitRuntimeEndpoint.resolve(environment: environment)
+            fatalError("invalid runtime safety endpoint was accepted: \(environment)")
+        } catch {
+            let message = error.localizedDescription
+            if message != "RelayKit runtime safety test endpoint is invalid." ||
+                environment.values.contains(where: message.contains) {
+                fatalError("runtime safety endpoint error must fail closed without leaking input: \(message)")
+            }
+        }
+    }
+
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let endpoint = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitCore/RelayKitRuntimeEndpoint.swift"), encoding: .utf8)
+    let gateway = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/GatewayProcess.swift"), encoding: .utf8)
+    let client = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/GatewayClient.swift"), encoding: .utf8)
+    let verifier = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/BundledGatewayVerifier.swift"), encoding: .utf8)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    let app = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift"), encoding: .utf8)
+
+    for required in [
+        "RELAYKIT_RUNTIME_SAFETY_TEST",
+        "RELAYKIT_RUNTIME_SAFETY_PORT",
+        "static let productPort = 19777",
+        "static let host = \"127.0.0.1\"",
+        "guard environment[\"RELAYKIT_RUNTIME_SAFETY_TEST\"] == \"1\" else",
+        "return product",
+        "(1024...65535).contains(port)",
+        "port != 18787",
+        "port != productPort",
+        "RelayKit runtime safety test endpoint is invalid.",
+        "var listenAddress: String",
+        "var httpBaseURL: URL",
+        "var codexBaseURL: URL",
+    ] {
+        if !endpoint.contains(required) {
+            fatalError("runtime endpoint resolver contract missing \(required)")
+        }
+    }
+    for forbidden in ["RELAYKIT_RUNTIME_SAFETY_HOST", "RELAYKIT_RUNTIME_SAFETY_BASE_URL", "URLComponents"] {
+        if endpoint.contains(forbidden) {
+            fatalError("runtime endpoint resolver must not accept a configurable host or base URL: \(forbidden)")
+        }
+    }
+    for required in ["endpoint.listenAddress", "-base-url", "endpoint.codexBaseURL.absoluteString"] {
+        if !gateway.contains(required) {
+            fatalError("gateway endpoint contract missing \(required)")
+        }
+    }
+    for required in ["init(endpoint: RelayKitRuntimeEndpoint)", "endpoint.httpBaseURL"] {
+        if !client.contains(required) {
+            fatalError("gateway client endpoint contract missing \(required)")
+        }
+    }
+    for required in ["try RelayKitRuntimeEndpoint.resolve()", "endpoint.httpBaseURL"] {
+        if !verifier.contains(required) {
+            fatalError("bundled verifier endpoint contract missing \(required)")
+        }
+    }
+    for required in ["let runtimeEndpoint: RelayKitRuntimeEndpoint", "init(endpoint: RelayKitRuntimeEndpoint)", "GatewayProcess(endpoint: endpoint)", "GatewayClient(endpoint: endpoint)", "runtimeEndpoint.listenAddress"] {
+        if !appModel.contains(required) {
+            fatalError("AppModel endpoint contract missing \(required)")
+        }
+    }
+    for required in ["let endpoint: RelayKitRuntimeEndpoint", "try RelayKitRuntimeEndpoint.resolve()", "RelayKit runtime safety test endpoint is invalid.", "exit(2)", "RelayKitApp(endpoint: endpoint)", "model.runtimeEndpoint.listenAddress"] {
+        if !app.contains(required) {
+            fatalError("App entrypoint fail-closed contract missing \(required)")
+        }
+    }
+    if appModel.contains(".product") || appModel.contains("RelayKitRuntimeEndpoint.resolve()") || app.contains("AppModel()") {
+        fatalError("invalid runtime endpoint must not construct a product fallback AppModel, client, or gateway")
+    }
+    for required in ["model.runtimeEndpoint.port", "model.runtimeEndpoint.listenAddress"] {
+        if !content.contains(required) {
+            fatalError("port label endpoint contract missing \(required)")
+        }
+    }
+    for source in [gateway, client, verifier, appModel, content, app] {
+        if source.contains("19777") {
+            fatalError("runtime endpoint must not retain a split-brain 19777 hardcode")
+        }
+    }
+}
+
 func expectRuntimeSafetyLifecycleSourceContracts() throws {
     let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
@@ -1615,7 +1737,7 @@ func expectSignedBetaAppContracts() throws {
     if appModel.components(separatedBy: "reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)").count - 1 < 2 {
         fatalError("Official status refresh and explicit disconnect must both reconcile the running gateway")
     }
-    guard let initializerStart = appModel.range(of: "    init() {"),
+    guard let initializerStart = appModel.range(of: "    init(endpoint: RelayKitRuntimeEndpoint) {"),
           let initializerEnd = appModel.range(of: "    func useTemporaryProviderConfigPath", range: initializerStart.upperBound..<appModel.endIndex) else {
         fatalError("AppModel initializer contract is missing")
     }
@@ -1808,6 +1930,7 @@ expectProviderDraftRejectsCredentialValue()
 try expectLocalCatalogSummary()
 try expectCodexCatalogMerge()
 expectRuntimeSafetyStateContracts()
+try expectRuntimeSafetyEndpointContract()
 try expectRuntimeSafetyLifecycleSourceContracts()
 try expectCodexCatalogProcessDrainContract()
 try expectCredentialRefContract()

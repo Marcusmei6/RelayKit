@@ -6,7 +6,7 @@ import SwiftUI
 @main
 @MainActor
 final class RelayKitApp: NSObject, NSApplicationDelegate {
-    private let model = AppModel()
+    private let model: AppModel
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
     private var smokeSections = Set<String>()
@@ -26,7 +26,19 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
     private var smokeQuitMenuVisible = false
     private var outsideClickMonitor: Any?
 
+    init(endpoint: RelayKitRuntimeEndpoint) {
+        model = AppModel(endpoint: endpoint)
+        super.init()
+    }
+
     static func main() {
+        let endpoint: RelayKitRuntimeEndpoint
+        do {
+            endpoint = try RelayKitRuntimeEndpoint.resolve()
+        } catch {
+            FileHandle.standardError.write(Data("RelayKit runtime safety test endpoint is invalid.\n".utf8))
+            exit(2)
+        }
         if CommandLine.arguments.contains("--verify-bundled-gateway") {
             exit(BundledGatewayVerifier.run(arguments: CommandLine.arguments))
         }
@@ -37,7 +49,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             exit(deleteFixtureKeychain(service: service, requiredPrefix: "relaykit.desktop-proof.provider-"))
         }
         let app = NSApplication.shared
-        let delegate = RelayKitApp()
+        let delegate = RelayKitApp(endpoint: endpoint)
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
         app.run()
@@ -531,7 +543,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
                 "developer_expanded": smokeSections.contains("settings-developer-expanded"),
                 "manual_proof_hidden_when_collapsed": smokeSections.contains("desktop-acceptance-manual-proof-entry-hidden"),
                 "manual_proof_visible_when_expanded": smokeSections.contains("desktop-acceptance-manual-proof-entry"),
-                "gateway_port": "127.0.0.1:19777",
+                "gateway_port": model.runtimeEndpoint.listenAddress,
                 "global_codex_activate_visible": false,
             ],
             "usage": [

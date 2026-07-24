@@ -237,7 +237,7 @@ struct ContentView: View {
             VStack(alignment: .trailing, spacing: 8) {
                 statusPill
                 HStack(spacing: 8) {
-                    headerMetric("Port", "19777")
+                    headerMetric("Port", "\(model.runtimeEndpoint.port)")
                     headerMetric("Models", "\(model.unifiedModels.count)")
                     headerMetric("Codex", model.codexConnectionIsConfigured ? "on" : "setup")
                 }
@@ -1289,7 +1289,7 @@ struct ContentView: View {
             SectionCard {
                 sectionEyebrow("GATEWAY")
                 settingsInfoRow(title: "Gateway status", subtitle: model.gatewayDisplayState.rawValue)
-                settingsInfoRow(title: "Port", subtitle: "127.0.0.1:19777")
+                settingsInfoRow(title: "Port", subtitle: model.runtimeEndpoint.listenAddress)
                 HStack(spacing: 8) {
                     Button("Start") { model.startGateway() }
                         .buttonStyle(ControlButtonStyle(prominent: true))

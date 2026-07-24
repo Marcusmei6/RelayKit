@@ -85,8 +85,9 @@ final class AppModel: ObservableObject {
         officialAuthProcess?.processIdentifier
     }
 
-    private let gateway = GatewayProcess()
-    private let client = GatewayClient()
+    let runtimeEndpoint: RelayKitRuntimeEndpoint
+    private let gateway: GatewayProcess
+    private let client: GatewayClient
     private var catalogClient = LocalCatalogClient()
     private var persistsProviderConfigPath = true
     private let settingsStore = AppSettingsStore()
@@ -98,7 +99,10 @@ final class AppModel: ObservableObject {
     private var recoveryRestartInFlight = false
     private var lastOfficialCatalog: Data?
 
-    init() {
+    init(endpoint: RelayKitRuntimeEndpoint) {
+        runtimeEndpoint = endpoint
+        gateway = GatewayProcess(endpoint: endpoint)
+        client = GatewayClient(endpoint: endpoint)
         let savedPath = UserDefaults.standard.string(forKey: "providerConfigPath")
         let resolvedProviderConfigPath = RelayKitPaths.resolvedProviderConfigPath(savedPath: savedPath)
         staleProviderConfigPreferenceRecovered = RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: savedPath)
@@ -204,7 +208,7 @@ final class AppModel: ObservableObject {
             )
             gatewayStatus = "running"
             gatewayStartedAt = Date()
-            message = "Gateway started on 127.0.0.1:19777"
+            message = "Gateway started on \(runtimeEndpoint.listenAddress)"
             refreshOfficialGatewayProjection()
         } catch {
             gatewayStatus = "error"
@@ -1137,7 +1141,7 @@ final class AppModel: ObservableObject {
         }
         guard gateway.isRunning else {
             let action = wasRunning ? "reload" : "start"
-            throw ProviderConfigError.invalid("Gateway could not \(action). Check the provider configuration, Keychain credential, and whether port 19777 is already in use.")
+            throw ProviderConfigError.invalid("Gateway could not \(action). Check the provider configuration, Keychain credential, and whether port \(runtimeEndpoint.port) is already in use.")
         }
     }
 
@@ -1293,7 +1297,7 @@ final class AppModel: ObservableObject {
         let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = detail.lowercased()
         if normalized.contains("address already in use") || normalized.contains("port") {
-            return "Gateway could not bind port 19777. Stop the conflicting local process, then try again."
+            return "Gateway could not bind port \(runtimeEndpoint.port). Stop the conflicting local process, then try again."
         }
         if normalized.contains("keychain") || normalized.contains("credential") {
             return "Gateway credential is unavailable. Update the provider credential in Keychain, then try again."

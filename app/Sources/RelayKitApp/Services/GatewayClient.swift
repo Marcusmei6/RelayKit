@@ -16,7 +16,11 @@ enum GatewayClientError: LocalizedError {
 }
 
 struct GatewayClient {
-    var baseURL = URL(string: "http://127.0.0.1:19777")!
+    let baseURL: URL
+
+    init(endpoint: RelayKitRuntimeEndpoint) {
+        baseURL = endpoint.httpBaseURL
+    }
 
     func health() async throws -> String {
         let (_, response) = try await URLSession.shared.data(from: baseURL.appending(path: "healthz"))

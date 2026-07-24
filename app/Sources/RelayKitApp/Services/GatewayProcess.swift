@@ -1,10 +1,16 @@
 import Darwin
 import Foundation
+import RelayKitCore
 
 @MainActor
 final class GatewayProcess {
     private var process: Process?
+    private let endpoint: RelayKitRuntimeEndpoint
     var onUnexpectedTermination: (() -> Void)?
+
+    init(endpoint: RelayKitRuntimeEndpoint) {
+        self.endpoint = endpoint
+    }
 
     var isRunning: Bool {
         process?.isRunning == true
@@ -80,7 +86,7 @@ final class GatewayProcess {
     ) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath, relativeTo: Self.appDirectory()).standardized
-        process.arguments = ["-listen", "127.0.0.1:19777", "-config", configPath, "-credential-stdin"]
+        process.arguments = ["-listen", endpoint.listenAddress, "-config", configPath, "-credential-stdin"]
         if let usageLogPath, !usageLogPath.isEmpty {
             process.arguments?.append(contentsOf: ["-usage-log", usageLogPath])
         }
@@ -106,7 +112,7 @@ final class GatewayProcess {
     func enableCodexConfig(binaryPath: String, target: String, catalog: String, state: String) throws -> String {
         try Self.runGatewayCommand(
             binaryPath: binaryPath,
-            arguments: ["enable-codex-config", "-target", target, "-catalog", catalog, "-state", state]
+            arguments: ["enable-codex-config", "-target", target, "-catalog", catalog, "-state", state, "-base-url", endpoint.codexBaseURL.absoluteString]
         )
     }
 

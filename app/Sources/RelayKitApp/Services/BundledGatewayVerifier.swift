@@ -4,31 +4,34 @@ import RelayKitCore
 @MainActor
 enum BundledGatewayVerifier {
     static func run(arguments: [String]) -> Int32 {
-        let gateway = GatewayProcess()
         let configPath = value(after: "--provider-config", in: arguments) ?? RelayKitPaths.exampleProviderConfigPath()
+        var gateway: GatewayProcess?
         do {
+            let endpoint = try RelayKitRuntimeEndpoint.resolve()
+            let managedGateway = GatewayProcess(endpoint: endpoint)
+            gateway = managedGateway
             let configData = try Data(contentsOf: URL(fileURLWithPath: configPath))
             let credentialHandoff = try GatewayCredentialHandoff.encode(configData: configData) { reference in
                 try KeychainCredentialStore.load(service: reference)
             }
-            try gateway.start(
+            try managedGateway.start(
                 binaryPath: RelayKitPaths.gatewayBinaryPath(),
                 configPath: configPath,
                 credentialHandoff: credentialHandoff
             )
-            defer { gateway.stop() }
-            let health = try fetch("http://127.0.0.1:19777/healthz")
+            defer { managedGateway.stop() }
+            let health = try fetch(endpoint.httpBaseURL.appending(path: "healthz"))
             guard String(data: health, encoding: .utf8)?.contains(#""status":"ok""#) == true else {
                 throw GatewayProcessError.commandFailed("health response missing ok status")
             }
-            let models = try fetch("http://127.0.0.1:19777/v1/models")
+            let models = try fetch(endpoint.codexBaseURL.appending(path: "models"))
             guard String(data: models, encoding: .utf8)?.contains(#""data""#) == true else {
                 throw GatewayProcessError.commandFailed("models response missing data")
             }
             print("Bundled gateway verification passed")
             return 0
         } catch {
-            gateway.stop()
+            gateway?.stop()
             FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
             return 1
         }
@@ -41,10 +44,7 @@ enum BundledGatewayVerifier {
         return arguments[index + 1]
     }
 
-    private static func fetch(_ url: String) throws -> Data {
-        guard let url = URL(string: url) else {
-            throw GatewayProcessError.commandFailed("invalid URL: \(url)")
-        }
+    private static func fetch(_ url: URL) throws -> Data {
         return try Data(contentsOf: url)
     }
 }
