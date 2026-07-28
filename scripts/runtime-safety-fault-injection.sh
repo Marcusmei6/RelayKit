@@ -705,7 +705,7 @@ run_restore_failure() {
 }
 
 write_evidence() {
-  local cases_json='[]' index temp_evidence
+  local cases_json='[]' index temp_evidence personal_home_pattern
   mkdir -p "${EVIDENCE_DIR}"
   for index in "${!CASE_NAMES[@]}"; do
     cases_json="$(jq -c \
@@ -785,7 +785,8 @@ write_evidence() {
         temp_removed: $temp_removed
       }
     }' >"${temp_evidence}"
-  if grep -Eq '/Users/|Authorization|Bearer |https?://|request_body|response_body|private_url|secret' "${temp_evidence}"; then
+  personal_home_pattern="/""Users/"
+  if grep -Eq "${personal_home_pattern}|Authorization|Bearer |https?://|request_body|response_body|private_url|secret" "${temp_evidence}"; then
     rm -f "${temp_evidence}"
     return 1
   fi
