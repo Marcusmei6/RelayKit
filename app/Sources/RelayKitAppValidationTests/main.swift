@@ -927,6 +927,19 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
     for required in ["@MainActor\nfinal class GatewayProcess", "-managed-codex-target", "-managed-codex-state", "Task { @MainActor", "process.terminationHandler = nil", "nonisolated static func summarizeUsage", "nonisolated static func runGatewayCommand", "nonisolated static func appDirectory", "GatewayTerminationRelay: @unchecked Sendable"] {
         if !gateway.contains(required) { fatalError("gateway lifecycle safety contract missing \(required)") }
     }
+    guard let startBegin = gateway.range(of: "func start("),
+          let startEnd = gateway.range(of: "func makeStartProcess", range: startBegin.upperBound..<gateway.endIndex) else {
+        fatalError("gateway start implementation is missing")
+    }
+    let longLivedStart = String(gateway[startBegin.lowerBound..<startEnd.lowerBound])
+    guard longLivedStart.contains("process.standardOutput = FileHandle.nullDevice"),
+          longLivedStart.contains("process.standardError = FileHandle.nullDevice") else {
+        fatalError("long-lived gateway output must use App-independent stable sinks")
+    }
+    if longLivedStart.contains("process.standardOutput = Pipe()") ||
+        longLivedStart.contains("process.standardError = Pipe()") {
+        fatalError("long-lived gateway output must not use undrained App-owned pipes")
+    }
     if gateway.contains("final class GatewayProcess: @unchecked Sendable") || !bundledVerifier.contains("@MainActor\nenum BundledGatewayVerifier") {
         fatalError("GatewayProcess actor isolation or bundled verifier actor contract regressed")
     }

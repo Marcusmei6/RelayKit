@@ -45,6 +45,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "summarize-usage" {
 		return summarizeUsage(args[1:], stdout, stderr)
 	}
+	signal.Ignore(syscall.SIGPIPE)
 	if err := runServer(args, os.Stdin, stderr); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1

@@ -56,9 +56,8 @@ final class GatewayProcess {
         }
         let credentialPipe = Pipe()
         process.standardInput = credentialPipe
-        process.standardOutput = Pipe()
-        let errors = Pipe()
-        process.standardError = errors
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         do {
             try process.run()
             try credentialPipe.fileHandleForWriting.write(contentsOf: credentialHandoff)
@@ -70,8 +69,7 @@ final class GatewayProcess {
         }
         Thread.sleep(forTimeInterval: 0.2)
         if !process.isRunning {
-            let stderr = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw GatewayProcessError.commandFailed(stderr.isEmpty ? "gateway exited during startup" : stderr)
+            throw GatewayProcessError.commandFailed("gateway exited during startup")
         }
         self.process = process
     }

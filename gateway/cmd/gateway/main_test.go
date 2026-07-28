@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -432,6 +433,171 @@ func TestGatewayParentLossRetainsListenerWhenRecoveryIsUnsafe(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("gateway listener was not retained after unsafe recovery")
+}
+
+func TestGatewayParentLossRetainsListenerAfterAppPipeReadersClose(t *testing.T) {
+	const modeKey = "RELAYKIT_TEST_BROKEN_APP_PIPE_MODE"
+	switch os.Getenv(modeKey) {
+	case "parent":
+		runBrokenAppPipeParent(modeKey)
+		return
+	case "helper":
+		os.Exit(run([]string{
+			"-listen", os.Getenv("RELAYKIT_TEST_LISTEN"),
+			"-config", os.Getenv("RELAYKIT_TEST_PROVIDER_CONFIG"),
+			"-credential-stdin",
+			"-parent-pid", os.Getenv("RELAYKIT_TEST_PARENT_PID"),
+			"-managed-codex-target", os.Getenv("RELAYKIT_TEST_CODEX_TARGET"),
+			"-managed-codex-state", os.Getenv("RELAYKIT_TEST_CODEX_STATE"),
+		}, os.Stdout, os.Stderr))
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	state := filepath.Join(dir, "state.json")
+	catalog := filepath.Join(dir, "catalog.json")
+	pidPath := filepath.Join(t.TempDir(), "helper.pid")
+	address := randomLoopbackAddress(t)
+	managedBaseURL := "http://" + address + "/v1"
+	if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{
+		"enable-codex-config",
+		"-target", target,
+		"-catalog", catalog,
+		"-state", state,
+		"-base-url", managedBaseURL,
+	}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("could not create managed route")
+	}
+
+	parent := exec.Command(os.Args[0], "-test.run=^TestGatewayParentLossRetainsListenerAfterAppPipeReadersClose$")
+	parent.Env = append(os.Environ(),
+		modeKey+"=parent",
+		"RELAYKIT_TEST_LISTEN="+address,
+		"RELAYKIT_TEST_PROVIDER_CONFIG="+writeGatewayConfig(t),
+		"RELAYKIT_TEST_CODEX_TARGET="+target,
+		"RELAYKIT_TEST_CODEX_STATE="+state,
+		"RELAYKIT_TEST_HELPER_PID_PATH="+pidPath,
+	)
+	parentInput, err := parent.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent.Stdout = io.Discard
+	parent.Stderr = io.Discard
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	helperPID := waitForPIDFile(t, pidPath)
+	defer func() {
+		_ = os.Chmod(dir, 0700)
+		_ = run([]string{"disable-codex-config", "-target", target, "-state", state}, io.Discard, io.Discard)
+		_ = syscall.Kill(helperPID, syscall.SIGTERM)
+	}()
+	waitForLoopbackListener(t, address)
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"disable-codex-config", "-target", target, "-state", state}, io.Discard, io.Discard); code == 0 {
+		t.Fatal("restore-failure injection did not prevent managed config restoration")
+	}
+	configured, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configured), managedBaseURL) {
+		t.Fatal("restore-failure injection removed the managed base URL")
+	}
+
+	if err := parentInput.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Wait(); err != nil {
+		t.Fatalf("fake App parent exit failed: %v", err)
+	}
+	time.Sleep(750 * time.Millisecond)
+	if err := syscall.Kill(helperPID, 0); err != nil {
+		t.Fatalf("gateway helper exited after App pipe readers closed: %v", err)
+	}
+	if conn, err := net.DialTimeout("tcp", address, 250*time.Millisecond); err != nil {
+		t.Fatalf("gateway listener disappeared after App pipe readers closed: %v", err)
+	} else {
+		_ = conn.Close()
+	}
+}
+
+func runBrokenAppPipeParent(modeKey string) {
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		os.Exit(2)
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		os.Exit(2)
+	}
+	helper := exec.Command(os.Args[0], "-test.run=^TestGatewayParentLossRetainsListenerAfterAppPipeReadersClose$")
+	helper.Env = append(os.Environ(),
+		modeKey+"=helper",
+		"RELAYKIT_TEST_PARENT_PID="+strconv.Itoa(os.Getpid()),
+	)
+	helper.Stdin = strings.NewReader(`{"version":1,"credentials":{}}`)
+	helper.Stdout = stdoutWriter
+	helper.Stderr = stderrWriter
+	if err := helper.Start(); err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		_ = stderrReader.Close()
+		_ = stderrWriter.Close()
+		os.Exit(2)
+	}
+	_ = stdoutWriter.Close()
+	_ = stderrWriter.Close()
+	if err := os.WriteFile(os.Getenv("RELAYKIT_TEST_HELPER_PID_PATH"), []byte(strconv.Itoa(helper.Process.Pid)), 0600); err != nil {
+		_ = helper.Process.Kill()
+		_ = stdoutReader.Close()
+		_ = stderrReader.Close()
+		os.Exit(2)
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	_ = stdoutReader.Close()
+	_ = stderrReader.Close()
+	os.Exit(0)
+}
+
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("fake App parent did not publish the helper PID")
+	return 0
+}
+
+func waitForLoopbackListener(t *testing.T, address string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("gateway helper did not start its loopback listener")
 }
 
 func writeGatewayConfig(t *testing.T) string {
