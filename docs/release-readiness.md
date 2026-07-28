@@ -17,6 +17,8 @@ The repository now contains GitHub-ready workflows, but this checkout has no Git
 
 After the checks appear and pass, enable branch protection requiring all six and an up-to-date branch. Remote creation, push, signing, notarization, packaging, and release remain outside this lane.
 
+Build 17 release automation must additionally query the exact commit recorded as the artifact manifest's `source_commit_sha` and refuse draft/upload unless all required checks for that SHA succeeded. That remote same-SHA enforcement is not implemented in this no-remote lane and remains a release blocker alongside signing, notarization, packaging, dogfood, and publication.
+
 ## Signed Beta v0.1.0 Current Candidate
 
 Release readiness is **complete for a signed beta candidate; public release remains unpublished**. The current artifact is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `116928bda89b6ca9a266bd7e1b3b820fc811d45f6ba118be16a367c619cf1a78`. Its release/trimmed-path binaries passed the archive personal-path scan, Developer ID signing, hardened runtime, fresh notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle.

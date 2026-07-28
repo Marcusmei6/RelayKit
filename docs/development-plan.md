@@ -376,7 +376,10 @@ Status: runtime-safety candidate complete at `5992d6d`; `dist/runtime-safety/evi
 - `macos-runtime-safety` runs the offline contract and isolated eight-case fault harness without login, credentials, provider requests, global config mutation, protected ports, signing, or release work.
 - `protocol-contract` runs deterministic loopback adapter and Responses tests only.
 - Every action is pinned to a full commit SHA; workflows use `contents: read`, cancel superseded runs, set job timeouts, and upload no artifacts.
+- Catalog P0 at `3f7f8e7` preserves configured models through discovery failures, records route-confirmed reachability, and keeps fingerprinted/timestamped last-known-good state. Responses P0 at `7afff32` locks single-terminal ordering, persistent WebSocket turns, cancellation, malformed/truncated failures, and tool-call lifecycle; it deliberately does not invent an unproven WebSocket-to-HTTP client fallback.
+- Residual runtime risk remains explicit: simultaneous App/helper loss is not guaranteed recoverable or reboot-safe. The null stderr sink is lifecycle-safe but leaves early startup failures generic.
 - The checkout has no Git remote, so CI is GitHub-ready rather than GitHub-green. A later authorized first push must confirm the six exact checks listed in `docs/handoff.md` and `docs/release-readiness.md`, then require them on an up-to-date `main` branch.
+- Before any Build 17 draft/upload, release automation must verify that those checks succeeded for the artifact manifest's exact `source_commit_sha`; this remote same-SHA gate is not implemented or claimed by the current source-only lane.
 
 ## Release Gate
 
