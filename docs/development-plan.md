@@ -369,7 +369,7 @@ Status: source implementation and focused validation are complete; selector/menu
 
 ## Phase 7.15: P0 Runtime Safety and GitHub-Ready CI
 
-Status: source candidate complete at `dd784b2`; runtime-safety is 8/8 PASS and four GitHub Actions workflows are committed for public CI. Installed Build 16 remains the historical/current shared runtime and was untouched. Build 17 signed beta is the next distribution goal.
+Status: runtime-safety candidate complete at `5992d6d`; `dist/runtime-safety/evidence.json` binds that source commit and the tracked harness/test hashes, runtime-safety is 8/8 PASS, and four GitHub Actions workflows are committed for public CI. Later CI/documentation-only commits do not replace the runtime candidate. Installed Build 16 remains the historical/current shared runtime and was untouched. Build 17 signed beta is the next distribution goal.
 
 - `fast-gates` covers the public boundary, shell contracts, and Go test/vet/gofmt.
 - `macos-app` covers Swift build, `RelayKitAppValidationTests`, and headless bundle/package verification.

@@ -4,7 +4,7 @@ RelayKit is preparing for public beta distribution, not a public release yet.
 
 ## Current Source Candidate and CI Status
 
-At source HEAD `dd784b2`, the P0 runtime-safety matrix is 8/8 PASS. Installed Build 16 remains the historical/current shared runtime and was untouched; this result does not create or validate a replacement installation. Build 17 signed beta is the next distribution goal.
+At runtime-safety source candidate `5992d6d`, the P0 matrix is 8/8 PASS. `dist/runtime-safety/evidence.json` binds that source commit and the tracked harness/test hashes; later CI/documentation-only commits do not replace the runtime candidate. Installed Build 16 remains the historical/current shared runtime and was untouched; this result does not create or validate a replacement installation. Build 17 signed beta is the next distribution goal.
 
 The repository now contains GitHub-ready workflows, but this checkout has no Git remote and none of the workflows has run on GitHub. CI is therefore not yet GitHub-green. On the first separately authorized public push, confirm these exact checks before making them required on `main`:
 

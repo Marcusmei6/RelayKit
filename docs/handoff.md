@@ -6,7 +6,7 @@ RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-c
 
 ## Current Truth (2026-07-28, P0 runtime safety and GitHub-ready CI)
 
-The current source candidate at `dd784b2` passed all eight runtime-safety fault cases. This is a source-candidate result, not a new installed or distributed build. Installed Build 16 remains the historical/current shared runtime and was not stopped, replaced, rebuilt, signed, or otherwise touched by this lane. Build 17 signed beta remains the next distribution goal.
+The runtime-safety candidate at `5992d6d` passed all eight fault cases. The fresh evidence is `dist/runtime-safety/evidence.json`; it binds source commit `5992d6d`, the tracked harness SHA-256, and the tracked harness-test SHA-256. Later CI/documentation-only commits do not replace that runtime candidate. This is a source-candidate result, not a new installed or distributed build. Installed Build 16 remains the historical/current shared runtime and was not stopped, replaced, rebuilt, signed, or otherwise touched by this lane. Build 17 signed beta remains the next distribution goal.
 
 Four GitHub Actions workflows now define public-boundary, shell, Go, Swift/App, runtime-safety, and deterministic protocol gates. The checkout currently has no Git remote, so these workflows are GitHub-ready but have not run on GitHub and must not be described as GitHub-green.
 
