@@ -11,6 +11,19 @@ Allowed examples:
 
 Do not add scripts that depend on private infrastructure.
 
+## GitHub Actions CI
+
+The repository defines four public-safe workflows under `.github/workflows/`. Before a first push, run the focused workflow contract locally:
+
+```bash
+bash -n scripts/github-actions-contract-test.sh
+./scripts/github-actions-contract-test.sh
+```
+
+The contract checks full-SHA action pins, read-only permissions, concurrency cancellation, job timeouts, required commands, and the absence of secrets, live-provider, shared-runtime, signing, and release behavior. The workflows produce no uploaded artifacts. They are GitHub-ready but have not run on GitHub because this checkout has no remote.
+
+On the first separately authorized push, confirm these exact checks appear: `Fast Gates / Public boundary`, `Fast Gates / Shell contracts`, `Fast Gates / Go test, vet, and format`, `macOS App / Swift and headless package validation`, `macOS Runtime Safety / Offline contract and fault harness`, and `Protocol Contract / Loopback adapters and Responses`. Require all six on `main` only after their first GitHub run passes.
+
 ## Local Helper
 
 ```bash

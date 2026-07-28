@@ -4,6 +4,23 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-28, P0 runtime safety and GitHub-ready CI)
+
+The current source candidate at `dd784b2` passed all eight runtime-safety fault cases. This is a source-candidate result, not a new installed or distributed build. Installed Build 16 remains the historical/current shared runtime and was not stopped, replaced, rebuilt, signed, or otherwise touched by this lane. Build 17 signed beta remains the next distribution goal.
+
+Four GitHub Actions workflows now define public-boundary, shell, Go, Swift/App, runtime-safety, and deterministic protocol gates. The checkout currently has no Git remote, so these workflows are GitHub-ready but have not run on GitHub and must not be described as GitHub-green.
+
+When a public remote is created and the first branch is pushed in a separately authorized lane, protect `main` with these exact required checks:
+
+- `Fast Gates / Public boundary`
+- `Fast Gates / Shell contracts`
+- `Fast Gates / Go test, vet, and format`
+- `macOS App / Swift and headless package validation`
+- `macOS Runtime Safety / Offline contract and fault harness`
+- `Protocol Contract / Loopback adapters and Responses`
+
+Suggested first-push sequence: create the public repository/remote, push `main`, confirm all six checks appear and pass on GitHub, then enable branch protection requiring those exact checks and an up-to-date branch. This lane does not create a remote, push, sign, package a release, or publish anything.
+
 ## Current Truth (2026-07-23, Codex 0.145 persistent Responses WebSocket and graceful quit)
 
 The current Codex Desktop embedded CLI `0.145.0-alpha.30` keeps one Responses WebSocket open and serially reuses it. RelayKit previously closed the connection after every terminal response event, so the next turn on that same connection failed with `Broken pipe` or `Connection reset`.

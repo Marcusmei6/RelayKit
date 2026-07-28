@@ -1,0 +1,25 @@
+name: macOS Runtime Safety
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime-safety:
+    name: macOS Runtime Safety / Offline contract and fault harness
+    runs-on: macos-14
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Verify offline safety contract
+        run: ./scripts/runtime-safety-fault-injection-test.sh
+      - name: Run isolated fault harness
+        run: ./scripts/runtime-safety-fault-injection.sh

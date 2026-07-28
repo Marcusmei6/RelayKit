@@ -367,6 +367,17 @@ Status: source implementation and focused validation are complete; selector/menu
 - Focused native and Official sequential regressions passed. Focused race validation, including client-close cancellation, passed. Full `go test ./...`, `go vet`, Swift build with the macOS 15.4 SDK, and the GUI Terminal `RelayKitAppValidationTests` run passed.
 - These source-level results do not claim selector completion, menu or package validation, dogfood, live Desktop proof, installation, signing, notarization, publication, or release. Build 15 remains immutable and ineligible, and Build 16 has not been built. The existing Build 15/Build 16 packaging-remediation gates remain in force.
 
+## Phase 7.15: P0 Runtime Safety and GitHub-Ready CI
+
+Status: source candidate complete at `dd784b2`; runtime-safety is 8/8 PASS and four GitHub Actions workflows are committed for public CI. Installed Build 16 remains the historical/current shared runtime and was untouched. Build 17 signed beta is the next distribution goal.
+
+- `fast-gates` covers the public boundary, shell contracts, and Go test/vet/gofmt.
+- `macos-app` covers Swift build, `RelayKitAppValidationTests`, and headless bundle/package verification.
+- `macos-runtime-safety` runs the offline contract and isolated eight-case fault harness without login, credentials, provider requests, global config mutation, protected ports, signing, or release work.
+- `protocol-contract` runs deterministic loopback adapter and Responses tests only.
+- Every action is pinned to a full commit SHA; workflows use `contents: read`, cancel superseded runs, set job timeouts, and upload no artifacts.
+- The checkout has no Git remote, so CI is GitHub-ready rather than GitHub-green. A later authorized first push must confirm the six exact checks listed in `docs/handoff.md` and `docs/release-readiness.md`, then require them on an up-to-date `main` branch.
+
 ## Release Gate
 
 First public release requires:

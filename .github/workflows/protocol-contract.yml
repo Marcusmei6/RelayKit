@@ -1,0 +1,31 @@
+name: Protocol Contract
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  loopback-responses:
+    name: Protocol Contract / Loopback adapters and Responses
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: Run deterministic protocol contracts
+        working-directory: gateway
+        run: >-
+          go test ./internal/server -count=1
+          -run '^(TestResponsesProxiesToFakeOpenAIChat|TestResponsesStreamsFakeOpenAIChatSSE|TestResponsesProxiesToFakeAnthropicMessages|TestResponsesStreamsFakeAnthropicMessages|TestNativeOpenAIResponsesNonStreamingPreservesProtocol|TestNativeOpenAIResponsesStreamsEventsAndReportsTruncation|TestNativeOpenAIResponsesWebSocketForwardsProviderEvents|TestResponsesP0PersistentWebSocketSupportsSequentialNativeAndOfficialRequests|TestResponsesP0ToolCallLifecycle)$'

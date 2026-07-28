@@ -2,6 +2,21 @@
 
 RelayKit is preparing for public beta distribution, not a public release yet.
 
+## Current Source Candidate and CI Status
+
+At source HEAD `dd784b2`, the P0 runtime-safety matrix is 8/8 PASS. Installed Build 16 remains the historical/current shared runtime and was untouched; this result does not create or validate a replacement installation. Build 17 signed beta is the next distribution goal.
+
+The repository now contains GitHub-ready workflows, but this checkout has no Git remote and none of the workflows has run on GitHub. CI is therefore not yet GitHub-green. On the first separately authorized public push, confirm these exact checks before making them required on `main`:
+
+- `Fast Gates / Public boundary`
+- `Fast Gates / Shell contracts`
+- `Fast Gates / Go test, vet, and format`
+- `macOS App / Swift and headless package validation`
+- `macOS Runtime Safety / Offline contract and fault harness`
+- `Protocol Contract / Loopback adapters and Responses`
+
+After the checks appear and pass, enable branch protection requiring all six and an up-to-date branch. Remote creation, push, signing, notarization, packaging, and release remain outside this lane.
+
 ## Signed Beta v0.1.0 Current Candidate
 
 Release readiness is **complete for a signed beta candidate; public release remains unpublished**. The current artifact is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `116928bda89b6ca9a266bd7e1b3b820fc811d45f6ba118be16a367c619cf1a78`. Its release/trimmed-path binaries passed the archive personal-path scan, Developer ID signing, hardened runtime, fresh notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle.

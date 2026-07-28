@@ -1,0 +1,63 @@
+name: Fast Gates
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  public-boundary:
+    name: Fast Gates / Public boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Scan tracked public content
+        run: ./scripts/public-boundary-check.sh
+
+  shell-contracts:
+    name: Fast Gates / Shell contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Check shell syntax
+        run: find script scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      - name: Check GitHub Actions contract
+        run: ./scripts/github-actions-contract-test.sh
+      - name: Check public-boundary fixtures
+        run: ./scripts/public-boundary-check-test.sh
+      - name: Check agent workflow contract
+        run: ./scripts/relaykit-agent-workflow-test.sh
+      - name: Check validation selector contract
+        run: ./scripts/relaykit-validate-test.sh
+
+  go-quality:
+    name: Fast Gates / Go test, vet, and format
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: Run Go tests
+        working-directory: gateway
+        run: go test ./...
+      - name: Run Go vet
+        working-directory: gateway
+        run: go vet ./...
+      - name: Check Go formatting
+        working-directory: gateway
+        run: test -z "$(gofmt -l .)"
