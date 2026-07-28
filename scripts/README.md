@@ -104,6 +104,15 @@ The Wave 2 native proof starts an ordinary extracted App against an empty isolat
 
 Wave 1 focused contracts passed. Wave 2 harness, fixture, manifest, and negative-branch contracts are implemented, but this implementation lane does not claim a fresh App/Desktop/package E2E. The live proof and immutable phase-B manifest must be produced later by `relaykit_test`; historical `observation_failed_*` evidence remains failed and cannot satisfy the manifest. The lifecycle proof remains separate: it starts the same App-owned helper, kills the App without graceful cleanup, and requires the helper to exit and release `19777`. Neither proof reads real credentials, mutates global Codex files, controls LaunchAgents, or changes the shared `18787` listener.
 
+## Runtime Safety Fault Injection
+
+```bash
+./scripts/runtime-safety-fault-injection-test.sh
+./scripts/runtime-safety-fault-injection.sh
+```
+
+The first command is an offline contract test. The targeted harness builds the current source in a temporary isolated layout, exercises managed App/helper failure cases on one random loopback port, and writes only redacted evidence to `dist/runtime-safety/evidence.json`. It treats `18787`, installed `19777`, global Codex files, and user LaunchAgents as read-only guards.
+
 Focused non-live contracts are:
 
 ```bash
