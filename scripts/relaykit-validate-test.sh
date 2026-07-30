@@ -178,6 +178,16 @@ selected harness shell-syntax || fail "harness plan omitted shell syntax"
 selected harness manual-proof-contract || fail "harness plan omitted focused manual-proof tests"
 not_selected harness package-verify || fail "harness plan selected package verification"
 
+write_fixture github-ci .github/workflows/macos-app.yml scripts/github-required-checks.sh
+plan_fixture github-ci
+selected github-ci github-actions-contract || fail "GitHub CI plan omitted the workflow contract"
+selected github-ci github-required-checks-contract || fail "GitHub CI plan omitted the required-checks mock contract"
+not_selected github-ci package-verify || fail "GitHub CI plan selected package verification"
+
+write_fixture signed-release script/package_signed_release.sh scripts/signed-release-packaging-test.sh
+plan_fixture signed-release
+selected signed-release signed-release-packaging-contract || fail "signed release tooling plan omitted offline packaging mocks"
+
 write_fixture gateway gateway/internal/config/config.go
 plan_fixture gateway
 jq -e '

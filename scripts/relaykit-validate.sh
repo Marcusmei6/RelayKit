@@ -131,6 +131,19 @@ for path in files:
         classes.add("skill")
     if path.startswith("scripts/relaykit-validate"):
         classes.update(("validation", "shell"))
+    if path.startswith(".github/workflows/") or path in {
+        "scripts/github-actions-contract-test.sh",
+        "scripts/github-required-checks.sh",
+        "scripts/github-required-checks-test.sh",
+    }:
+        classes.add("github_ci")
+    if path in {
+        "script/package_signed_release.sh",
+        "script/install_signed_release.sh",
+        "script/create_github_release_draft.sh",
+        "scripts/signed-release-packaging-test.sh",
+    }:
+        classes.add("signed_release_contract")
     if path.startswith("scripts/codex-desktop-query-backend") or path == "scripts/codex-desktop-query-official-once.sh":
         classes.update(("skill", "harness", "shell", "ax"))
     if path.startswith("scripts/codex-desktop-manual-proof"):
@@ -315,6 +328,11 @@ if shell_files:
     add("shell-syntax", f"bash -n {quoted}", "changed shell files require syntax validation")
 if "validation" in classes:
     add("validation-selector-contract", "./scripts/relaykit-validate-test.sh", "validation routing changes require fixture matrix tests")
+if "github_ci" in classes:
+    add("github-actions-contract", "./scripts/github-actions-contract-test.sh", "GitHub workflow changes require the pinned public CI contract")
+    add("github-required-checks-contract", "./scripts/github-required-checks-test.sh", "required-check evidence changes require fail-closed mock coverage")
+if "signed_release_contract" in classes:
+    add("signed-release-packaging-contract", "./scripts/signed-release-packaging-test.sh", "signed release tooling changes require offline packaging and draft mocks")
 if "skill" in classes:
     add("desktop-query-runner-contract", ".agents/skills/relaykit-desktop-query/scripts/run-query-test.sh", "Skill interface changes require runner contract tests")
     add("desktop-query-backend-contract", "./scripts/codex-desktop-query-backend-test.sh", "default backend changes require focused contract tests")

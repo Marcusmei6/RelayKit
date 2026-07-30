@@ -3,8 +3,8 @@ set -euo pipefail
 
 APP_NAME="RelayKitApp"
 APP_PROCESS_NAME="${APP_NAME}.bin"
-APP_MARKETING_VERSION="${RELAYKIT_APP_VERSION:-0.1.1}"
-APP_BUILD_NUMBER="${RELAYKIT_BUILD_NUMBER:-2}"
+APP_MARKETING_VERSION="${RELAYKIT_APP_VERSION:-0.1.6}"
+APP_BUILD_NUMBER="${RELAYKIT_BUILD_NUMBER:-17}"
 BUNDLE_ID="dev.relaykit.app"
 EXPECTED_TEAM_ID="WDZT4H533S"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,6 +18,14 @@ XCRUN_BIN="/usr/bin/xcrun"
 SPCTL_BIN="/usr/sbin/spctl"
 MV_BIN="/bin/mv"
 TEST_MODE="${RELAYKIT_SIGNED_RELEASE_TEST_MODE:-0}"
+REQUIRED_CHECK_NAMES_JSON='[
+  "Fast Public Boundary",
+  "Fast Shell Contracts",
+  "Fast Go Quality",
+  "macOS App",
+  "macOS Runtime Safety",
+  "Protocol Contract"
+]'
 
 if [[ "${TEST_MODE}" == "1" ]]; then
   : "${RELAYKIT_TEST_CODESIGN_BIN:?test mode requires RELAYKIT_TEST_CODESIGN_BIN}"
@@ -111,9 +119,10 @@ verify_release() {
   EXTRACTED_APP="${VERIFY_DIR}/${APP_NAME}.app"
   [[ -d "${EXTRACTED_APP}" ]] || fail "signed zip is missing ${APP_NAME}.app"
   verify_signed_app "${EXTRACTED_APP}"
-  local tree_hash executable_hash version build bundle_id
+  local tree_hash executable_hash helper_hash version build bundle_id
   tree_hash="$(app_tree_sha256 "${EXTRACTED_APP}")"
   executable_hash="$(sha256 "${EXTRACTED_APP}/Contents/MacOS/${APP_PROCESS_NAME}")"
+  helper_hash="$(sha256 "${EXTRACTED_APP}/Contents/MacOS/relay")"
   version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${EXTRACTED_APP}/Contents/Info.plist")"
   build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${EXTRACTED_APP}/Contents/Info.plist")"
   bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${EXTRACTED_APP}/Contents/Info.plist")"
@@ -121,23 +130,65 @@ verify_release() {
     --arg artifact_sha256 "${zip_hash}" \
     --arg app_tree_sha256 "${tree_hash}" \
     --arg app_executable_sha256 "${executable_hash}" \
+    --arg bundled_helper_executable_sha256 "${helper_hash}" \
     --arg version "${version}" \
     --arg build "${build}" \
     --arg bundle_id "${bundle_id}" \
     --arg expected_version "${APP_MARKETING_VERSION}" \
     --arg expected_build "${APP_BUILD_NUMBER}" \
     --arg expected_bundle_id "${BUNDLE_ID}" \
-    --arg expected_team_id "${EXPECTED_TEAM_ID}" '
-      (.schema_version == 1) and (.app_name == "RelayKitApp") and
+    --arg expected_team_id "${EXPECTED_TEAM_ID}" \
+    --argjson required_names "${REQUIRED_CHECK_NAMES_JSON}" '
+      (
+        .hosted_ci.checks[0].details_url
+        | capture("^https://github\\.com/(?<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/actions/runs/[0-9]+(/job/[0-9]+)?$")
+        | .repo
+      ) as $ci_repo
+      | ("https://github.com/" + $ci_repo + "/actions/runs/") as $run_prefix
+      | ([
+          .hosted_ci.checks[].details_url
+          | ltrimstr($run_prefix)
+          | split("/")[0]
+          | {
+              id: tonumber,
+              url: ($run_prefix + .)
+            }
+        ] | unique_by(.id)) as $derived_runs
+      |
+      (.schema_version == 2) and (.app_name == "RelayKitApp") and
       (.source_clean == true) and
       (.source_commit_sha | test("^[0-9a-f]{40}$")) and
       (.source_snapshot_sha256 | test("^[0-9a-f]{64}$")) and
       (.artifact_sha256 == $artifact_sha256) and
       (.app_tree_sha256 == $app_tree_sha256) and
       (.app_executable_sha256 == $app_executable_sha256) and
+      (.bundled_helper_executable_sha256 == $bundled_helper_executable_sha256) and
       (.version == $version) and (.build == $build) and (.bundle_id == $bundle_id) and
       (.version == $expected_version) and (.build == $expected_build) and (.bundle_id == $expected_bundle_id) and
-      (.team_id == $expected_team_id) and (.hardened_runtime == true)
+      (.team_id == $expected_team_id) and (.hardened_runtime == true) and
+      (.hosted_ci.schema_version == 1) and
+      (.hosted_ci.source_commit_sha == .source_commit_sha) and
+      ([.hosted_ci.checks[].name] == $required_names) and
+      ([.hosted_ci.checks[].id] | unique | length == 6) and
+      (all(.hosted_ci.checks[];
+        (.id | type) == "number" and
+        (.conclusion == "success") and
+        (.app_slug == "github-actions") and
+        (.details_url | type) == "string" and
+        (.details_url | startswith($run_prefix)) and
+        (.details_url | ltrimstr($run_prefix) | test("^[0-9]+(/job/[0-9]+)?$")) and
+        ((keys | sort) == ["app_slug", "conclusion", "details_url", "id", "name"])
+      )) and
+      (.hosted_ci.actions_runs | type == "array") and
+      (.hosted_ci.actions_runs | length >= 1) and
+      (.hosted_ci.actions_runs == $derived_runs) and
+      (all(.hosted_ci.actions_runs[];
+        (.id | type) == "number" and
+        (.url | type) == "string" and
+        (.url | startswith($run_prefix)) and
+        (.url | ltrimstr($run_prefix) | test("^[0-9]+$")) and
+        ((keys | sort) == ["id", "url"])
+      ))
     ' "${manifest}" >/dev/null || fail "release manifest does not match signed zip payload"
 }
 
@@ -198,6 +249,8 @@ verify_signed_app "${TARGET_APP}"
   fail "installed app tree hash does not match manifest"
 [[ "$(sha256 "${TARGET_APP}/Contents/MacOS/${APP_PROCESS_NAME}")" == "$(jq -r '.app_executable_sha256' "${RELEASE_DIR}/${MANIFEST_NAME}")" ]] ||
   fail "installed app executable hash does not match manifest"
+[[ "$(sha256 "${TARGET_APP}/Contents/MacOS/relay")" == "$(jq -r '.bundled_helper_executable_sha256' "${RELEASE_DIR}/${MANIFEST_NAME}")" ]] ||
+  fail "installed bundled helper hash does not match manifest"
 
 echo "RelayKit installed atomically: ${TARGET_APP}"
 if [[ -n "${BACKUP_APP}" ]]; then

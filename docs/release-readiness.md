@@ -4,20 +4,22 @@ RelayKit is preparing for public beta distribution, not a public release yet.
 
 ## Current Source Candidate and CI Status
 
-At runtime-safety source candidate `5992d6d`, the P0 matrix is 8/8 PASS. `dist/runtime-safety/evidence.json` binds that source commit and the tracked harness/test hashes; later CI/documentation-only commits do not replace the runtime candidate. Installed Build 16 remains the historical/current shared runtime and was untouched; this result does not create or validate a replacement installation. Build 17 signed beta is the next distribution goal.
+At runtime-safety source candidate `5992d6d`, the P0 matrix is 8/8 PASS. `dist/runtime-safety/evidence.json` binds that source commit and the tracked harness/test hashes; later CI/documentation-only commits do not replace the runtime candidate. Installed Build 16 remains the historical/current shared runtime and was untouched. The planned next distribution is marketing version `0.1.6`, build `17`; it has not been packaged, signed, notarized, installed, uploaded, or published.
 
 The repository now contains GitHub-ready workflows, but this checkout has no Git remote and none of the workflows has run on GitHub. CI is therefore not yet GitHub-green. On the first separately authorized public push, confirm these exact checks before making them required on `main`:
 
-- `Fast Gates / Public boundary`
-- `Fast Gates / Shell contracts`
-- `Fast Gates / Go test, vet, and format`
-- `macOS App / Swift and headless package validation`
-- `macOS Runtime Safety / Offline contract and fault harness`
-- `Protocol Contract / Loopback adapters and Responses`
+- `Fast Public Boundary`
+- `Fast Shell Contracts`
+- `Fast Go Quality`
+- `macOS App`
+- `macOS Runtime Safety`
+- `Protocol Contract`
 
 After the checks appear and pass, enable branch protection requiring all six and an up-to-date branch. Remote creation, push, signing, notarization, packaging, and release remain outside this lane.
 
-Build 17 release automation must additionally query the exact commit recorded as the artifact manifest's `source_commit_sha` and refuse draft/upload unless all required checks for that SHA succeeded. That remote same-SHA enforcement is not implemented in this no-remote lane and remains a release blocker alongside signing, notarization, packaging, dogfood, and publication.
+Build 17 release tooling now requires an absolute CI evidence file for a clean current HEAD before finalization. Manifest schema 2 binds both executable hashes and embeds the six hosted checks plus deduplicated Actions runs. Draft creation freshly queries the manifest's exact SHA and fails before `gh release create` if the result differs. No hosted query or release operation was run in this source-only lane, so GitHub-green status and Build 17 distribution remain pending.
+
+The pre-freeze tooling CR passed. The hosted shell/App checks now run the required-check evidence, signed-package orchestration, and explicit-zip proof behavior contracts; local test package mode is restricted to canonical repository-external roots.
 
 ## Signed Beta v0.1.0 Current Candidate
 
@@ -123,6 +125,7 @@ The signed beta script is present but intentionally fails without real Apple dis
 RELAYKIT_SIGNING_IDENTITY="Developer ID Application: Example Team (TEAMID)" \
 RELAYKIT_NOTARYTOOL_PROFILE="relaykit-notary" \
 RELAYKIT_APPLE_TEAM_ID="TEAMID" \
+RELAYKIT_CI_EVIDENCE_PATH=/absolute/path/ci-evidence.json \
 ./script/package_signed_release.sh
 ```
 
@@ -175,6 +178,7 @@ Historical packaging/rebuild checklist (not the current completion sequence):
    export RELAYKIT_NOTARYTOOL_PROFILE="relaykit-notary"
    export RELAYKIT_APPLE_TEAM_ID="TEAMID"
    export RELAYKIT_GITHUB_REPO="owner/repo"
+   export RELAYKIT_CI_EVIDENCE_PATH="/absolute/path/ci-evidence.json"
    ```
 
 4. Run `./script/package_signed_release.sh`.
@@ -196,9 +200,9 @@ Use `RELAYKIT_GITHUB_REPO=owner/repo ./script/create_github_release_draft.sh` af
 Version bump flow:
 
 ```bash
-RELAYKIT_APP_VERSION=0.1.1 RELAYKIT_BUILD_NUMBER=2 ./script/package_release.sh --verify
-RELAYKIT_APP_VERSION=0.1.1 RELAYKIT_BUILD_NUMBER=2 ./script/package_signed_release.sh
-RELAYKIT_APP_VERSION=0.1.1 ./script/create_github_release_draft.sh
+RELAYKIT_APP_VERSION=0.1.6 RELAYKIT_BUILD_NUMBER=17 ./script/package_release.sh --verify
+RELAYKIT_APP_VERSION=0.1.6 RELAYKIT_BUILD_NUMBER=17 RELAYKIT_CI_EVIDENCE_PATH=/absolute/path/ci-evidence.json ./script/package_signed_release.sh
+RELAYKIT_APP_VERSION=0.1.6 ./script/create_github_release_draft.sh
 ```
 
 The checksum is always named beside the signed zip as `RelayKitApp-<version>-signed.zip.sha256`.

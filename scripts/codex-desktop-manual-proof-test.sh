@@ -60,16 +60,37 @@ notify_hash() {
   fi
 }
 
-resolved_binary="$(${PROOF_SCRIPT} --print-desktop-binary)"
+binary_fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/relaykit-codex-binary-fixture.XXXXXX")"
+trap 'rm -rf "${binary_fixture_root}"' EXIT
+binary_fixture_app="${binary_fixture_root}/Codex.app"
+binary_fixture_executable="${binary_fixture_app}/Contents/MacOS/Codex"
+mkdir -p "${binary_fixture_app}/Contents/MacOS" "${binary_fixture_app}/Contents/Resources"
+cat >"${binary_fixture_app}/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Codex</string>
+<key>CFBundleIdentifier</key><string>com.openai.codex</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+PLIST
+cp /usr/bin/true "${binary_fixture_executable}"
+cp /usr/bin/true "${binary_fixture_app}/Contents/Resources/codex"
+
+resolved_binary="$(RELAYKIT_CODEX_APP_BINARY="${binary_fixture_executable}" \
+  "${PROOF_SCRIPT}" --print-desktop-binary)"
 test -x "${resolved_binary}"
 
 app_bundle="${resolved_binary%%/Contents/MacOS/*}"
 bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${app_bundle}/Contents/Info.plist")"
 test "${bundle_id}" = "com.openai.codex"
 
-resolved_codex_cli="$(${PROOF_SCRIPT} --print-desktop-codex-binary)"
+resolved_codex_cli="$(RELAYKIT_CODEX_APP_BINARY="${binary_fixture_executable}" \
+  "${PROOF_SCRIPT}" --print-desktop-codex-binary)"
 test -x "${resolved_codex_cli}"
 test "${resolved_codex_cli}" = "${app_bundle}/Contents/Resources/codex"
+rm -rf "${binary_fixture_root}"
+trap - EXIT
 
 echo "Codex Desktop binary resolution test passed"
 
@@ -177,12 +198,16 @@ grep -Fq 'RelayKitApp-local.zip' "${PROOF_SCRIPT}" ||
   fail "manual proof must launch an app extracted from the current local zip"
 grep -Fq 'RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP' "${PROOF_SCRIPT}" ||
   fail "manual proof needs an explicit current-zip reuse path for a previously authorized ad-hoc build"
-prepare_app_body="$(sed -n '/^prepare_extracted_app() {/,/^}/p' "${PROOF_SCRIPT}")"
-grep -Fq '"${ROOT}/script/package_release.sh" --verify' <<<"${prepare_app_body}" ||
+grep -Fq 'RELAYKIT_DESKTOP_PROOF_ZIP_PATH' "${PROOF_SCRIPT}" ||
+  fail "manual proof needs an explicit signed-zip input"
+prepare_zip_body="$(sed -n '/^prepare_product_zip_artifact() {/,/^}/p' "${PROOF_SCRIPT}")"
+grep -Fq '"${PACKAGE_RELEASE_BIN}" --verify' <<<"${prepare_zip_body}" ||
   fail "manual proof must still rebuild the current zip by default"
-grep -Fq '/usr/bin/ditto -x -k "${ZIP_PATH}" "${APP_INSTALL_DIR}"' <<<"${prepare_app_body}" ||
+grep -Fq 'if [[ "${EXPLICIT_ZIP_INPUT}" == "false" ]]' <<<"${prepare_zip_body}" ||
+  fail "manual proof must skip rebuilding when an explicit zip is provided"
+grep -Fq '/usr/bin/ditto -x -k "${ZIP_PATH}" "${APP_INSTALL_DIR}"' <<<"${prepare_zip_body}" ||
   fail "manual proof must preserve sealed resources when extracting the current App zip"
-if grep -Fq '/usr/bin/unzip' <<<"${prepare_app_body}"; then
+if grep -Fq '/usr/bin/unzip' <<<"${prepare_zip_body}"; then
   fail "manual proof current App zip extraction must not use unzip"
 fi
 verify_extracted_app_body="$(sed -n '/^verify_extracted_app_matches_zip() {/,/^}/p' "${PROOF_SCRIPT}")"
@@ -193,6 +218,8 @@ if grep -Fq '/usr/bin/unzip' <<<"${verify_extracted_app_body}"; then
 fi
 grep -Fq 'relaykit_app_launched_from_extracted_zip' "${PROOF_SCRIPT}" ||
   fail "manual proof evidence must disclose the extracted App launch"
+grep -Fq 'product_artifact_path: $product_artifact_path' "${PROOF_SCRIPT}" ||
+  fail "manual proof evidence must retain the exact zip path"
 grep -Fq 'official_preflight_route_evidence_allowed: false' "${PROOF_SCRIPT}" ||
   fail "official auth preflight must never count as Desktop route evidence"
 grep -Fq '.accessibilityIdentifier("gateway-start")' "${APP_VIEW_SOURCE}" ||
@@ -390,8 +417,19 @@ zip_fixture_extracted="${zip_fixture_root}/extracted/RelayKitApp.app"
 zip_fixture_archive="${zip_fixture_root}/RelayKitApp-local.zip"
 zip_fixture_scratch="${zip_fixture_root}/scratch"
 mkdir -p "${zip_fixture_app}/Contents/MacOS" "$(dirname "${zip_fixture_extracted}")"
-printf 'fixture app\n' >"${zip_fixture_app}/Contents/MacOS/RelayKitApp.bin"
-printf 'fixture gateway\n' >"${zip_fixture_app}/Contents/MacOS/relay"
+cat >"${zip_fixture_app}/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>RelayKitApp.bin</string>
+<key>CFBundleIdentifier</key><string>dev.relaykit.test-fixture</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+PLIST
+cp /usr/bin/true "${zip_fixture_app}/Contents/MacOS/RelayKitApp.bin"
+cp /usr/bin/true "${zip_fixture_app}/Contents/MacOS/relay"
+/usr/bin/codesign --force --sign - "${zip_fixture_app}/Contents/MacOS/relay" >/dev/null
+/usr/bin/codesign --force --deep --sign - "${zip_fixture_app}" >/dev/null
 (
   cd "${zip_fixture_source}"
   /usr/bin/zip -qry "${zip_fixture_archive}" RelayKitApp.app
@@ -405,6 +443,52 @@ grep -Fq 'RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP' "${PROOF_SCRIPT}" ||
   fail "manual proof needs an explicit verified extracted-App reuse mode for Keychain authorization"
 
 echo "Manual proof extracted App reuse guard test passed"
+
+zip_input_evidence="${tmp_dir}/zip-input.json"
+RELAYKIT_DESKTOP_PROOF_ZIP_PATH="${zip_fixture_archive}" \
+  "${PROOF_SCRIPT}" --test-product-zip-input >"${zip_input_evidence}"
+jq -e --arg path "${zip_fixture_archive}" '
+  .path == $path and .explicit == true and .rebuild_required == false
+' "${zip_input_evidence}" >/dev/null || fail "explicit signed zip input was not bound without rebuild"
+expect_failure "manual proof accepted a relative signed zip input" \
+  env RELAYKIT_DESKTOP_PROOF_ZIP_PATH="relative.zip" "${PROOF_SCRIPT}" --test-product-zip-input
+
+package_sentinel="${zip_fixture_root}/package-sentinel.sh"
+package_sentinel_marker="${zip_fixture_root}/package-sentinel-invoked"
+cat >"${package_sentinel}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: >"${RELAYKIT_PACKAGE_SENTINEL_MARKER}"
+exit 91
+SH
+chmod +x "${package_sentinel}"
+proof_test_home="${zip_fixture_root}/proof-home"
+mkdir -p "${proof_test_home}"
+zip_prepare_evidence="${zip_fixture_root}/prepare-evidence.json"
+HOME="${proof_test_home}" \
+  RELAYKIT_DESKTOP_PROOF_ZIP_PATH="${zip_fixture_archive}" \
+  RELAYKIT_DESKTOP_PROOF_TEST_PACKAGE_RELEASE_BIN="${package_sentinel}" \
+  RELAYKIT_PACKAGE_SENTINEL_MARKER="${package_sentinel_marker}" \
+  "${PROOF_SCRIPT}" --test-prepare-product-zip >"${zip_prepare_evidence}"
+expected_zip_hash="$(/usr/bin/shasum -a 256 "${zip_fixture_archive}" | awk '{print $1}')"
+expected_extracted_app="${proof_test_home}/Library/Application Support/RelayKit/DesktopProof/app-install/RelayKitApp.app"
+jq -e \
+  --arg path "${zip_fixture_archive}" \
+  --arg sha256 "${expected_zip_hash}" \
+  --arg extracted_app_path "${expected_extracted_app}" '
+  .path == $path and
+  .sha256 == $sha256 and
+  .extracted_app_path == $extracted_app_path and
+  .explicit == true
+' "${zip_prepare_evidence}" >/dev/null ||
+  fail "explicit signed zip preparation did not bind the extracted App to the exact artifact"
+[[ -x "${expected_extracted_app}/Contents/MacOS/RelayKitApp.bin" &&
+   -x "${expected_extracted_app}/Contents/MacOS/relay" ]] ||
+  fail "explicit signed zip preparation did not extract the fixture App"
+[[ ! -e "${package_sentinel_marker}" ]] ||
+  fail "explicit signed zip preparation invoked the package rebuild path"
+
+echo "Manual proof explicit signed zip behavior test passed"
 
 current_route_dir="${tmp_dir}/current-route"
 last_attempt_dir="${tmp_dir}/last-attempt"

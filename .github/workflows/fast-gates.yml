@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   public-boundary:
-    name: Fast Gates / Public boundary
+    name: Fast Public Boundary
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -23,7 +23,7 @@ jobs:
         run: ./scripts/public-boundary-check.sh
 
   shell-contracts:
-    name: Fast Gates / Shell contracts
+    name: Fast Shell Contracts
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -33,6 +33,8 @@ jobs:
         run: find script scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
       - name: Check GitHub Actions contract
         run: ./scripts/github-actions-contract-test.sh
+      - name: Check hosted-check evidence contract
+        run: ./scripts/github-required-checks-test.sh
       - name: Check public-boundary fixtures
         run: ./scripts/public-boundary-check-test.sh
       - name: Check agent workflow contract
@@ -41,7 +43,7 @@ jobs:
         run: ./scripts/relaykit-validate-test.sh
 
   go-quality:
-    name: Fast Gates / Go test, vet, and format
+    name: Fast Go Quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

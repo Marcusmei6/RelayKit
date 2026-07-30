@@ -13,12 +13,17 @@ concurrency:
 
 jobs:
   runtime-safety:
-    name: macOS Runtime Safety / Offline contract and fault harness
+    name: macOS Runtime Safety
     runs-on: macos-14
     timeout-minutes: 35
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
       - name: Verify offline safety contract
         run: ./scripts/runtime-safety-fault-injection-test.sh
       - name: Run isolated fault harness

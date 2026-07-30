@@ -4,24 +4,30 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
+## Current Truth (2026-07-29, Build 17 pre-freeze release tooling)
+
+Build 17 remains a planned marketing `0.1.6`, build `17` distribution; no package, signing, notarization, installation, remote mutation, draft upload, GUI proof, or live model run occurred in this lane. The source tooling now names the six required checks exactly, requires same-SHA hosted CI evidence before signed finalization, records App and bundled-helper executable hashes in manifest schema 2, and freshly re-queries the same SHA before a draft can reach `gh release create`.
+
+The general Desktop proof path now accepts `RELAYKIT_DESKTOP_PROOF_ZIP_PATH=/absolute/path/signed.zip`; when supplied it skips the local rebuild, extracts that exact archive, and records its path and SHA-256 in current evidence. The pre-freeze release-tooling CR passed after fail-closed provenance, immutable fresh-evidence, canonical test-root, and behavior-test findings were remediated. This is tooling readiness only. GitHub-green evidence, Build 17 package/sign/notary/install/proof, and any draft creation remain pending.
+
 ## Current Truth (2026-07-28, P0 runtime safety and GitHub-ready CI)
 
 The runtime-safety candidate at `5992d6d` passed all eight fault cases. The fresh evidence is `dist/runtime-safety/evidence.json`; it binds source commit `5992d6d`, the tracked harness SHA-256, and the tracked harness-test SHA-256. Later CI/documentation-only commits do not replace that runtime candidate. This is a source-candidate result, not a new installed or distributed build. Installed Build 16 remains the historical/current shared runtime and was not stopped, replaced, rebuilt, signed, or otherwise touched by this lane. Build 17 signed beta remains the next distribution goal.
 
 Catalog P0 is locked by `3f7f8e7`: configured models stay visible when discovery is unauthorized or unavailable, an exact successful provider route test can mark a model reachable, and last-known-good state carries a timestamp plus config fingerprint and reports stale state after configuration drift. Responses P0 is locked by `7afff32`: one response has one terminal outcome, post-terminal business events are dropped, persistent WebSocket turns remain reusable, cancellation propagates, malformed/truncated upstreams fail, and the tool-call/tool-output lifecycle is covered without a product-path fake `OK`. WebSocket transport does not silently switch to HTTP because a compatible Codex fallback contract has not been proven.
 
-Known residual risks are explicit: simultaneous loss of both App and helper cannot guarantee config recovery and is not reboot-safe; the safe null stderr sink intentionally leaves early helper startup errors generic; and the workflows have not run remotely. A future release lane must reject an artifact unless all required checks succeeded for that artifact manifest's exact `source_commit_sha`; that remote same-SHA enforcement is a Build 17 release blocker, not evidence supplied by this source-only lane.
+Known residual risks are explicit: simultaneous loss of both App and helper cannot guarantee config recovery and is not reboot-safe; the safe null stderr sink intentionally leaves early helper startup errors generic; and the workflows have not run remotely. The 2026-07-29 tooling update implements the same-SHA enforcement, but no hosted result has been obtained.
 
 Four GitHub Actions workflows now define public-boundary, shell, Go, Swift/App, runtime-safety, and deterministic protocol gates. The checkout currently has no Git remote, so these workflows are GitHub-ready but have not run on GitHub and must not be described as GitHub-green.
 
 When a public remote is created and the first branch is pushed in a separately authorized lane, protect `main` with these exact required checks:
 
-- `Fast Gates / Public boundary`
-- `Fast Gates / Shell contracts`
-- `Fast Gates / Go test, vet, and format`
-- `macOS App / Swift and headless package validation`
-- `macOS Runtime Safety / Offline contract and fault harness`
-- `Protocol Contract / Loopback adapters and Responses`
+- `Fast Public Boundary`
+- `Fast Shell Contracts`
+- `Fast Go Quality`
+- `macOS App`
+- `macOS Runtime Safety`
+- `Protocol Contract`
 
 Suggested first-push sequence: create the public repository/remote, push `main`, confirm all six checks appear and pass on GitHub, then enable branch protection requiring those exact checks and an up-to-date branch. This lane does not create a remote, push, sign, package a release, or publish anything.
 

@@ -20,7 +20,10 @@ CODEX_CONFIG="${CODEX_HOME_DIR}/config.toml"
 OUT="${ROOT}/dist/codex-desktop-manual-proof"
 LAST_ROUTE_OUT="${ROOT}/dist/codex-desktop-manual-proof-last-route"
 LAST_COMPLETE_OUT="${ROOT}/dist/codex-desktop-manual-proof-last-complete"
-ZIP_PATH="${ROOT}/dist/RelayKitApp-local.zip"
+DEFAULT_ZIP_PATH="${ROOT}/dist/RelayKitApp-local.zip"
+ZIP_PATH="${DEFAULT_ZIP_PATH}"
+EXPLICIT_ZIP_INPUT=false
+PACKAGE_RELEASE_BIN="${ROOT}/script/package_release.sh"
 APP_INSTALL_DIR="${PROOF_ROOT}/app-install"
 APP_BUNDLE="${APP_INSTALL_DIR}/RelayKitApp.app"
 APP_REAL_BINARY="${APP_BUNDLE}/Contents/MacOS/RelayKitApp.bin"
@@ -134,6 +137,25 @@ The full run requires:
 The provider config must be outside tracked public files, contain only a
 credential reference, and never contain an inline key or token.
 EOF
+}
+
+configure_product_zip_input() {
+  local configured_zip="${RELAYKIT_DESKTOP_PROOF_ZIP_PATH:-}"
+  if [[ -z "${configured_zip}" ]]; then
+    ZIP_PATH="${DEFAULT_ZIP_PATH}"
+    EXPLICIT_ZIP_INPUT=false
+    return 0
+  fi
+  [[ "${configured_zip}" = /* ]] || {
+    echo "RELAYKIT_DESKTOP_PROOF_ZIP_PATH must be an absolute path" >&2
+    return 1
+  }
+  [[ -s "${configured_zip}" ]] || {
+    echo "RELAYKIT_DESKTOP_PROOF_ZIP_PATH must name an existing non-empty zip" >&2
+    return 1
+  }
+  ZIP_PATH="${configured_zip}"
+  EXPLICIT_ZIP_INPUT=true
 }
 
 codex_binary_from_bundle() {
@@ -2765,25 +2787,19 @@ start_gateway() {
   exit 1
 }
 
-prepare_extracted_app() {
-  if ! port_is_free 19777; then
-    echo "127.0.0.1:19777 is already in use; close RelayKit before starting isolated proof" >&2
-    return 1
+prepare_product_zip_artifact() {
+  configure_product_zip_input || return 1
+  if [[ "${EXPLICIT_ZIP_INPUT}" == "false" ]]; then
+    local reuse_current_zip="${RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP:-0}"
+    case "${reuse_current_zip}" in
+      0) "${PACKAGE_RELEASE_BIN}" --verify >/dev/null ;;
+      1) ;;
+      *)
+        echo "RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP must be 0 or 1" >&2
+        return 1
+        ;;
+    esac
   fi
-  if pgrep -x RelayKitApp.bin >/dev/null 2>&1; then
-    echo "RelayKit App is already running; close it before starting isolated proof" >&2
-    return 1
-  fi
-
-  local reuse_current_zip="${RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP:-0}"
-  case "${reuse_current_zip}" in
-    0) "${ROOT}/script/package_release.sh" --verify >/dev/null ;;
-    1) ;;
-    *)
-      echo "RELAYKIT_DESKTOP_PROOF_REUSE_CURRENT_ZIP must be 0 or 1" >&2
-      return 1
-      ;;
-  esac
   [[ -s "${ZIP_PATH}" ]] || {
     echo "current RelayKit local zip was not produced" >&2
     return 1
@@ -2791,6 +2807,7 @@ prepare_extracted_app() {
   APP_ZIP_SHA256="$(/usr/bin/shasum -a 256 "${ZIP_PATH}" | awk '{print $1}')"
   APP_ZIP_BUILD_TIME_UTC="$(date -u -r "${ZIP_PATH}" +"%Y-%m-%dT%H:%M:%SZ")"
   local reuse_extracted_app="${RELAYKIT_DESKTOP_PROOF_REUSE_EXTRACTED_APP:-0}"
+  [[ "${EXPLICIT_ZIP_INPUT}" == "true" ]] && reuse_extracted_app=0
   case "${reuse_extracted_app}" in
     0)
       rm -rf "${APP_INSTALL_DIR}"
@@ -2813,6 +2830,18 @@ prepare_extracted_app() {
     return 1
   }
   /usr/bin/codesign --verify --deep --strict "${APP_BUNDLE}"
+}
+
+prepare_extracted_app() {
+  if ! port_is_free 19777; then
+    echo "127.0.0.1:19777 is already in use; close RelayKit before starting isolated proof" >&2
+    return 1
+  fi
+  if pgrep -x RelayKitApp.bin >/dev/null 2>&1; then
+    echo "RelayKit App is already running; close it before starting isolated proof" >&2
+    return 1
+  fi
+  prepare_product_zip_artifact
 }
 
 verify_extracted_app_matches_zip() {
@@ -3991,6 +4020,8 @@ write_evidence() {
     --arg scenario_hash_before "${SCENARIO_HASH_BEFORE}" \
     --arg scenario_hash_after "${scenario_hash_after}" \
     --arg product_artifact_hash_after "${product_artifact_hash_after}" \
+    --arg product_artifact_path "${ZIP_PATH}" \
+    --argjson explicit_zip_input "${EXPLICIT_ZIP_INPUT}" \
     --arg gateway_port "${gateway_port}" \
     --arg provider_port "${provider_port}" \
     --arg started_at "${STARTED_AT}" \
@@ -4052,6 +4083,8 @@ write_evidence() {
       product_artifact_sha256_before: (if $current_zip_sha256 == "" then null else $current_zip_sha256 end),
       product_artifact_sha256_after: (if $product_artifact_hash_after == "missing" then null else $product_artifact_hash_after end),
       product_artifact_unchanged: $product_artifact_unchanged,
+      product_artifact_path: $product_artifact_path,
+      product_artifact_input: (if $explicit_zip_input then "explicit_zip" else "generated_local_zip" end),
       harness_sha256: (if $harness_snapshot_unchanged then $harness_snapshot_hash_after else null end),
       harness_sha256_before: $harness_snapshot_hash_before,
       harness_sha256_after: $harness_snapshot_hash_after,
@@ -4068,6 +4101,7 @@ write_evidence() {
         relaykit_app_launched_from_extracted_zip: $app_launched,
         launch_method: (if $app_launched then "launchservices_open_extracted_app_with_isolated_config_override" else "not_launched_for_fixture_setup" end),
         extracted_app_path: $extracted_app_path,
+        zip_path: $product_artifact_path,
         current_zip_sha256: $current_zip_sha256,
         zip_build_time_utc: $zip_build_time_utc,
         process_and_gateway_ready_observed_before_desktop: $app_launched,
@@ -6117,6 +6151,37 @@ EOF
   --test-product-artifact-state-guard)
     [[ -n "${3:-}" ]] || exit 2
     assert_product_artifact_unchanged "$2" "$3"
+    ;;
+  --test-product-zip-input)
+    [[ -z "${2:-}" ]] || exit 2
+    configure_product_zip_input
+    jq -n \
+      --arg path "${ZIP_PATH}" \
+      --argjson explicit "${EXPLICIT_ZIP_INPUT}" \
+      '{
+        path: $path,
+        explicit: $explicit,
+        rebuild_required: ($explicit | not)
+      }'
+    ;;
+  --test-prepare-product-zip)
+    [[ -z "${2:-}" ]] || exit 2
+    [[ -n "${RELAYKIT_DESKTOP_PROOF_TEST_PACKAGE_RELEASE_BIN:-}" &&
+       "${RELAYKIT_DESKTOP_PROOF_TEST_PACKAGE_RELEASE_BIN}" = /* &&
+       -x "${RELAYKIT_DESKTOP_PROOF_TEST_PACKAGE_RELEASE_BIN}" ]] || exit 2
+    PACKAGE_RELEASE_BIN="${RELAYKIT_DESKTOP_PROOF_TEST_PACKAGE_RELEASE_BIN}"
+    prepare_product_zip_artifact
+    jq -n \
+      --arg path "${ZIP_PATH}" \
+      --arg sha256 "${APP_ZIP_SHA256}" \
+      --arg extracted_app_path "${APP_BUNDLE}" \
+      --argjson explicit "${EXPLICIT_ZIP_INPUT}" \
+      '{
+        path: $path,
+        sha256: $sha256,
+        extracted_app_path: $extracted_app_path,
+        explicit: $explicit
+      }'
     ;;
   --test-provider-gateway-status)
     [[ -n "${3:-}" ]] || exit 2

@@ -12,34 +12,48 @@ root = Path(sys.argv[1])
 workflow_dir = root / ".github" / "workflows"
 required = {
     "fast-gates.yml": (
-        "name: Fast Gates / Public boundary",
-        "name: Fast Gates / Shell contracts",
-        "name: Fast Gates / Go test, vet, and format",
         "./scripts/public-boundary-check.sh",
         "./scripts/github-actions-contract-test.sh",
+        "./scripts/github-required-checks-test.sh",
         "go test ./...",
         "go vet ./...",
         "gofmt -l .",
     ),
     "macos-app.yml": (
-        "name: macOS App / Swift and headless package validation",
+        "uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32",
+        "go-version-file: gateway/go.mod",
+        "cache-dependency-path: gateway/go.sum",
         "swift build",
         "swift run RelayKitAppValidationTests",
         "./script/build_app_bundle.sh --verify",
         "./script/package_release.sh --verify",
+        "./scripts/signed-release-packaging-test.sh",
+        "./scripts/codex-desktop-manual-proof-test.sh",
     ),
     "macos-runtime-safety.yml": (
-        "name: macOS Runtime Safety / Offline contract and fault harness",
+        "uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32",
+        "go-version-file: gateway/go.mod",
+        "cache-dependency-path: gateway/go.sum",
         "./scripts/runtime-safety-fault-injection-test.sh",
         "./scripts/runtime-safety-fault-injection.sh",
     ),
     "protocol-contract.yml": (
-        "name: Protocol Contract / Loopback adapters and Responses",
         "go test ./internal/server -count=1",
         "TestResponsesProxiesToFakeOpenAIChat",
         "TestNativeOpenAIResponsesNonStreamingPreservesProtocol",
         "TestResponsesP0ToolCallLifecycle",
     ),
+}
+
+expected_job_names = {
+    "fast-gates.yml": {
+        "public-boundary": "Fast Public Boundary",
+        "shell-contracts": "Fast Shell Contracts",
+        "go-quality": "Fast Go Quality",
+    },
+    "macos-app.yml": {"app-validation": "macOS App"},
+    "macos-runtime-safety.yml": {"runtime-safety": "macOS Runtime Safety"},
+    "protocol-contract.yml": {"loopback-responses": "Protocol Contract"},
 }
 
 forbidden = (
@@ -97,8 +111,20 @@ for filename, snippets in required.items():
         for index, start in enumerate(starts):
             end = starts[index + 1].start() if index + 1 < len(starts) else len(jobs_text)
             block = jobs_text[start.end():end]
+            name_match = re.search(r"(?m)^    name: (.+?)\s*$", block)
+            expected_name = expected_job_names[filename].get(start.group(1))
+            if expected_name is None:
+                errors.append(f"{filename}: unexpected job {start.group(1)}")
+            elif not name_match or name_match.group(1) != expected_name:
+                actual_name = name_match.group(1) if name_match else "missing"
+                errors.append(
+                    f"{filename}: job {start.group(1)} name must be {expected_name!r}, got {actual_name!r}"
+                )
             if not re.search(r"(?m)^    timeout-minutes: [1-9][0-9]*\s*$", block):
                 errors.append(f"{filename}: job {start.group(1)} lacks timeout-minutes")
+        missing_jobs = set(expected_job_names[filename]) - {start.group(1) for start in starts}
+        for job in sorted(missing_jobs):
+            errors.append(f"{filename}: missing expected job {job}")
 
     for snippet in snippets:
         if snippet not in text:

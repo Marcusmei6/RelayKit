@@ -18,11 +18,21 @@ The repository defines four public-safe workflows under `.github/workflows/`. Be
 ```bash
 bash -n scripts/github-actions-contract-test.sh
 ./scripts/github-actions-contract-test.sh
+./scripts/github-required-checks-test.sh
 ```
 
 The contract checks full-SHA action pins, read-only permissions, concurrency cancellation, job timeouts, required commands, and the absence of secrets, live-provider, shared-runtime, signing, and release behavior. The workflows produce no uploaded artifacts. They are GitHub-ready but have not run on GitHub because this checkout has no remote.
 
-On the first separately authorized push, confirm these exact checks appear: `Fast Gates / Public boundary`, `Fast Gates / Shell contracts`, `Fast Gates / Go test, vet, and format`, `macOS App / Swift and headless package validation`, `macOS Runtime Safety / Offline contract and fault harness`, and `Protocol Contract / Loopback adapters and Responses`. Require all six on `main` only after their first GitHub run passes.
+On the first separately authorized push, confirm these exact checks appear: `Fast Public Boundary`, `Fast Shell Contracts`, `Fast Go Quality`, `macOS App`, `macOS Runtime Safety`, and `Protocol Contract`. Require all six on `main` only after their first GitHub run passes.
+
+After a commit has run on GitHub, write the public-safe same-SHA evidence used by signed packaging:
+
+```bash
+./scripts/github-required-checks.sh \
+  --repo owner/repo \
+  --sha 0123456789abcdef0123456789abcdef01234567 \
+  --output /absolute/path/ci-evidence.json
+```
 
 ## Local Helper
 
@@ -61,12 +71,15 @@ When sequencing dogfood and Desktop route proof against one immutable artifact, 
 RELAYKIT_SIGNING_IDENTITY="Developer ID Application: Example Team (TEAMID)" \
 RELAYKIT_NOTARYTOOL_PROFILE="relaykit-notary" \
 RELAYKIT_APPLE_TEAM_ID="TEAMID" \
+RELAYKIT_CI_EVIDENCE_PATH=/absolute/path/ci-evidence.json \
+RELAYKIT_APP_VERSION=0.1.6 \
+RELAYKIT_BUILD_NUMBER=17 \
 ./script/package_signed_release.sh
 ```
 
-The signed package script requires external Apple distribution credentials. Without them it exits before signing with `missing Developer ID signing identity / notarization credentials` and does not create `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip`.
+The signed package script requires external Apple distribution credentials and an absolute CI evidence file for the clean current HEAD. Without either it fails closed and does not finalize `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip`.
 
-When credentials are present, the script builds the complete bundle, signs the bundled `relay` helper first, signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and emits GitHub Release-ready zip plus checksum files.
+When inputs are present, the script builds the complete bundle, signs the bundled `relay` helper first, signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and emits a manifest binding the source SHA, clean state, version/build, zip/App-tree/App-executable/helper hashes, and hosted check/run evidence.
 
 Auto-updater runtime work is intentionally not part of this script. Sparkle 2/appcast policy is documented in `docs/update-policy.md`; the signed-beta prerequisite passed, but the updater runtime and feed remain unimplemented.
 
@@ -76,7 +89,7 @@ Auto-updater runtime work is intentionally not part of this script. Sparkle 2/ap
 RELAYKIT_GITHUB_REPO=owner/repo ./script/create_github_release_draft.sh
 ```
 
-The draft script requires an existing signed zip and checksum from `package_signed_release.sh`. It re-extracts the zip, verifies `codesign`, `spctl`, and `stapler`, writes local release notes under `dist/github-release/v<version>/`, then creates a GitHub draft release with the signed zip and checksum. It does not publish an appcast or Sparkle feed.
+The draft script requires an existing signed zip, checksum, and manifest from `package_signed_release.sh`. It re-extracts and verifies the payload, freshly queries the manifest's exact source SHA, requires the new check evidence to match the embedded evidence, then creates only a GitHub draft release. It never publishes the release or an appcast.
 
 ## Public Boundary Check
 
@@ -170,6 +183,8 @@ Evidence separates `product_artifact_sha256`, `harness_sha256`, and `scenario_sh
 The automated path becomes accepted only after a fresh four-stage run exits `0` and its current evidence records `desktop_gui_route_proof=automated_gui_complete` plus `human_intervention_count=0`. Separate custom/diagnostic runs cannot be aggregated into that result. A single GUI stage may produce multiple upstream usage events; all matching events must be completed/200, and the unique rollout/thread/marker binding proves one GUI submission. Custom completion preserves last-route/custom evidence without replacing the reserved full-standard last-complete slot. Accessibility permission, authenticated Desktop state, and repository-external provider configuration are one-time prerequisites; after they are present, the standard run must not ask anyone to select a model, paste or type a query, click Send, or press Enter.
 
 The current accepted local result is preserved in `dist/codex-desktop-manual-proof/evidence.json`, `dist/codex-desktop-manual-proof-last-route/evidence.json`, and `dist/codex-desktop-manual-proof-last-complete/evidence.json`. All three bind product artifact `f81b7ce...`, harness `97e685f...`, and private scenario `334288c...` to one zero-human four-stage run. These ignored artifacts are current-machine evidence, not checked-in fixtures.
+
+For a future signed-package proof, set `RELAYKIT_DESKTOP_PROOF_ZIP_PATH=/absolute/path/RelayKitApp-<version>-signed.zip`. The harness skips the local rebuild, extracts that exact zip, and records its path and SHA-256 in current-run evidence.
 
 The default manual entry remains a compatibility path:
 

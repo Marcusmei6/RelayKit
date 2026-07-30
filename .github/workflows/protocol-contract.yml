@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   loopback-responses:
-    name: Protocol Contract / Loopback adapters and Responses
+    name: Protocol Contract
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

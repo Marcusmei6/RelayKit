@@ -13,12 +13,17 @@ concurrency:
 
 jobs:
   app-validation:
-    name: macOS App / Swift and headless package validation
+    name: macOS App
     runs-on: macos-14
     timeout-minutes: 35
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
       - name: Build Swift package
         working-directory: app
         run: swift build
@@ -29,3 +34,7 @@ jobs:
         run: ./script/build_app_bundle.sh --verify
       - name: Verify headless local package
         run: ./script/package_release.sh --verify
+      - name: Check signed release contracts
+        run: ./scripts/signed-release-packaging-test.sh
+      - name: Check Desktop proof contracts
+        run: ./scripts/codex-desktop-manual-proof-test.sh
