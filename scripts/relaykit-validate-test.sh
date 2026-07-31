@@ -70,7 +70,8 @@ new_git_repo "${signed_beta_repo}"
 jq -e '
   .status == "planned" and
   .validation_profile == "signed-beta" and
-  .release_version == "v0.1.0" and
+  .release_version == "v0.1.6" and
+  .release_build == "17" and
   .execution_allowed == false and
   [.plan_steps[].id] == [
     "sign-package",
@@ -87,6 +88,7 @@ jq -e '
     "cleanup",
     "manifest"
   ] and
+  (.plan_steps[0].action | contains("v0.1.6 build 17")) and
   all(.plan_steps[]; (.owner == "relaykit_release" or .owner == "relaykit_test")) and
   ([.plan_steps[] | select(.owner == "relaykit_release")] | length) == 4 and
   ([.plan_steps[] | select(.owner == "relaykit_test")] | length) == 9 and

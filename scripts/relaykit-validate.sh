@@ -203,7 +203,7 @@ if signed_beta:
         {
             "id": "sign-package",
             "owner": "relaykit_release",
-            "action": "Build and Developer ID sign the v0.1.0 package with Hardened Runtime using release-owned credentials outside the repository",
+            "action": "Build and Developer ID sign the v0.1.6 build 17 package with Hardened Runtime using release-owned credentials outside the repository",
             "acceptance": "The bundled helper and App pass strict codesign verification",
         },
         {
@@ -255,7 +255,8 @@ if signed_beta:
     print(json.dumps({
         "status": "planned",
         "validation_profile": "signed-beta",
-        "release_version": "v0.1.0",
+        "release_version": "v0.1.6",
+        "release_build": "17",
         "execution_allowed": False,
         "base": base,
         "head": head,
