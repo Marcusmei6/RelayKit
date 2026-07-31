@@ -122,10 +122,11 @@ The signed beta flow has passed locally. Reproducing it requires external Apple 
 RELAYKIT_SIGNING_IDENTITY="Developer ID Application: Example Team (TEAMID)" \
 RELAYKIT_NOTARYTOOL_PROFILE="relaykit-notary" \
 RELAYKIT_APPLE_TEAM_ID="TEAMID" \
+RELAYKIT_CI_EVIDENCE_PATH=/absolute/path/ci-evidence.json \
 ./script/package_signed_release.sh
 ```
 
-Without those values the script fails with `missing Developer ID signing identity / notarization credentials` and does not produce a misleading signed artifact. Signing runs after the full bundle is assembled, signs the bundled `relay` helper first, then signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and writes GitHub Release-ready assets under `dist/github-release/v<version>/`.
+Without those Apple values or exact-SHA hosted CI evidence, the script fails closed and does not produce a misleading signed artifact. Signing runs after the full bundle is assembled, signs the bundled `relay` helper first, then signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and writes exactly the signed zip, checksum, and manifest under `dist/github-release/v<version>/`.
 
 `RELAYKIT_APP_VERSION` and `RELAYKIT_BUILD_NUMBER` flow into `CFBundleShortVersionString` and `CFBundleVersion`. Auto-updater support, including Sparkle 2/appcast work, is documented in `docs/update-policy.md` and `docs/updater-readiness.md`; the signed-beta prerequisite is proven, but updater runtime remains intentionally unimplemented.
 

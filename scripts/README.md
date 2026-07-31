@@ -79,7 +79,7 @@ RELAYKIT_BUILD_NUMBER=17 \
 
 The signed package script requires external Apple distribution credentials and an absolute CI evidence file for the clean current HEAD. Without either it fails closed and does not finalize `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip`.
 
-When inputs are present, the script builds the complete bundle, signs the bundled `relay` helper first, signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and emits a manifest binding the source SHA, clean state, version/build, zip/App-tree/App-executable/helper hashes, and hosted check/run evidence.
+When inputs are present, the script freezes the source commit and archive hash, builds the complete bundle itself, copies that exact build into a private package directory, and rechecks the source identity before and after signing/notarization. It signs the bundled `relay` helper first, signs `RelayKitApp.app` with hardened runtime, submits to notarization, staples, validates, and emits one non-writable three-file release directory: the signed zip, its checksum, and a manifest binding the source SHA, clean state, version/build, zip/App-tree/App-executable/helper hashes, and hosted check/run evidence. Finalizing an externally prepared App is restricted to offline test mode.
 
 Auto-updater runtime work is intentionally not part of this script. Sparkle 2/appcast policy is documented in `docs/update-policy.md`; the signed-beta prerequisite passed, but the updater runtime and feed remain unimplemented.
 
@@ -89,7 +89,7 @@ Auto-updater runtime work is intentionally not part of this script. Sparkle 2/ap
 RELAYKIT_GITHUB_REPO=owner/repo ./script/create_github_release_draft.sh
 ```
 
-The draft script requires an existing signed zip, checksum, and manifest from `package_signed_release.sh`. It re-extracts and verifies the payload, freshly queries the manifest's exact source SHA, requires the new check evidence to match the embedded evidence, then creates only a GitHub draft release. It never publishes the release or an appcast.
+The draft script requires the exact three-file output from `package_signed_release.sh`. It copies those files to a private snapshot, re-extracts and verifies that snapshot with absolute Apple tool paths, freshly queries the manifest's exact source SHA, and requires the new check evidence to match the embedded evidence. Existing releases and tags are rejected. The script creates a new lightweight tag at the source SHA and uploads the same snapshot bytes to a GitHub draft release; an ambiguous remote failure is reconciled by a run marker, removing only that run's draft and the exact expected tag. Cleanup failures stay visible and retain coherent remote state. The script never publishes the release or an appcast.
 
 ## Public Boundary Check
 

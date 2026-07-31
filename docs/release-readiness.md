@@ -17,9 +17,9 @@ The repository now contains GitHub-ready workflows, but this checkout has no Git
 
 After the checks appear and pass, enable branch protection requiring all six and an up-to-date branch. Remote creation, push, signing, notarization, packaging, and release remain outside this lane.
 
-Build 17 release tooling now requires an absolute CI evidence file for a clean current HEAD before finalization. Manifest schema 2 binds both executable hashes and embeds the six hosted checks plus deduplicated Actions runs. Draft creation freshly queries the manifest's exact SHA and fails before `gh release create` if the result differs. No hosted query or release operation was run in this source-only lane, so GitHub-green status and Build 17 distribution remain pending.
+Build 17 release tooling now requires an absolute CI evidence file for a clean current HEAD before finalization. Manifest schema 2 binds both executable hashes and embeds the six hosted checks plus deduplicated Actions runs. Production packaging freezes the commit/archive identity, builds its own App, signs and notarizes a private frozen copy, rechecks source identity, and finalizes exactly three non-writable files: the signed zip, checksum, and manifest. Installation and draft creation consume private snapshots of those files so later source-directory mutation cannot change the verified bytes. Draft creation freshly queries the manifest's exact SHA, rejects existing release/tag state, and creates a new lightweight tag at that SHA. Ambiguous remote failures reconcile and remove only the current run's marked draft and exact expected tag; cleanup failure remains explicit. No hosted query or release operation was run in this source-only lane, so GitHub-green status and Build 17 distribution remain pending.
 
-The pre-freeze tooling CR passed. The hosted shell/App checks now run the required-check evidence, signed-package orchestration, and explicit-zip proof behavior contracts; local test package mode is restricted to canonical repository-external roots.
+The hosted shell/App checks run the required-check evidence, signed-package orchestration, and explicit-zip proof behavior contracts; local test package mode is restricted to canonical repository-external roots. Focused behavior coverage includes production prepared-App rejection, post-build source drift, private build-byte freezing, exact release layout, immutable snapshot consumption, exact draft arguments/assets, source-SHA tag binding, ambiguous remote creation, and visible cleanup failure.
 
 ## Signed Beta v0.1.0 Current Candidate
 
@@ -154,6 +154,9 @@ Expected signed beta output:
 
 - `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip`
 - `dist/github-release/v<version>/RelayKitApp-<version>-signed.zip.sha256`
+- `dist/github-release/v<version>/manifest.json`
+
+Those are the only entries in the finalized release directory. The unpacked App is verified before finalization but is not retained beside the release assets.
 
 If the credentials are missing, the script must print `missing Developer ID signing identity / notarization credentials` and must not create or reuse a signed zip.
 
@@ -192,10 +195,11 @@ For signed beta, create a draft GitHub Release `v<version>` with:
 
 - `RelayKitApp-<version>-signed.zip`
 - `RelayKitApp-<version>-signed.zip.sha256`
+- `manifest.json`
 - release notes that state the supported macOS version, bundle id, signing/notarization status, and known beta limitations;
 - no appcast, Sparkle feed, or auto-update metadata until the signed beta path is proven.
 
-Use `RELAYKIT_GITHUB_REPO=owner/repo ./script/create_github_release_draft.sh` after `package_signed_release.sh` succeeds. The draft script re-validates the signed zip before uploading assets.
+Use `RELAYKIT_GITHUB_REPO=owner/repo ./script/create_github_release_draft.sh` after `package_signed_release.sh` succeeds. The draft script snapshots and re-validates all three assets, re-queries hosted checks, rejects a pre-existing release or version tag, and creates the new tag at the manifest's exact `source_commit_sha` before uploading only those snapshot bytes. If GitHub reports failure after creating remote state, the script reconciles by its run marker; it never silently deletes unowned state.
 
 Version bump flow:
 

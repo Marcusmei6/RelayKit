@@ -13,9 +13,18 @@ RELEASE_DIR="${RELAYKIT_RELEASE_DIR:-${DIST_DIR}/github-release/${TAG}}"
 SIGNED_ZIP="${RELEASE_DIR}/${APP_NAME}-${APP_MARKETING_VERSION}-signed.zip"
 SHA256_PATH="${SIGNED_ZIP}.sha256"
 MANIFEST_PATH="${RELEASE_DIR}/manifest.json"
-NOTES_PATH="${RELEASE_DIR}/release-notes.md"
+NOTES_PATH=""
 VERIFY_DIR=""
 FRESH_CI_DIR=""
+TEST_MODE="${RELAYKIT_SIGNED_RELEASE_TEST_MODE:-0}"
+CODESIGN_BIN="/usr/bin/codesign"
+SPCTL_BIN="/usr/sbin/spctl"
+XCRUN_BIN="/usr/bin/xcrun"
+TAG_CREATION_ATTEMPTED=false
+RELEASE_CREATION_ATTEMPTED=false
+RELEASE_RUN_MARKER=""
+source_commit_sha=""
+repo=""
 REQUIRED_CHECK_NAMES_JSON='[
   "Fast Public Boundary",
   "Fast Shell Contracts",
@@ -24,6 +33,15 @@ REQUIRED_CHECK_NAMES_JSON='[
   "macOS Runtime Safety",
   "Protocol Contract"
 ]'
+
+if [[ "${TEST_MODE}" == "1" ]]; then
+  : "${RELAYKIT_TEST_CODESIGN_BIN:?test mode requires RELAYKIT_TEST_CODESIGN_BIN}"
+  : "${RELAYKIT_TEST_SPCTL_BIN:?test mode requires RELAYKIT_TEST_SPCTL_BIN}"
+  : "${RELAYKIT_TEST_XCRUN_BIN:?test mode requires RELAYKIT_TEST_XCRUN_BIN}"
+  CODESIGN_BIN="${RELAYKIT_TEST_CODESIGN_BIN}"
+  SPCTL_BIN="${RELAYKIT_TEST_SPCTL_BIN}"
+  XCRUN_BIN="${RELAYKIT_TEST_XCRUN_BIN}"
+fi
 
 repo_target() {
   if [[ -n "${RELAYKIT_GITHUB_REPO:-}" ]]; then
@@ -73,18 +91,148 @@ app_tree_sha256() {
   ) | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
 }
 
+remote_releases_for_tag() {
+  gh api --paginate --slurp "repos/${repo}/releases?per_page=100" |
+    jq -c --arg tag "${TAG}" '[.[][] | select(.tag_name == $tag)]'
+}
+
+remote_exact_tag_refs() {
+  gh api "repos/${repo}/git/matching-refs/tags/${TAG}" |
+    jq -c --arg ref "refs/tags/${TAG}" '[.[] | select(.ref == $ref)]'
+}
+
+reconcile_failed_remote_mutation() {
+  local cleanup_failed=0 releases owned_count foreign_count release_id remaining_refs tag_count tag_target
+
+  if [[ "${RELEASE_CREATION_ATTEMPTED}" == "true" ]]; then
+    if [[ -z "${RELEASE_RUN_MARKER}" ]]; then
+      echo "could not reconcile failed draft creation: missing run marker" >&2
+      cleanup_failed=1
+    elif ! releases="$(remote_releases_for_tag)"; then
+      echo "could not query GitHub releases after failed draft creation" >&2
+      cleanup_failed=1
+    else
+      owned_count="$(jq --arg marker "${RELEASE_RUN_MARKER}" \
+        '[.[] | select(.draft == true and ((.body // "") | contains($marker)))] | length' <<<"${releases}")"
+      foreign_count="$(jq --arg marker "${RELEASE_RUN_MARKER}" \
+        '[.[] | select((.draft != true) or (((.body // "") | contains($marker)) | not))] | length' <<<"${releases}")"
+      if [[ "${foreign_count}" != "0" ]]; then
+        echo "failed draft creation found an unowned release for ${TAG}; remote state was not deleted" >&2
+        cleanup_failed=1
+      elif [[ "${owned_count}" != "0" ]]; then
+        while IFS= read -r release_id; do
+          [[ "${release_id}" =~ ^[0-9]+$ ]] || {
+            echo "failed draft creation returned an invalid release id" >&2
+            cleanup_failed=1
+            continue
+          }
+          if ! gh api --method DELETE "repos/${repo}/releases/${release_id}" >/dev/null; then
+            if ! releases="$(remote_releases_for_tag)"; then
+              echo "could not query GitHub releases after a failed cleanup request" >&2
+              cleanup_failed=1
+            elif jq -e --argjson id "${release_id}" 'any(.[]; .id == $id)' <<<"${releases}" >/dev/null; then
+              echo "could not delete failed GitHub draft release ${release_id}" >&2
+              cleanup_failed=1
+            fi
+          fi
+        done < <(jq -r --arg marker "${RELEASE_RUN_MARKER}" \
+          '.[] | select(.draft == true and ((.body // "") | contains($marker))) | .id' <<<"${releases}")
+        if ! releases="$(remote_releases_for_tag)" || [[ "$(jq 'length' <<<"${releases}")" != "0" ]]; then
+          echo "failed GitHub draft release is still present after cleanup" >&2
+          cleanup_failed=1
+        fi
+      fi
+    fi
+  fi
+
+  if [[ "${TAG_CREATION_ATTEMPTED}" == "true" ]]; then
+    if [[ "${cleanup_failed}" != "0" ]]; then
+      echo "retaining ${TAG} because failed draft state could not be reconciled safely" >&2
+    elif ! remaining_refs="$(remote_exact_tag_refs)"; then
+      echo "could not query GitHub tag after failed draft creation" >&2
+      cleanup_failed=1
+    else
+      tag_count="$(jq 'length' <<<"${remaining_refs}")"
+      if [[ "${tag_count}" == "1" ]]; then
+        tag_target="$(jq -r '.[0].object.type + ":" + .[0].object.sha' <<<"${remaining_refs}")"
+        if [[ "${tag_target}" != "commit:${source_commit_sha}" ]]; then
+          echo "failed draft creation found ${TAG} at an unexpected target; tag was not deleted" >&2
+          cleanup_failed=1
+        elif ! gh api --method DELETE "repos/${repo}/git/refs/tags/${TAG}" >/dev/null; then
+          if ! remaining_refs="$(remote_exact_tag_refs)" ||
+             [[ "$(jq 'length' <<<"${remaining_refs}")" != "0" ]]; then
+            echo "could not delete failed GitHub release tag ${TAG}" >&2
+            cleanup_failed=1
+          fi
+        fi
+      elif [[ "${tag_count}" != "0" ]]; then
+        echo "failed draft creation found multiple exact GitHub release tags" >&2
+        cleanup_failed=1
+      fi
+      if [[ "${cleanup_failed}" == "0" ]]; then
+        if ! remaining_refs="$(remote_exact_tag_refs)" ||
+           [[ "$(jq 'length' <<<"${remaining_refs}")" != "0" ]]; then
+          echo "failed GitHub release tag is still present after cleanup" >&2
+          cleanup_failed=1
+        fi
+      fi
+    fi
+  fi
+
+  [[ "${cleanup_failed}" == "0" ]]
+}
+
 cleanup() {
+  local status=$?
+  if [[ "${status}" -ne 0 &&
+        ( "${TAG_CREATION_ATTEMPTED}" == "true" || "${RELEASE_CREATION_ATTEMPTED}" == "true" ) &&
+        -n "${repo}" ]]; then
+    if ! reconcile_failed_remote_mutation; then
+      status=1
+    fi
+  fi
   [[ -n "${VERIFY_DIR}" ]] && rm -rf "${VERIFY_DIR}"
   [[ -n "${FRESH_CI_DIR}" ]] && rm -rf "${FRESH_CI_DIR}"
+  exit "${status}"
 }
 trap cleanup EXIT
+
+validate_release_layout() {
+  local count=0 entry name
+  while IFS= read -r entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "$(basename "${SIGNED_ZIP}")"|"$(basename "${SHA256_PATH}")"|"$(basename "${MANIFEST_PATH}")") ;;
+      *) fail "release directory contains an unexpected entry: ${name}" ;;
+    esac
+    count=$((count + 1))
+  done < <(/usr/bin/find "${RELEASE_DIR}" -mindepth 1 -maxdepth 1 -print)
+  [[ "${count}" -eq 3 ]] || fail "release directory must contain exactly the signed zip, checksum, and manifest"
+}
 
 repo="$(repo_target || true)"
 [[ -n "${repo}" ]] || fail "missing GitHub repo target: set RELAYKIT_GITHUB_REPO or configure origin"
 [[ "${repo}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "GitHub repo target must be owner/repo"
+[[ -d "${RELEASE_DIR}" && ! -L "${RELEASE_DIR}" ]] || fail "release directory must be a real directory"
+validate_release_layout
 [[ -f "${SIGNED_ZIP}" && -f "${SHA256_PATH}" && -f "${MANIFEST_PATH}" ]] || fail "missing immutable signed release assets: run ./script/package_signed_release.sh first"
+[[ ! -L "${SIGNED_ZIP}" && ! -L "${SHA256_PATH}" && ! -L "${MANIFEST_PATH}" ]] ||
+  fail "release assets must not be symlinks"
 command -v gh >/dev/null 2>&1 || fail "missing gh CLI"
 gh auth status >/dev/null 2>&1 || fail "gh CLI is not authenticated"
+
+VERIFY_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/relaykit-draft-verify.XXXXXX")"
+chmod 700 "${VERIFY_DIR}"
+SNAPSHOT_DIR="${VERIFY_DIR}/release-snapshot"
+mkdir -m 700 "${SNAPSHOT_DIR}"
+/bin/cp -p "${SIGNED_ZIP}" "${SNAPSHOT_DIR}/$(basename "${SIGNED_ZIP}")"
+/bin/cp -p "${SHA256_PATH}" "${SNAPSHOT_DIR}/$(basename "${SHA256_PATH}")"
+/bin/cp -p "${MANIFEST_PATH}" "${SNAPSHOT_DIR}/$(basename "${MANIFEST_PATH}")"
+SIGNED_ZIP="${SNAPSHOT_DIR}/$(basename "${SIGNED_ZIP}")"
+SHA256_PATH="${SNAPSHOT_DIR}/$(basename "${SHA256_PATH}")"
+MANIFEST_PATH="${SNAPSHOT_DIR}/$(basename "${MANIFEST_PATH}")"
+chmod 400 "${SIGNED_ZIP}" "${SHA256_PATH}" "${MANIFEST_PATH}"
+NOTES_PATH="${VERIFY_DIR}/release-notes.md"
 
 zip_sha256="$(sha256 "${SIGNED_ZIP}")"
 checksum_sha256="$(/usr/bin/awk -v file="$(basename "${SIGNED_ZIP}")" 'NF == 2 && $2 == file { print $1 }' "${SHA256_PATH}")"
@@ -140,7 +288,6 @@ jq -e \
   ))
 ' "${MANIFEST_PATH}" >/dev/null || fail "signed release manifest does not match zip"
 
-VERIFY_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/relaykit-draft-verify.XXXXXX")"
 EXTRACTED_APP="${VERIFY_DIR}/${APP_NAME}.app"
 /usr/bin/ditto -x -k "${SIGNED_ZIP}" "${VERIFY_DIR}"
 [[ -d "${EXTRACTED_APP}" ]] || fail "signed zip is missing ${APP_NAME}.app"
@@ -150,9 +297,9 @@ EXTRACTED_APP="${VERIFY_DIR}/${APP_NAME}.app"
   fail "signed zip App executable does not match manifest"
 [[ "$(sha256 "${EXTRACTED_APP}/Contents/MacOS/relay")" == "$(jq -r '.bundled_helper_executable_sha256' "${MANIFEST_PATH}")" ]] ||
   fail "signed zip bundled helper does not match manifest"
-codesign --verify --deep --strict --verbose=4 "${EXTRACTED_APP}" >/dev/null
-spctl -a -vvv -t exec "${EXTRACTED_APP}" >/dev/null
-xcrun stapler validate "${EXTRACTED_APP}" >/dev/null
+"${CODESIGN_BIN}" --verify --deep --strict --verbose=4 "${EXTRACTED_APP}" >/dev/null
+"${SPCTL_BIN}" -a -vvv -t exec "${EXTRACTED_APP}" >/dev/null
+"${XCRUN_BIN}" stapler validate "${EXTRACTED_APP}" >/dev/null
 
 source_commit_sha="$(jq -r '.source_commit_sha' "${MANIFEST_PATH}")"
 FRESH_CI_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/relaykit-draft-ci.XXXXXX")"
@@ -164,7 +311,6 @@ fresh_ci_evidence="${FRESH_CI_DIR}/evidence.json"
 jq -e --slurp '.[0].hosted_ci == .[1]' "${MANIFEST_PATH}" "${fresh_ci_evidence}" >/dev/null ||
   fail "fresh GitHub checks do not match the signed release manifest"
 
-mkdir -p "${RELEASE_DIR}"
 cat >"${NOTES_PATH}" <<NOTES
 # RelayKit ${APP_MARKETING_VERSION} Dogfood Beta
 
@@ -196,10 +342,36 @@ When \`install_signed_release.sh\` replaces an existing App, it retains the prio
 - Official Codex auth proof still uses the isolated RelayKit flow.
 - Local usage history stays on the tester's Mac.
 NOTES
+RELEASE_RUN_MARKER="relaykit-release-run:$(
+  printf '%s:%s:%s:%s\n' "${source_commit_sha}" "$$" "$(/bin/date +%s)" "${RANDOM}" |
+    /usr/bin/shasum -a 256 |
+    /usr/bin/awk '{print $1}'
+)"
+printf '\n<!-- %s -->\n' "${RELEASE_RUN_MARKER}" >>"${NOTES_PATH}"
 
+existing_release_count="$(remote_releases_for_tag | jq 'length')"
+[[ "${existing_release_count}" == "0" ]] || fail "GitHub release already exists: ${TAG}"
+existing_tag_count="$(
+  gh api "repos/${repo}/git/matching-refs/tags/${TAG}" |
+    jq --arg ref "refs/tags/${TAG}" '[.[] | select(.ref == $ref)] | length'
+)"
+[[ "${existing_tag_count}" == "0" ]] || fail "release tag already exists: ${TAG}"
+TAG_CREATION_ATTEMPTED=true
+gh api --method POST "repos/${repo}/git/refs" \
+  -f ref="refs/tags/${TAG}" \
+  -f sha="${source_commit_sha}" >/dev/null
+tag_target="$(
+  gh api "repos/${repo}/git/ref/tags/${TAG}" --jq '.object.type + ":" + .object.sha'
+)"
+[[ "${tag_target}" == "commit:${source_commit_sha}" ]] ||
+  fail "created release tag does not resolve to the manifest source commit"
+
+RELEASE_CREATION_ATTEMPTED=true
 gh release create "${TAG}" \
   --repo "${repo}" \
   --draft \
+  --verify-tag \
+  --target "${source_commit_sha}" \
   --title "RelayKit ${APP_MARKETING_VERSION} Dogfood Beta" \
   --notes-file "${NOTES_PATH}" \
   "${SIGNED_ZIP}" \

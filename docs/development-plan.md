@@ -379,7 +379,7 @@ Status: runtime-safety candidate complete at `5992d6d`; `dist/runtime-safety/evi
 - Catalog P0 at `3f7f8e7` preserves configured models through discovery failures, records route-confirmed reachability, and keeps fingerprinted/timestamped last-known-good state. Responses P0 at `7afff32` locks single-terminal ordering, persistent WebSocket turns, cancellation, malformed/truncated failures, and tool-call lifecycle; it deliberately does not invent an unproven WebSocket-to-HTTP client fallback.
 - Residual runtime risk remains explicit: simultaneous App/helper loss is not guaranteed recoverable or reboot-safe. The null stderr sink is lifecycle-safe but leaves early startup failures generic.
 - The checkout has no Git remote, so CI is GitHub-ready rather than GitHub-green. A later authorized first push must confirm the six exact checks listed in `docs/handoff.md` and `docs/release-readiness.md`, then require them on an up-to-date `main` branch.
-- Before any Build 17 draft/upload, release automation must verify that those checks succeeded for the artifact manifest's exact `source_commit_sha`; this remote same-SHA gate is not implemented or claimed by the current source-only lane.
+- Before any Build 17 draft/upload, release automation verifies that those checks succeeded for the artifact manifest's exact `source_commit_sha`. The gate is implemented locally, but no remote same-SHA result is claimed by the current source-only lane.
 
 ## Phase 7.16: Build 17 Pre-Freeze Release Tooling
 
@@ -388,11 +388,11 @@ Status: source tooling implemented with focused local contracts; Build 17 distri
 - Planned distribution metadata is marketing `0.1.6`, build `17`; release scripts remain environment-driven.
 - The six required GitHub check names are exact, and both macOS jobs install Go from the checked-in module files using the pinned setup action.
 - Hosted shell/App checks execute the required-check evidence, signed-release orchestration, and explicit-zip proof contracts; the portable proof contract uses test-only temporary fixtures.
-- Signed finalization requires absolute same-SHA CI evidence for clean HEAD. Manifest schema 2 binds source, version/build, artifact/App tree, App executable, bundled helper, checks, and deduplicated Actions runs.
-- Draft creation re-queries the manifest SHA and fails before upload on any evidence mismatch. It creates drafts only.
+- Signed finalization requires absolute same-SHA CI evidence for clean HEAD. Manifest schema 2 binds source, version/build, artifact/App tree, App executable, bundled helper, checks, and deduplicated Actions runs. Production packaging freezes commit/archive identity, builds its own App, signs/notarizes a private frozen copy, and rechecks source identity before locking a three-file zip/checksum/manifest directory; the externally prepared-App entry point is test-only.
+- Installation and draft creation consume private snapshots of the immutable package. Draft creation re-queries the manifest SHA, rejects existing release/tag state, creates and verifies a new lightweight tag at that exact commit, and uploads the same snapshot bytes. Ambiguous failures delete only the current run's marked draft and exact expected tag; unreconciled cleanup remains a visible failure. It creates drafts only.
 - General Desktop proof accepts one explicit absolute zip, skips rebuilding it, extracts it, and records path plus SHA-256.
 - No remote query, push, branch-protection change, package, signing, notarization, install, GUI/live proof, draft creation, or publication is completed by this source lane.
-- Independent pre-freeze CR passed after canonical path and false-positive test cases were closed.
+- Focused contracts cover canonical test roots, production prepared-App rejection, post-build source drift, private build-byte freezing, exact immutable layout, post-validation mutation, exact draft assets/arguments, source-SHA tag binding, ambiguous tag/draft creation, and visible cleanup failure.
 
 ## Release Gate
 

@@ -51,7 +51,6 @@ elif [[ "${TEST_MODE}" == "1" && -n "${RELAYKIT_TEST_SIGNED_RELEASE_DIST_DIR:-}"
   DIST_DIR="${RELAYKIT_TEST_SIGNED_RELEASE_DIST_DIR}"
 fi
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
-BUNDLED_RELAY="${APP_BUNDLE}/Contents/MacOS/relay"
 RELEASE_ROOT="${RELAYKIT_RELEASE_ROOT:-${DIST_DIR}/github-release}"
 [[ -n "${TEST_RELEASE_ROOT}" ]] && RELEASE_ROOT="${TEST_RELEASE_ROOT}"
 RELEASE_DIR="${RELEASE_ROOT}/v${APP_MARKETING_VERSION}"
@@ -59,7 +58,6 @@ SIGNED_ZIP_NAME="${APP_NAME}-${APP_MARKETING_VERSION}-signed.zip"
 SIGNED_ZIP="${RELEASE_DIR}/${SIGNED_ZIP_NAME}"
 SHA256_NAME="${SIGNED_ZIP_NAME}.sha256"
 MANIFEST_NAME="manifest.json"
-NOTARY_ZIP="${DIST_DIR}/${APP_NAME}-notary.zip"
 CODESIGN_BIN="/usr/bin/codesign"
 XCRUN_BIN="/usr/bin/xcrun"
 SPCTL_BIN="/usr/sbin/spctl"
@@ -68,6 +66,7 @@ CI_EVIDENCE_PATH="${RELAYKIT_CI_EVIDENCE_PATH:-}"
 RELEASE_STAGE_DIR=""
 RELEASE_VERIFY_DIR=""
 FRESH_CI_DIR=""
+PACKAGE_WORK_DIR=""
 VERIFIED_CI_EVIDENCE_PATH=""
 VERIFIED_CI_EVIDENCE_SHA256=""
 VERIFIED_CI_SOURCE_SHA=""
@@ -101,7 +100,11 @@ fi
 cleanup_release() {
   local status=$?
   [[ -n "${RELEASE_VERIFY_DIR}" ]] && rm -rf "${RELEASE_VERIFY_DIR}"
-  [[ -n "${RELEASE_STAGE_DIR}" ]] && rm -rf "${RELEASE_STAGE_DIR}"
+  [[ -n "${PACKAGE_WORK_DIR}" ]] && rm -rf "${PACKAGE_WORK_DIR}"
+  if [[ -n "${RELEASE_STAGE_DIR}" ]]; then
+    chmod -R u+w "${RELEASE_STAGE_DIR}" 2>/dev/null || true
+    rm -rf "${RELEASE_STAGE_DIR}"
+  fi
   [[ -n "${FRESH_CI_DIR}" ]] && rm -rf "${FRESH_CI_DIR}"
   exit "${status}"
 }
@@ -145,7 +148,19 @@ app_tree_sha256() {
   ) | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
 }
 
+current_source_commit() {
+  if [[ "${TEST_MODE}" == "1" && -n "${RELAYKIT_TEST_SOURCE_IDENTITY_FILE:-}" ]]; then
+    jq -er '.commit | select(test("^[0-9a-f]{40}$"))' "${RELAYKIT_TEST_SOURCE_IDENTITY_FILE}"
+    return
+  fi
+  git -C "${ROOT_DIR}" rev-parse HEAD
+}
+
 source_snapshot_sha256() {
+  if [[ "${TEST_MODE}" == "1" && -n "${RELAYKIT_TEST_SOURCE_IDENTITY_FILE:-}" ]]; then
+    jq -er '.snapshot | select(test("^[0-9a-f]{64}$"))' "${RELAYKIT_TEST_SOURCE_IDENTITY_FILE}"
+    return
+  fi
   git -C "${ROOT_DIR}" archive --format=tar HEAD | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}'
 }
 
@@ -153,6 +168,19 @@ require_clean_source() {
   [[ "${TEST_MODE}" == "1" ]] && return
   [[ -z "$(git -C "${ROOT_DIR}" status --porcelain=v1 --untracked-files=all)" ]] ||
     fail "signed release requires a clean source worktree"
+}
+
+require_source_unchanged() {
+  local expected_commit="$1"
+  local expected_snapshot="$2"
+  local current_commit current_snapshot
+  require_clean_source
+  current_commit="$(current_source_commit)"
+  current_snapshot="$(source_snapshot_sha256)"
+  [[ "${current_commit}" == "${expected_commit}" ]] ||
+    fail "source HEAD changed during signed release packaging"
+  [[ "${current_snapshot}" == "${expected_snapshot}" ]] ||
+    fail "source snapshot changed during signed release packaging"
 }
 
 verify_ci_evidence() {
@@ -224,9 +252,9 @@ github_repo_target() {
   printf '%s\n' "${target}"
 }
 
-require_ci_evidence_for_head() {
-  local source_commit repo fresh_evidence current_verified_hash
-  source_commit="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
+require_ci_evidence_for_source() {
+  local source_commit="$1"
+  local repo fresh_evidence current_verified_hash
   [[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]] || fail "could not resolve current source commit"
   repo="$(github_repo_target || true)"
   [[ -n "${repo}" ]] || fail "missing GitHub repo target: set RELAYKIT_GITHUB_REPO or configure a GitHub origin"
@@ -344,6 +372,7 @@ verify_signed_app() {
 
 verify_manifest() {
   local release_dir="$1"
+  local expected_source_commit="$2"
   local app="${release_dir}/${APP_NAME}.app"
   local zip="${release_dir}/${SIGNED_ZIP_NAME}"
   local checksum="${release_dir}/${SHA256_NAME}"
@@ -359,7 +388,7 @@ verify_manifest() {
   tree_hash="$(app_tree_sha256 "${app}")"
   executable_hash="$(sha256 "${app}/Contents/MacOS/${APP_PROCESS_NAME}")"
   helper_hash="$(sha256 "${app}/Contents/MacOS/relay")"
-  source_commit="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
+  source_commit="${expected_source_commit}"
   jq -e \
     --arg version "${APP_MARKETING_VERSION}" \
     --arg build "${APP_BUILD_NUMBER}" \
@@ -413,11 +442,14 @@ verify_release_payload() {
 
 finalize_prepared_app() {
   local prepared_app="$1"
-  local release_parent stage_dir stage_app source_commit source_snapshot tree_hash executable_hash helper_hash artifact_hash
+  local source_commit="${2:-}"
+  local source_snapshot="${3:-}"
+  local release_parent stage_dir stage_app tree_hash executable_hash helper_hash artifact_hash
   [[ "${prepared_app}" = /* && -d "${prepared_app}" ]] || fail "prepared app must be an absolute existing bundle path"
-  require_clean_source
-  source_commit="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
-  require_ci_evidence_for_head
+  [[ -n "${source_commit}" ]] || source_commit="$(current_source_commit)"
+  [[ -n "${source_snapshot}" ]] || source_snapshot="$(source_snapshot_sha256)"
+  require_source_unchanged "${source_commit}" "${source_snapshot}"
+  require_ci_evidence_for_source "${source_commit}"
   if [[ "${TEST_MODE}" != "1" ]]; then
     if missing_distribution_inputs; then
       fail_missing_distribution_inputs
@@ -440,7 +472,7 @@ finalize_prepared_app() {
     /usr/bin/shasum -a 256 "${SIGNED_ZIP_NAME}" >"${SHA256_NAME}"
   )
 
-  source_snapshot="$(source_snapshot_sha256)"
+  require_source_unchanged "${source_commit}" "${source_snapshot}"
   tree_hash="$(app_tree_sha256 "${stage_app}")"
   executable_hash="$(sha256 "${stage_app}/Contents/MacOS/${APP_PROCESS_NAME}")"
   helper_hash="$(sha256 "${stage_app}/Contents/MacOS/relay")"
@@ -477,9 +509,18 @@ finalize_prepared_app() {
       }
     ' >"${stage_dir}/${MANIFEST_NAME}"
 
-  verify_manifest "${stage_dir}"
+  verify_manifest "${stage_dir}" "${source_commit}"
   verify_release_payload "${stage_dir}"
+  require_source_unchanged "${source_commit}" "${source_snapshot}"
+  assert_verified_ci_evidence_unchanged "${source_commit}"
+  rm -rf "${stage_app}"
   mv "${stage_dir}" "${RELEASE_DIR}"
+  RELEASE_STAGE_DIR="${RELEASE_DIR}"
+  chmod a-w \
+    "${RELEASE_DIR}/${SIGNED_ZIP_NAME}" \
+    "${RELEASE_DIR}/${SHA256_NAME}" \
+    "${RELEASE_DIR}/${MANIFEST_NAME}"
+  chmod a-w "${RELEASE_DIR}"
   RELEASE_STAGE_DIR=""
   echo "RelayKit immutable signed beta package verified: ${SIGNED_ZIP}"
   echo "RelayKit signed beta checksum: ${RELEASE_DIR}/${SHA256_NAME}"
@@ -498,48 +539,67 @@ fail_missing_distribution_inputs() {
 
 verify_distribution_inputs() {
   [[ "${TEST_MODE}" == "1" ]] && return
-  if ! security find-identity -v -p codesigning 2>/dev/null | grep -Fq "${SIGNING_IDENTITY}"; then
+  if ! /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -Fq "${SIGNING_IDENTITY}"; then
     fail_missing_distribution_inputs
   fi
-  if ! xcrun notarytool history --keychain-profile "${NOTARYTOOL_PROFILE}" --team-id "${APPLE_TEAM_ID}" >/dev/null 2>&1; then
+  if ! "${XCRUN_BIN}" notarytool history --keychain-profile "${NOTARYTOOL_PROFILE}" --team-id "${APPLE_TEAM_ID}" >/dev/null 2>&1; then
     fail_missing_distribution_inputs
   fi
 }
 
 package_signed_release() {
+  local source_commit source_snapshot built_app_tree work_app work_relay notary_zip
   [[ "${TEST_MODE}" != "1" || "${TEST_ALLOW_PACKAGE}" == "1" ]] ||
     fail "test mode only supports --finalize-prepared-app unless package orchestration is explicitly enabled"
   if missing_distribution_inputs; then
     fail_missing_distribution_inputs
   fi
   require_clean_source
-  require_ci_evidence_for_head
+  source_commit="$(current_source_commit)"
+  source_snapshot="$(source_snapshot_sha256)"
+  require_source_unchanged "${source_commit}" "${source_snapshot}"
+  require_ci_evidence_for_source "${source_commit}"
   verify_distribution_inputs
   [[ ! -e "${RELEASE_DIR}" ]] || fail "immutable release directory already exists: ${RELEASE_DIR}"
 
   RELAYKIT_APP_VERSION="${APP_MARKETING_VERSION}" \
     RELAYKIT_BUILD_NUMBER="${APP_BUILD_NUMBER}" \
     "${BUILD_APP_BUNDLE_BIN}" --verify >&2
-  "${CODESIGN_BIN}" --force --timestamp --options runtime --sign "${SIGNING_IDENTITY}" "${BUNDLED_RELAY}"
-  "${CODESIGN_BIN}" --force --timestamp --options runtime --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
-  "${CODESIGN_BIN}" --verify --deep --strict --verbose=4 "${APP_BUNDLE}"
-  "${CODESIGN_BIN}" -dvvv --entitlements :- "${APP_BUNDLE}"
+  require_source_unchanged "${source_commit}" "${source_snapshot}"
+  built_app_tree="$(app_tree_sha256 "${APP_BUNDLE}")"
+  PACKAGE_WORK_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/relaykit-signed-package.XXXXXX")"
+  chmod 700 "${PACKAGE_WORK_DIR}"
+  work_app="${PACKAGE_WORK_DIR}/${APP_NAME}.app"
+  work_relay="${work_app}/Contents/MacOS/relay"
+  notary_zip="${PACKAGE_WORK_DIR}/${APP_NAME}-notary.zip"
+  /usr/bin/ditto "${APP_BUNDLE}" "${work_app}"
+  [[ "$(app_tree_sha256 "${APP_BUNDLE}")" == "${built_app_tree}" &&
+     "$(app_tree_sha256 "${work_app}")" == "${built_app_tree}" ]] ||
+    fail "built App changed while freezing the signed release candidate"
+  require_source_unchanged "${source_commit}" "${source_snapshot}"
 
-  rm -f "${NOTARY_ZIP}"
+  "${CODESIGN_BIN}" --force --timestamp --options runtime --sign "${SIGNING_IDENTITY}" "${work_relay}"
+  "${CODESIGN_BIN}" --force --timestamp --options runtime --sign "${SIGNING_IDENTITY}" "${work_app}"
+  "${CODESIGN_BIN}" --verify --deep --strict --verbose=4 "${work_app}"
+  "${CODESIGN_BIN}" -dvvv --entitlements :- "${work_app}"
+
   (
-    cd "${DIST_DIR}"
-    /usr/bin/ditto -c -k --keepParent "$(basename "${APP_BUNDLE}")" "$(basename "${NOTARY_ZIP}")"
+    cd "${PACKAGE_WORK_DIR}"
+    /usr/bin/ditto -c -k --keepParent "$(basename "${work_app}")" "$(basename "${notary_zip}")"
   )
-  "${XCRUN_BIN}" notarytool submit "${NOTARY_ZIP}" --keychain-profile "${NOTARYTOOL_PROFILE}" --team-id "${APPLE_TEAM_ID}" --wait
-  "${XCRUN_BIN}" stapler staple "${APP_BUNDLE}"
-  rm -f "${NOTARY_ZIP}"
-  finalize_prepared_app "${APP_BUNDLE}"
+  "${XCRUN_BIN}" notarytool submit "${notary_zip}" --keychain-profile "${NOTARYTOOL_PROFILE}" --team-id "${APPLE_TEAM_ID}" --wait
+  "${XCRUN_BIN}" stapler staple "${work_app}"
+  rm -f "${notary_zip}"
+  require_source_unchanged "${source_commit}" "${source_snapshot}"
+  finalize_prepared_app "${work_app}" "${source_commit}" "${source_snapshot}"
 }
 
 case "${1:-}" in
   "") package_signed_release ;;
   --finalize-prepared-app)
     [[ $# -eq 2 ]] || { usage; exit 2; }
+    [[ "${TEST_MODE}" == "1" ]] ||
+      fail "--finalize-prepared-app is restricted to offline test mode"
     finalize_prepared_app "$2"
     ;;
   *) usage; exit 2 ;;

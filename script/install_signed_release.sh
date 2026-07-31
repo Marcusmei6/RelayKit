@@ -102,19 +102,51 @@ verify_signed_app() {
   "${SPCTL_BIN}" -a -vvv -t exec "${app}" >/dev/null
 }
 
+validate_release_layout() {
+  local count=0 entry name
+  while IFS= read -r entry; do
+    name="$(basename "${entry}")"
+    case "${name}" in
+      "${SIGNED_ZIP_NAME}"|"${SHA256_NAME}"|"${MANIFEST_NAME}") ;;
+      *) fail "release directory contains an unexpected entry: ${name}" ;;
+    esac
+    count=$((count + 1))
+  done < <(/usr/bin/find "${RELEASE_DIR}" -mindepth 1 -maxdepth 1 -print)
+  [[ "${count}" -eq 3 ]] || fail "release directory must contain exactly the signed zip, checksum, and manifest"
+}
+
 verify_release() {
-  local zip="${RELEASE_DIR}/${SIGNED_ZIP_NAME}"
-  local checksum="${RELEASE_DIR}/${SHA256_NAME}"
-  local manifest="${RELEASE_DIR}/${MANIFEST_NAME}"
+  local source_zip="${RELEASE_DIR}/${SIGNED_ZIP_NAME}"
+  local source_checksum="${RELEASE_DIR}/${SHA256_NAME}"
+  local source_manifest="${RELEASE_DIR}/${MANIFEST_NAME}"
+  local snapshot_dir zip checksum manifest
   local checksum_hash zip_hash
-  [[ "${RELEASE_DIR}" = /* && -d "${RELEASE_DIR}" ]] || fail "release directory must be an absolute existing directory"
-  [[ -f "${zip}" && -f "${checksum}" && -f "${manifest}" ]] || fail "release files are incomplete"
+  [[ "${RELEASE_DIR}" = /* && -d "${RELEASE_DIR}" && ! -L "${RELEASE_DIR}" ]] ||
+    fail "release directory must be an absolute existing directory"
+  validate_release_layout
+  [[ -f "${source_zip}" && ! -L "${source_zip}" &&
+     -f "${source_checksum}" && ! -L "${source_checksum}" &&
+     -f "${source_manifest}" && ! -L "${source_manifest}" ]] ||
+    fail "release files are incomplete"
+
+  VERIFY_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/relaykit-install-verify.XXXXXX")"
+  chmod 700 "${VERIFY_DIR}"
+  snapshot_dir="${VERIFY_DIR}/release-snapshot"
+  mkdir -m 700 "${snapshot_dir}"
+  /bin/cp -p "${source_zip}" "${snapshot_dir}/${SIGNED_ZIP_NAME}"
+  /bin/cp -p "${source_checksum}" "${snapshot_dir}/${SHA256_NAME}"
+  /bin/cp -p "${source_manifest}" "${snapshot_dir}/${MANIFEST_NAME}"
+  chmod 400 "${snapshot_dir}/${SIGNED_ZIP_NAME}" "${snapshot_dir}/${SHA256_NAME}" "${snapshot_dir}/${MANIFEST_NAME}"
+  zip="${snapshot_dir}/${SIGNED_ZIP_NAME}"
+  checksum="${snapshot_dir}/${SHA256_NAME}"
+  manifest="${snapshot_dir}/${MANIFEST_NAME}"
+  VERIFIED_MANIFEST_PATH="${manifest}"
+
   checksum_hash="$(/usr/bin/awk -v file="${SIGNED_ZIP_NAME}" 'NF == 2 && $2 == file { print $1 }' "${checksum}")"
   [[ "${checksum_hash}" =~ ^[0-9a-f]{64}$ ]] || fail "invalid signed zip checksum"
   zip_hash="$(sha256 "${zip}")"
   [[ "${checksum_hash}" == "${zip_hash}" ]] || fail "signed zip checksum mismatch"
 
-  VERIFY_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/relaykit-install-verify.XXXXXX")"
   /usr/bin/ditto -x -k "${zip}" "${VERIFY_DIR}"
   EXTRACTED_APP="${VERIFY_DIR}/${APP_NAME}.app"
   [[ -d "${EXTRACTED_APP}" ]] || fail "signed zip is missing ${APP_NAME}.app"
@@ -206,6 +238,7 @@ TARGET_PARENT="$(dirname "${TARGET_APP}")"
 [[ -d "${TARGET_PARENT}" ]] || fail "target parent does not exist: ${TARGET_PARENT}"
 
 VERIFY_DIR=""
+VERIFIED_MANIFEST_PATH=""
 STAGE_DIR=""
 BACKUP_APP=""
 TARGET_REPLACED=false
@@ -245,11 +278,11 @@ rm -rf "${STAGE_DIR}"
 STAGE_DIR=""
 
 verify_signed_app "${TARGET_APP}"
-[[ "$(app_tree_sha256 "${TARGET_APP}")" == "$(jq -r '.app_tree_sha256' "${RELEASE_DIR}/${MANIFEST_NAME}")" ]] ||
+[[ "$(app_tree_sha256 "${TARGET_APP}")" == "$(jq -r '.app_tree_sha256' "${VERIFIED_MANIFEST_PATH}")" ]] ||
   fail "installed app tree hash does not match manifest"
-[[ "$(sha256 "${TARGET_APP}/Contents/MacOS/${APP_PROCESS_NAME}")" == "$(jq -r '.app_executable_sha256' "${RELEASE_DIR}/${MANIFEST_NAME}")" ]] ||
+[[ "$(sha256 "${TARGET_APP}/Contents/MacOS/${APP_PROCESS_NAME}")" == "$(jq -r '.app_executable_sha256' "${VERIFIED_MANIFEST_PATH}")" ]] ||
   fail "installed app executable hash does not match manifest"
-[[ "$(sha256 "${TARGET_APP}/Contents/MacOS/relay")" == "$(jq -r '.bundled_helper_executable_sha256' "${RELEASE_DIR}/${MANIFEST_NAME}")" ]] ||
+[[ "$(sha256 "${TARGET_APP}/Contents/MacOS/relay")" == "$(jq -r '.bundled_helper_executable_sha256' "${VERIFIED_MANIFEST_PATH}")" ]] ||
   fail "installed bundled helper hash does not match manifest"
 
 echo "RelayKit installed atomically: ${TARGET_APP}"
