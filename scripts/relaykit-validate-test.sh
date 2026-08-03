@@ -150,6 +150,19 @@ not_selected() {
   ! selected "$@"
 }
 
+write_fixture insecure-fixture docs/handoff.md
+chmod 644 "${tmp}/insecure-fixture.txt"
+insecure_fixture_status=0
+"${VALIDATE}" \
+  --base HEAD \
+  --head HEAD \
+  --changed-files-file "${tmp}/insecure-fixture.txt" \
+  --plan-only >"${tmp}/insecure-fixture.stdout" 2>"${tmp}/insecure-fixture.json" || insecure_fixture_status=$?
+[[ "${insecure_fixture_status}" -eq 2 && ! -s "${tmp}/insecure-fixture.stdout" ]] ||
+  fail "insecure changed-files fixture was accepted"
+jq -e '.status == "failed" and .error_code == "changed_files_fixture_permissions"' "${tmp}/insecure-fixture.json" >/dev/null ||
+  fail "insecure changed-files fixture rejection was not machine-readable"
+
 write_fixture docs docs/handoff.md docs/development-plan.md
 plan_fixture docs
 jq -e '

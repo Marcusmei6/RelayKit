@@ -20,6 +20,9 @@ required = {
         "gofmt -l .",
     ),
     "macos-app.yml": (
+        "sudo xcode-select --switch /Applications/Xcode_16.2.app/Contents/Developer",
+        'test "$(xcode-select --print-path)" = "/Applications/Xcode_16.2.app/Contents/Developer"',
+        "grep -Eq 'Swift version 6\\.'",
         "uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32",
         "go-version-file: gateway/go.mod",
         "cache-dependency-path: gateway/go.sum",
@@ -31,6 +34,9 @@ required = {
         "./scripts/codex-desktop-manual-proof-test.sh",
     ),
     "macos-runtime-safety.yml": (
+        "sudo xcode-select --switch /Applications/Xcode_16.2.app/Contents/Developer",
+        'test "$(xcode-select --print-path)" = "/Applications/Xcode_16.2.app/Contents/Developer"',
+        "grep -Eq 'Swift version 6\\.'",
         "uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32",
         "go-version-file: gateway/go.mod",
         "cache-dependency-path: gateway/go.sum",

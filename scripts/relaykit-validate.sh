@@ -62,7 +62,16 @@ changed_format="nul"
 if [[ -n "${changed_files_file}" ]]; then
   [[ "${include_worktree}" == false ]] || fail "changed_files_fixture_with_worktree"
   [[ "${changed_files_file}" = /* && -f "${changed_files_file}" && ! -L "${changed_files_file}" ]] || fail "changed_files_fixture_invalid"
-  [[ "$(stat -f '%u:%Lp' "${changed_files_file}")" == "$(id -u):600" ]] || fail "changed_files_fixture_permissions"
+  python3 - "${changed_files_file}" "$(id -u)" <<'PY' || fail "changed_files_fixture_permissions"
+import os
+import stat
+import sys
+
+path, expected_uid = sys.argv[1], int(sys.argv[2])
+metadata = os.stat(path, follow_symlinks=False)
+if metadata.st_uid != expected_uid or stat.S_IMODE(metadata.st_mode) != 0o600:
+    raise SystemExit(1)
+PY
   cp "${changed_files_file}" "${changed_input}"
   changed_format="lines"
 else

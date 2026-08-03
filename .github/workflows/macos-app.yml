@@ -19,6 +19,13 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Select Swift 6 toolchain
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_16.2.app/Contents/Developer
+          test "$(xcode-select --print-path)" = "/Applications/Xcode_16.2.app/Contents/Developer"
+          swift_version="$(swift --version)"
+          printf '%s\n' "${swift_version}"
+          grep -Eq 'Swift version 6\.' <<<"${swift_version}"
       - name: Set up Go
         uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
         with:
