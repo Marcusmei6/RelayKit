@@ -11,12 +11,12 @@ The checked-in agent configs use public model names. Keep private/local model ro
 | Agent | Model | Role | Writes? | Use when | Must not do |
 | --- | --- | --- | --- | --- | --- |
 | `relaykit_planner` | `gpt-5.6-sol` / `xhigh` | Controller and sole delegation owner | Planning/handoff only | Split work, assign at most two disjoint write lanes, enforce gates, converge evidence | Implement product code, auto-expand backlog, claim runtime metadata from self-report |
-| `relaykit_gateway` | `gpt-5.6-terra` / `high` | Go gateway specialist | `gateway/**` only | Protocols, routes, config, catalog, usage events, gateway tests | Edit App/docs/Agent config, delegate, copy private gateway behavior |
-| `relaykit_app` | `gpt-5.6-terra` / `high` | Apple app specialist | `app/**` only | SwiftUI/AppKit, Keychain, helper lifecycle, config activation | Edit gateway/docs/Agent config, delegate, implement protocol adapters in Swift |
+| `relaykit_gateway` | `gpt-5.6-luna` / `xhigh` | Go gateway specialist | `gateway/**` only | Protocols, routes, config, catalog, usage events, gateway tests | Edit App/docs/Agent config, delegate, copy private gateway behavior |
+| `relaykit_app` | `gpt-5.6-luna` / `xhigh` | Apple app specialist | `app/**` only | SwiftUI/AppKit, Keychain, helper lifecycle, config activation | Edit gateway/docs/Agent config, delegate, implement protocol adapters in Swift |
 | `relaykit_worker` | `gpt-5.6-sol` / `high` | Bounded project worker | Assigned docs/examples/config/tooling only | `docs/**`, `examples/**`, `.codex/**`, `.agents/**`, ordinary scripts | Edit App/Gateway, act as a cross-product generalist, delegate, merge/push |
 | `relaykit_test` | `gpt-5.6-luna` / `medium` | Tracked-source read-only validator | Ignored test/build artifacts only | Eligible Tier 0/1 Fast Path executes the Planner exact command allowlist directly; otherwise Test executes the selector-generated plan. | Change, repair, restore, or stage tracked paths; add unplanned commands; delegate; drive live GUI manually |
 | `relaykit_cr` | `gpt-5.6-sol` / `high` | Read-only reviewer | No | Correctness, simplicity, public-boundary, security-sensitive review | Edit files or delegate |
-| `relaykit_release` | `gpt-5.6-terra` / `high` | Release specialist | Assigned release/package paths only | Packaging, signing/notarization readiness, release docs | Edit product business code, delegate, sign/publish without authorization |
+| `relaykit_release` | `gpt-5.6-luna` / `xhigh` | Release specialist | Assigned release/package paths only | Packaging, signing/notarization readiness, release docs | Edit product business code, delegate, sign/publish without authorization |
 
 ## Default Flow
 

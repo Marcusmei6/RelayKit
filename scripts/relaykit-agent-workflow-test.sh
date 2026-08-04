@@ -17,12 +17,12 @@ agent_dir = root / ".codex" / "agents"
 
 expected = {
     "relaykit_planner": ("relaykit-planner.toml", "gpt-5.6-sol", "xhigh", "workspace-write"),
-    "relaykit_gateway": ("relaykit-gateway.toml", "gpt-5.6-terra", "high", "workspace-write"),
-    "relaykit_app": ("relaykit-app.toml", "gpt-5.6-terra", "high", "workspace-write"),
+    "relaykit_gateway": ("relaykit-gateway.toml", "gpt-5.6-luna", "xhigh", "workspace-write"),
+    "relaykit_app": ("relaykit-app.toml", "gpt-5.6-luna", "xhigh", "workspace-write"),
     "relaykit_worker": ("relaykit-worker.toml", "gpt-5.6-sol", "high", "workspace-write"),
     "relaykit_test": ("relaykit-test.toml", "gpt-5.6-luna", "medium", "workspace-write"),
     "relaykit_cr": ("relaykit-cr.toml", "gpt-5.6-sol", "high", "read-only"),
-    "relaykit_release": ("relaykit-release.toml", "gpt-5.6-terra", "high", "workspace-write"),
+    "relaykit_release": ("relaykit-release.toml", "gpt-5.6-luna", "xhigh", "workspace-write"),
 }
 
 

@@ -1,7 +1,7 @@
 name = "relaykit_release"
 description = "RelayKit release validator for packaging, signing readiness, helper layout, and public repository hygiene."
-model = "gpt-5.6-terra"
-model_reasoning_effort = "high"
+model = "gpt-5.6-luna"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 nickname_candidates = ["RelayKit Release"]
 developer_instructions = """

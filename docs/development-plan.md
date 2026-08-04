@@ -250,12 +250,12 @@ Status: selector, Skill contracts, evidence-state fix, and the post-fix live Ski
 ## Task Ownership
 
 - `relaykit_planner` (`gpt-5.6-sol` / `xhigh`) is the sole delegation owner and owns roadmap, bounded dispatch, convergence, validation/review gates, and public boundary. It runs at most two disjoint write lanes and never auto-expands backlog.
-- `relaykit_gateway` (`gpt-5.6-terra` / `high`) owns only `gateway/**` protocol, routing, catalog, config, usage, and tests.
-- `relaykit_app` (`gpt-5.6-terra` / `high`) owns only `app/**` SwiftUI/AppKit, Keychain, helper lifecycle, config activation, and tests.
+- `relaykit_gateway` (`gpt-5.6-luna` / `xhigh`) owns only `gateway/**` protocol, routing, catalog, config, usage, and tests.
+- `relaykit_app` (`gpt-5.6-luna` / `xhigh`) owns only `app/**` SwiftUI/AppKit, Keychain, helper lifecycle, config activation, and tests.
 - `relaykit_worker` (`gpt-5.6-sol` / `high`) owns assigned docs, examples, project Agent/Skill config, and ordinary tooling; it never substitutes for App or Gateway.
 - `relaykit_test` (`gpt-5.6-luna` / `medium`): Eligible Tier 0/1 Fast Path executes the Planner exact command allowlist directly; otherwise Test executes the selector-generated plan. Its workspace write access is limited to ignored build/test artifacts, with byte-identical tracked-worktree status required before and after execution.
 - `relaykit_cr` (`gpt-5.6-sol` / `high`) owns read-only findings and never edits or delegates.
-- `relaykit_release` (`gpt-5.6-terra` / `high`) owns assigned packaging/signing/notarization/release paths, not product business code.
+- `relaykit_release` (`gpt-5.6-luna` / `xhigh`) owns assigned packaging/signing/notarization/release paths, not product business code.
 
 ## Phase 7.8: Workflow 5.6 Migration and Fast Path Safety
 
