@@ -292,6 +292,7 @@ cleanup() {
       }
     }' >"${EVIDENCE_PATH}"
   chmod 600 "${EVIDENCE_PATH}"
+  jq -c '{status,failure,cases,global_guards_unchanged,cleanup}' "${EVIDENCE_PATH}" >&2
   [[ -z "${WORK_ROOT}" ]] || rm -rf "${WORK_ROOT}"
   [[ "${incoming}" -eq 0 && "${STATUS}" == passed && "${cleanup_ok}" == true ]] || exit 1
 }
