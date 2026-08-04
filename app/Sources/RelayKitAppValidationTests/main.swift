@@ -946,7 +946,7 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
             fatalError("background service fail-closed contract missing \(required)")
         }
     }
-    for required in ["<key>BundleProgram</key>", "<string>Contents/MacOS/relay</string>", "<key>RunAtLoad</key>", "<key>Sockets</key>", "<key>RelayKitGateway</key>", "<string>127.0.0.1</string>", "<string>19777</string>"] {
+    for required in ["<key>BundleProgram</key>", "<string>Contents/MacOS/relay</string>", "<key>RunAtLoad</key>", "<key>ThrottleInterval</key>", "<integer>1</integer>", "<key>Sockets</key>", "<key>RelayKitGateway</key>", "<string>127.0.0.1</string>", "<string>19777</string>"] {
         if !agentPlist.contains(required) {
             fatalError("background gateway plist contract missing \(required)")
         }

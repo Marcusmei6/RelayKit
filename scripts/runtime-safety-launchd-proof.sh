@@ -430,6 +430,7 @@ cat >"${PLIST}" <<PLIST
 <string>-initial-official-fallback</string><string>-restore-unowned-after</string><string>1s</string>
 </array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>ThrottleInterval</key><integer>1</integer>
 <key>Umask</key><integer>63</integer>
 <key>StandardOutPath</key><string>${WORK_ROOT}/helper.stdout</string>
 <key>StandardErrorPath</key><string>${WORK_ROOT}/helper.stderr</string>

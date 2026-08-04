@@ -26,6 +26,7 @@ for required in \
   '-launchd-socket-name' \
   'launchctl bootstrap' \
   'launchctl bootout' \
+  'ThrottleInterval' \
   'RelayKitGateway' \
   'cached_request' \
   'direct_request' \
