@@ -535,14 +535,14 @@ stop_case_processes() {
     disable_route || ok=false
   fi
   if pid_is_alive "${APP_PID}"; then
-    kill -KILL "${APP_PID}" 2>/dev/null || ok=false
+    kill -KILL "${APP_PID}" 2>/dev/null || true
     wait_for_pid_exit "${APP_PID}" 50 || ok=false
   fi
   if pid_is_alive "${HELPER_PID}"; then
     if target_points_to_run_base; then
       ok=false
     else
-      kill -TERM "${HELPER_PID}" 2>/dev/null || ok=false
+      kill -TERM "${HELPER_PID}" 2>/dev/null || true
       wait_for_pid_exit "${HELPER_PID}" 80 || {
         kill -KILL "${HELPER_PID}" 2>/dev/null || true
         wait_for_pid_exit "${HELPER_PID}" 30 || ok=false
@@ -550,7 +550,7 @@ stop_case_processes() {
     fi
   fi
   if pid_is_alive "${BLOCKER_PID}"; then
-    kill -TERM "${BLOCKER_PID}" 2>/dev/null || ok=false
+    kill -TERM "${BLOCKER_PID}" 2>/dev/null || true
     wait_for_pid_exit "${BLOCKER_PID}" 30 || {
       kill -KILL "${BLOCKER_PID}" 2>/dev/null || true
       wait_for_pid_exit "${BLOCKER_PID}" 20 || ok=false
