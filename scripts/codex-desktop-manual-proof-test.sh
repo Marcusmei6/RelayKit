@@ -2399,11 +2399,14 @@ cat >"${gateway_config}" <<'JSON'
   "providers": []
 }
 JSON
-bundled_codex_binary="/Applications/ChatGPT.app/Contents/Resources/codex"
+bundled_codex_binary="${tmp_dir}/ChatGPT.app/Contents/Resources/codex"
+mkdir -p "$(dirname "${bundled_codex_binary}")"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"${bundled_codex_binary}"
+chmod 700 "${bundled_codex_binary}"
 "${PROOF_SCRIPT}" --test-sync-official-models "${projected_catalog}" "${gateway_config}" "${bundled_codex_binary}"
-jq -e '
+jq -e --arg codex_binary "${bundled_codex_binary}" '
   (.official_passthrough.base_url == "https://api.openai.example/v1") and
-  (.official_passthrough.codex_binary == "/Applications/ChatGPT.app/Contents/Resources/codex") and
+  (.official_passthrough.codex_binary == $codex_binary) and
   ([.official_passthrough.models[].id] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.3-codex-spark"]) and
   ([.official_passthrough.models[].display_name] == ["GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna", "GPT-5.5", "GPT-5.3-Codex-Spark"])
 ' "${gateway_config}" >/dev/null
