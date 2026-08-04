@@ -33,6 +33,7 @@ SOURCE_SHA=""
 SOURCE_CLEAN=false
 HARNESS_SHA=""
 HARNESS_TEST_SHA=""
+STARTUP_DIAGNOSTIC=none
 
 print_contract() {
   jq -n '{
@@ -151,11 +152,29 @@ classify_launchd_health_failure() {
     printf launchd_control_token_invalid
   elif grep -Fq 'gateway listen failed:' "${stderr_path}" 2>/dev/null; then
     printf launchd_gateway_listen_failed
+  elif grep -Fq 'gateway failed:' "${stderr_path}" 2>/dev/null; then
+    printf launchd_gateway_serve_failed
+  elif grep -Fq 'managed Codex recovery' "${stderr_path}" 2>/dev/null; then
+    printf launchd_managed_recovery_invalid
+  elif grep -Eq 'flag provided but not defined|invalid value .* for flag' "${stderr_path}" 2>/dev/null; then
+    printf launchd_argument_invalid
+  elif grep -Fq 'relaykit gateway listening on' "${stderr_path}" 2>/dev/null; then
+    printf launchd_helper_started_health_unreachable
   elif [[ ! -s "${stderr_path}" ]]; then
     printf launchd_helper_not_started
   else
     printf launchd_helper_start_failed
   fi
+}
+
+redacted_launchd_startup_diagnostic() {
+  /usr/bin/tail -n 6 "${WORK_ROOT}/helper.stderr" 2>/dev/null |
+    /usr/bin/sed -E \
+      -e 's#/tmp/relaykit-launchd-safety\.[^ /]+#<tmp>#g' \
+      -e 's#https?://127\.0\.0\.1:[0-9]+#http://127.0.0.1:<port>#g' \
+      -e 's#[[:xdigit:]]{24,}#<redacted>#g' |
+    /usr/bin/tr '\r\n' '  ' |
+    /usr/bin/cut -c1-512
 }
 
 gateway_mode() {
@@ -286,6 +305,7 @@ cleanup() {
     --arg source_sha "${SOURCE_SHA}" \
     --arg harness_sha "${HARNESS_SHA}" \
     --arg harness_test_sha "${HARNESS_TEST_SHA}" \
+    --arg startup_diagnostic "${STARTUP_DIAGNOSTIC}" \
     --argjson source_clean "${SOURCE_CLEAN}" \
     --argjson cases "${CASE_JSON}" \
     --argjson service_removed "${service_removed}" \
@@ -302,6 +322,7 @@ cleanup() {
       source_clean:$source_clean,
       harness_sha256:$harness_sha,
       harness_test_sha256:$harness_test_sha,
+      startup_diagnostic:$startup_diagnostic,
       cases:$cases,
       global_guards_unchanged:$global_guards,
       cleanup:{
@@ -311,7 +332,7 @@ cleanup() {
       }
     }' >"${EVIDENCE_PATH}"
   chmod 600 "${EVIDENCE_PATH}"
-  jq -c '{status,failure,cases,global_guards_unchanged,cleanup}' "${EVIDENCE_PATH}" >&2
+  jq -c '{status,failure,startup_diagnostic,cases,global_guards_unchanged,cleanup}' "${EVIDENCE_PATH}" >&2
   [[ -z "${WORK_ROOT}" ]] || rm -rf "${WORK_ROOT}"
   [[ "${incoming}" -eq 0 && "${STATUS}" == passed && "${cleanup_ok}" == true ]] || exit 1
 }
@@ -410,6 +431,7 @@ BOOTSTRAPPED=true
 FAILURE=launchd_health
 if ! wait_health; then
   FAILURE="$(classify_launchd_health_failure)"
+  STARTUP_DIAGNOSTIC="$(redacted_launchd_startup_diagnostic)"
   exit 1
 fi
 

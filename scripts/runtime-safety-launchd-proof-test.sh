@@ -39,6 +39,8 @@ for required in \
   'StandardErrorPath' \
   'classify_launchd_health_failure' \
   'launchd_socket_activation_failed' \
+  'startup_diagnostic' \
+  'redacted_launchd_startup_diagnostic' \
   'helper_processes_stopped' \
   'global_guards_unchanged' \
   'runtime-safety-launchd'; do
