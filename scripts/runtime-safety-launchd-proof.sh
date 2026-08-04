@@ -140,6 +140,15 @@ wait_health() {
   return 1
 }
 
+wait_upstream() {
+  local index
+  for ((index = 0; index < 80; index++)); do
+    /usr/bin/curl -fsS --max-time 1 "${UPSTREAM_URL}/healthz" >/dev/null 2>&1 && return 0
+    /bin/sleep 0.1
+  done
+  return 1
+}
+
 classify_launchd_health_failure() {
   local stderr_path="${WORK_ROOT}/helper.stderr"
   if grep -Fq 'launchd socket activation failed:' "${stderr_path}" 2>/dev/null; then
@@ -386,6 +395,11 @@ import json, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class H(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
+    def do_GET(self):
+        if self.path != "/healthz":
+            self.send_error(404); return
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+        self.wfile.write(b'{"status":"ok"}')
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
@@ -397,6 +411,8 @@ class H(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1",int(sys.argv[1])),H).serve_forever()
 PY
 UPSTREAM_PID=$!
+FAILURE=fixture_health
+wait_upstream
 
 LABEL="dev.relaykit.runtime-safety.$(/usr/bin/uuidgen | tr '[:upper:]' '[:lower:]')"
 PLIST="${WORK_ROOT}/${LABEL}.plist"

@@ -38,6 +38,7 @@ for required in \
   'new_direct_after_restore' \
   'StandardErrorPath' \
   'classify_launchd_health_failure' \
+  'wait_upstream' \
   'launchd_socket_activation_failed' \
   'startup_diagnostic' \
   'redacted_launchd_startup_diagnostic' \
