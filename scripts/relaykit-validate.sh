@@ -444,7 +444,13 @@ fi
 results="${tmp}/results.jsonl"
 overall_status=0
 while IFS= read -r encoded; do
-  command="$(printf '%s' "${encoded}" | base64 -D)"
+  command="$(python3 - "${encoded}" <<'PY'
+import base64
+import sys
+
+sys.stdout.buffer.write(base64.b64decode(sys.argv[1], validate=True))
+PY
+  )" || fail "command_decode_failed"
   command_id="$(jq -r --arg command "${command}" '.selected_commands[] | select(.command == $command) | .id' "${plan}")"
   attempt_limit=2
   [[ "${command_id}" == "live-desktop-query" || "${command_id}" == "full-desktop-e2e" ]] && attempt_limit=1

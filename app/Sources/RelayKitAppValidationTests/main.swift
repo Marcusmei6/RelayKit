@@ -1867,7 +1867,11 @@ func expectStatusPopoverContract() throws {
     if !quit.contains("NSApplication.shared.terminate(sender)") {
         fatalError("Quit must use NSApplication termination")
     }
-    for required in ["\"popover\": [", "\"kind\": \"menu-bar-popover\""] {
+    for required in [
+        "let popoverEvidence: [String: Any] = [",
+        "\"popover\": popoverEvidence",
+        "\"kind\": \"menu-bar-popover\"",
+    ] {
         if !evidence.contains(required) { fatalError("canonical popover smoke evidence is missing \(required)") }
     }
     for forbidden in ["\"panel\": [", "nonactivating-nspanel", "menu-bar-panel"] {
