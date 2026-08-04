@@ -302,6 +302,7 @@ trap 'FAILURE=interrupted; exit 130' INT
 trap 'FAILURE=interrupted; exit 143' TERM
 trap 'FAILURE=interrupted; exit 129' HUP
 
+FAILURE=preflight_tools
 command -v go >/dev/null
 command -v jq >/dev/null
 SOURCE_SHA="$(git -C "${ROOT}" rev-parse HEAD)"
@@ -311,6 +312,7 @@ if git -C "${ROOT}" diff --quiet && git -C "${ROOT}" diff --cached --quiet &&
 fi
 HARNESS_SHA="$(/usr/bin/shasum -a 256 "${BASH_SOURCE[0]}" | /usr/bin/awk '{print $1}')"
 HARNESS_TEST_SHA="$(/usr/bin/shasum -a 256 "${ROOT}/scripts/runtime-safety-launchd-proof-test.sh" | /usr/bin/awk '{print $1}')"
+FAILURE=preflight_isolation
 pick_ports
 CONFIG_BEFORE="$(signature "${PHYSICAL_HOME}/.codex/config.toml")"
 AUTH_BEFORE="$(signature "${PHYSICAL_HOME}/.codex/auth.json")"
@@ -321,6 +323,7 @@ PORT_19777_BEFORE="$(listener_snapshot 19777)"
 WORK_ROOT="$(mktemp -d /tmp/relaykit-launchd-safety.XXXXXX)"
 chmod 700 "${WORK_ROOT}"
 HELPER="${WORK_ROOT}/relay"
+FAILURE=helper_build
 (cd "${ROOT}/gateway" && go build -trimpath -o "${HELPER}" ./cmd/gateway)
 TOKEN_PATH="${WORK_ROOT}/control.token"
 TARGET="${WORK_ROOT}/config.toml"
@@ -337,6 +340,7 @@ cat >"${CONFIG}" <<JSON
 JSON
 chmod 600 "${CONFIG}"
 
+FAILURE=fixture_start
 /usr/bin/python3 - "${UPSTREAM_PORT}" >"${WORK_ROOT}/upstream.out" 2>"${WORK_ROOT}/upstream.err" <<'PY' &
 import json, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -378,13 +382,18 @@ cat >"${PLIST}" <<PLIST
 PLIST
 /usr/bin/plutil -lint "${PLIST}" >/dev/null
 
+FAILURE=launchd_bootstrap
 /bin/launchctl bootstrap "gui/$(/usr/bin/id -u)" "${PLIST}"
 BOOTSTRAPPED=true
+FAILURE=launchd_health
 wait_health
 
+FAILURE=initial_enable
 enable_route
 start_parent
+FAILURE=initial_adopt
 adopt
+FAILURE=initial_cached_request
 cached_request
 FAILURE=graceful_release
 graceful_helper="$(helper_pid)"
