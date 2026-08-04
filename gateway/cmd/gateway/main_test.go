@@ -297,6 +297,32 @@ func TestGatewayParentLossRejectsIncompleteManagedRouteFlags(t *testing.T) {
 	}
 }
 
+func TestBackgroundManagedLifecycleRequiresLaunchdControlAndRecoveryTimer(t *testing.T) {
+	if !allowsUnownedManagedLifecycle(false, "RelayKitGateway", "/tmp/control.token", time.Second) {
+		t.Fatal("complete launchd-managed lifecycle was rejected")
+	}
+	for _, tc := range []struct {
+		name         string
+		appManaged   bool
+		socketName   string
+		tokenPath    string
+		restoreAfter time.Duration
+	}{
+		{name: "missing socket", tokenPath: "/tmp/control.token", restoreAfter: time.Second},
+		{name: "missing token", socketName: "RelayKitGateway", restoreAfter: time.Second},
+		{name: "missing recovery timer", socketName: "RelayKitGateway", tokenPath: "/tmp/control.token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if allowsUnownedManagedLifecycle(tc.appManaged, tc.socketName, tc.tokenPath, tc.restoreAfter) {
+				t.Fatal("incomplete launchd-managed lifecycle was accepted")
+			}
+		})
+	}
+	if !allowsUnownedManagedLifecycle(true, "", "", 0) {
+		t.Fatal("packaged app-managed lifecycle was rejected")
+	}
+}
+
 func TestGatewayParentLossRejectsAuthAndSymlinkManagedPaths(t *testing.T) {
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")

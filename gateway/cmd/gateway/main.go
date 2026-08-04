@@ -309,6 +309,13 @@ func validateManagedCodexRecoveryPaths(parentPID int, targetPath, statePath stri
 	return nil
 }
 
+func allowsUnownedManagedLifecycle(appManaged bool, launchdSocketName, controlTokenPath string, restoreAfter time.Duration) bool {
+	if appManaged {
+		return true
+	}
+	return launchdSocketName != "" && controlTokenPath != "" && restoreAfter > 0
+}
+
 func parentProcessAlive(pid int) bool {
 	process, err := os.FindProcess(pid)
 	if err != nil {
@@ -622,7 +629,13 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 			return fmt.Errorf("parent process is not running")
 		}
 	}
-	if err := validateManagedCodexRecoveryPaths(parentPID, *managedCodexTarget, *managedCodexState, *appManaged); err != nil {
+	allowUnowned := allowsUnownedManagedLifecycle(
+		*appManaged,
+		*launchdSocketName,
+		*controlTokenPath,
+		*restoreUnownedAfter,
+	)
+	if err := validateManagedCodexRecoveryPaths(parentPID, *managedCodexTarget, *managedCodexState, allowUnowned); err != nil {
 		return err
 	}
 	controlToken := ""
