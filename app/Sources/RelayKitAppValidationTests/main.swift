@@ -939,9 +939,10 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
     }
     guard let tokenPath = appModel.range(of: "let controlTokenPath = try ensureGatewayControlToken()"),
           let ownerLease = appModel.range(of: "try gateway.holdControlOwnerLease(at: controlTokenPath)", range: tokenPath.upperBound..<appModel.endIndex),
-          let serviceRegistration = appModel.range(of: "GatewayBackgroundService().ensureRegisteredIfPackaged()", range: ownerLease.upperBound..<appModel.endIndex),
-          tokenPath.lowerBound < ownerLease.lowerBound && ownerLease.lowerBound < serviceRegistration.lowerBound else {
-        fatalError("App must hold the control-token owner lease before launchd can start the helper")
+          let routeStatus = appModel.range(of: "let managedRouteEnabled = managedCodexRouteStatus() == \"enabled\"", range: ownerLease.upperBound..<appModel.endIndex),
+          let serviceRegistration = appModel.range(of: "GatewayBackgroundService().ensureRegisteredIfPackaged()", range: routeStatus.upperBound..<appModel.endIndex),
+          tokenPath.lowerBound < ownerLease.lowerBound && ownerLease.lowerBound < routeStatus.lowerBound && routeStatus.lowerBound < serviceRegistration.lowerBound else {
+        fatalError("App must hold the control-token owner lease before reading route state or starting launchd")
     }
     for required in ["let managedRouteEnabled = managedCodexRouteStatus() == \"enabled\"", "managedRouteEnabled: managedRouteEnabled", "mode != self.gateway.expectedServiceMode"] {
         if !appModel.contains(required) {

@@ -192,6 +192,8 @@ final class AppModel: ObservableObject {
 
     func startGateway(officialCatalog: Data? = nil) {
         do {
+            let controlTokenPath = try ensureGatewayControlToken()
+            try gateway.holdControlOwnerLease(at: controlTokenPath)
             let managedRouteEnabled = managedCodexRouteStatus() == "enabled"
             let resolvedOfficialCatalog = officialCatalog ?? (officialSnapshot.isConnected ? lastOfficialCatalog : nil)
             lastOfficialCatalog = resolvedOfficialCatalog
@@ -199,8 +201,6 @@ final class AppModel: ObservableObject {
             let credentialHandoff = try GatewayCredentialHandoff.encode(configData: runtimeConfig.data) { reference in
                 try KeychainCredentialStore.load(service: reference)
             }
-            let controlTokenPath = try ensureGatewayControlToken()
-            try gateway.holdControlOwnerLease(at: controlTokenPath)
             let launchdManaged = try GatewayBackgroundService().ensureRegisteredIfPackaged()
             try gateway.start(
                 binaryPath: gatewayBinaryPath,

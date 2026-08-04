@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -399,10 +400,25 @@ func TestControlTokenLeaseDetectsLiveAppOwner(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("a", 64)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	active, err := controlTokenLeaseActive(path)
+	active, recoveryLease, err := acquireControlTokenLeaseProbe(path)
 	if err != nil || active {
 		t.Fatalf("unlocked control token lease = %t, %v", active, err)
 	}
+	competitor, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(competitor.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("startup recovery did not retain the owner lease: %v", err)
+	}
+	if err := recoveryLease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(competitor.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("startup recovery lease was not released: %v", err)
+	}
+	_ = syscall.Flock(int(competitor.Fd()), syscall.LOCK_UN)
+	_ = competitor.Close()
 
 	file, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
@@ -414,9 +430,12 @@ func TestControlTokenLeaseDetectsLiveAppOwner(t *testing.T) {
 	}
 	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 
-	active, err = controlTokenLeaseActive(path)
+	active, recoveryLease, err = acquireControlTokenLeaseProbe(path)
 	if err != nil || !active {
 		t.Fatalf("locked control token lease = %t, %v", active, err)
+	}
+	if recoveryLease != nil {
+		t.Fatal("owner-active probe unexpectedly retained the lease")
 	}
 }
 

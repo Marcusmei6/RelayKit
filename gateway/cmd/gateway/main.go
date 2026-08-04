@@ -504,31 +504,36 @@ func readControlToken(path string) (string, error) {
 	return token, nil
 }
 
-func controlTokenLeaseActive(path string) (bool, error) {
+func acquireControlTokenLeaseProbe(path string) (bool, *os.File, error) {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
-	defer syscall.Close(fd)
 
 	var info syscall.Stat_t
 	if err := syscall.Fstat(fd, &info); err != nil {
-		return false, err
+		_ = syscall.Close(fd)
+		return false, nil, err
 	}
 	if info.Mode&syscall.S_IFMT != syscall.S_IFREG || info.Mode&0777 != 0600 ||
 		int(info.Uid) != os.Getuid() || info.Nlink != 1 {
-		return false, fmt.Errorf("unsafe control token file")
+		_ = syscall.Close(fd)
+		return false, nil, fmt.Errorf("unsafe control token file")
 	}
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = syscall.Close(fd)
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return true, nil
+			return true, nil, nil
 		}
-		return false, err
+		return false, nil, err
 	}
-	if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
-		return false, err
+	lease := os.NewFile(uintptr(fd), "gateway-control-owner-lease")
+	if lease == nil {
+		_ = syscall.Flock(fd, syscall.LOCK_UN)
+		_ = syscall.Close(fd)
+		return false, nil, fmt.Errorf("control token owner lease unavailable")
 	}
-	return false, nil
+	return false, lease, nil
 }
 
 func gatewayControlAEAD(token string) (cipher.AEAD, error) {
@@ -676,6 +681,7 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	}
 	controlToken := ""
 	appOwnerActive := false
+	var startupRecoveryLease *os.File
 	if *controlTokenPath != "" {
 		var err error
 		controlToken, err = readControlToken(*controlTokenPath)
@@ -683,9 +689,16 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 			return fmt.Errorf("gateway control token failed validation")
 		}
 		if backgroundManaged {
-			appOwnerActive, err = controlTokenLeaseActive(*controlTokenPath)
+			appOwnerActive, startupRecoveryLease, err = acquireControlTokenLeaseProbe(*controlTokenPath)
 			if err != nil {
 				return fmt.Errorf("gateway control owner lease failed validation")
+			}
+			if startupRecoveryLease != nil {
+				defer func() {
+					if startupRecoveryLease != nil {
+						_ = startupRecoveryLease.Close()
+					}
+				}()
 			}
 		}
 	}
@@ -731,6 +744,12 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		if recoveryErr != nil {
 			log.Printf("unowned managed route recovery retained the fallback listener")
 		}
+	}
+	if startupRecoveryLease != nil {
+		if err := startupRecoveryLease.Close(); err != nil {
+			return fmt.Errorf("gateway control owner lease release failed")
+		}
+		startupRecoveryLease = nil
 	}
 
 	var listener net.Listener
