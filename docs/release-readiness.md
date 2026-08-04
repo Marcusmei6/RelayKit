@@ -8,7 +8,9 @@ Build 17 was produced from clean commit `cc0fa01329ec472fe85c3128df8f4fcd9bd5763
 
 Build 17 is no longer eligible as the final release candidate. It predates the P0 two-epoch lifecycle that keeps the data plane available for an already-running Codex process after the App restores disk config and exits. Do not overwrite, re-sign, relabel, install as final, upload, or publish Build 17.
 
-The current source candidate adds a launchd socket-owned fallback data plane, typed provider rejection after Disable, provider credential clearing on owner release, helper crash recovery, and App/helper lifecycle separation. Its random-port eight-case matrix passes, as do focused/full Go, Swift, bundle/package, signed-release contract, CI contract, public-boundary, and diff gates. The live unique-label launchd proof is not yet run, and current evidence is not yet bound to a clean product commit. Independent Test/CR, hosted CI, Build 18, installation, and same-running-Codex E2E remain required.
+The current product candidate is committed through `aa3ddddc41665b86b1e59811696c53dd2e192e2f`. It adds a launchd socket-owned fallback data plane, typed provider rejection after Disable, provider credential clearing on owner release, helper crash recovery, App/helper lifecycle separation, guarded parentless launchd startup, and a one-second nonzero respawn throttle. Its random-port eight-case matrix and focused/full Go, Swift, bundle/package, signed-release contract, CI contract, public-boundary, and diff gates pass.
+
+All six hosted checks pass for `aa3dddd`. In particular, macOS Runtime Safety run `30944489758` passed the offline contract, full eight-case harness, and live unique-label launchd proof. The four live cases prove cached-client continuity across graceful release, App loss, helper crash, and simultaneous App/helper loss; they also prove config restoration/new-client direct routing where required, helper restart, unchanged global guards, and cleanup. Independent Test/CR, Build 18, installation, and same-running-Codex E2E remain required.
 
 The required hosted checks remain:
 
