@@ -316,6 +316,14 @@ func allowsUnownedManagedLifecycle(appManaged bool, launchdSocketName, controlTo
 	return launchdSocketName != "" && controlTokenPath != "" && restoreAfter > 0
 }
 
+func reconcileUnownedManagedRouteAtStartup(targetPath, statePath string, managedEpochObserved, appOwnerActive bool) (bool, error) {
+	if targetPath == "" || !managedEpochObserved || appOwnerActive {
+		return false, nil
+	}
+	decision, err := codexconfig.RecoveryDecisionForParentLossWithContinuity(targetPath, statePath, true)
+	return decision == codexconfig.RecoveryRetainListener, err
+}
+
 func parentProcessAlive(pid int) bool {
 	process, err := os.FindProcess(pid)
 	if err != nil {
@@ -496,6 +504,33 @@ func readControlToken(path string) (string, error) {
 	return token, nil
 }
 
+func controlTokenLeaseActive(path string) (bool, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return false, err
+	}
+	defer syscall.Close(fd)
+
+	var info syscall.Stat_t
+	if err := syscall.Fstat(fd, &info); err != nil {
+		return false, err
+	}
+	if info.Mode&syscall.S_IFMT != syscall.S_IFREG || info.Mode&0777 != 0600 ||
+		int(info.Uid) != os.Getuid() || info.Nlink != 1 {
+		return false, fmt.Errorf("unsafe control token file")
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return true, nil
+		}
+		return false, err
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 func gatewayControlAEAD(token string) (cipher.AEAD, error) {
 	key, err := hex.DecodeString(token)
 	if err != nil || len(key) != 32 {
@@ -635,15 +670,23 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		*controlTokenPath,
 		*restoreUnownedAfter,
 	)
+	backgroundManaged := *launchdSocketName != "" && *controlTokenPath != ""
 	if err := validateManagedCodexRecoveryPaths(parentPID, *managedCodexTarget, *managedCodexState, allowUnowned); err != nil {
 		return err
 	}
 	controlToken := ""
+	appOwnerActive := false
 	if *controlTokenPath != "" {
 		var err error
 		controlToken, err = readControlToken(*controlTokenPath)
 		if err != nil {
 			return fmt.Errorf("gateway control token failed validation")
+		}
+		if backgroundManaged {
+			appOwnerActive, err = controlTokenLeaseActive(*controlTokenPath)
+			if err != nil {
+				return fmt.Errorf("gateway control owner lease failed validation")
+			}
 		}
 	}
 	var handler *server.Server
@@ -676,6 +719,17 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		status, statusErr := codexconfig.IntegrationStatus(*managedCodexTarget, *managedCodexState)
 		if statusErr == nil && (status == codexconfig.StatusEnabled || status == codexconfig.StatusDrifted) {
 			managedEpochObserved.Store(true)
+		}
+	}
+	if retain, recoveryErr := reconcileUnownedManagedRouteAtStartup(
+		*managedCodexTarget,
+		*managedCodexState,
+		backgroundManaged && managedEpochObserved.Load(),
+		appOwnerActive,
+	); retain {
+		handler.EnterFallbackOfficialOnly()
+		if recoveryErr != nil {
+			log.Printf("unowned managed route recovery retained the fallback listener")
 		}
 	}
 
@@ -817,7 +871,7 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	} else {
 		close(parentMonitorDone)
 	}
-	if *restoreUnownedAfter > 0 && managedEpochObserved.Load() {
+	if *restoreUnownedAfter > 0 && managedEpochObserved.Load() && appOwnerActive {
 		go func() {
 			timer := time.NewTimer(*restoreUnownedAfter)
 			defer timer.Stop()

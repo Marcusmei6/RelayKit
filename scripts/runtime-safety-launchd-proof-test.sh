@@ -16,7 +16,7 @@ contract="$("${PROOF}" --print-contract)"
 jq -e '
   .proof == "runtime_safety_launchd" and
   .runtime == "isolated_launchd_socket_activation" and
-  .cases == ["graceful_release", "app_loss", "helper_crash", "app_helper_loss"] and
+  .cases == ["graceful_release", "app_loss", "unowned_restart", "helper_crash", "app_helper_loss"] and
   .shared_guards == ["global_config", "global_auth", "user_launch_agents", "18787", "19777"] and
   .writes_user_launch_agents == false and
   .fixture_only == true
@@ -27,6 +27,8 @@ for required in \
   'launchctl bootstrap' \
   'launchctl bootout' \
   'ThrottleInterval' \
+  'fcntl.flock' \
+  'unowned_restart' \
   'RelayKitGateway' \
   'cached_request' \
   'direct_request' \

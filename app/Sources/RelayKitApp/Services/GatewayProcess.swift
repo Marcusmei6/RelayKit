@@ -9,6 +9,8 @@ final class GatewayProcess {
     private var controlBinaryPath = ""
     private var controlTokenPath = ""
     private var controlParentProcessIdentifier: Int32?
+    private var controlOwnerLease: FileHandle?
+    private var controlOwnerLeasePath = ""
     private(set) var usesManagedService = false
     private(set) var expectedServiceMode = "managed"
     private let endpoint: RelayKitRuntimeEndpoint
@@ -27,6 +29,42 @@ final class GatewayProcess {
             return nil
         }
         return process.processIdentifier
+    }
+
+    func holdControlOwnerLease(at path: String) throws {
+        if controlOwnerLease != nil {
+            guard controlOwnerLeasePath == path else {
+                throw GatewayProcessError.commandFailed("gateway control owner lease path changed")
+            }
+            return
+        }
+        let deadline = Date().addingTimeInterval(2)
+        var descriptor: Int32 = -1
+        repeat {
+            descriptor = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK | O_NONBLOCK)
+            if descriptor >= 0 {
+                break
+            }
+            guard (errno == EWOULDBLOCK || errno == EAGAIN), Date() < deadline else {
+                throw GatewayProcessError.commandFailed("gateway control owner lease is unavailable")
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while true
+        guard descriptor >= 0 else {
+            throw GatewayProcessError.commandFailed("gateway control owner lease is unavailable")
+        }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              (info.st_mode & 0o777) == 0o600,
+              info.st_uid == getuid(),
+              info.st_nlink == 1 else {
+            Darwin.close(descriptor)
+            throw GatewayProcessError.commandFailed("gateway control owner lease is invalid")
+        }
+
+        controlOwnerLease = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        controlOwnerLeasePath = path
     }
 
     func start(

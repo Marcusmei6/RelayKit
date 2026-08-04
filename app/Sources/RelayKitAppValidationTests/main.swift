@@ -925,6 +925,7 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
         "gatewayStatus = gateway.isRunning ? \"running\" : \"stopped\"",
         "lastOfficialCatalog",
         "GatewayBackgroundService().ensureRegisteredIfPackaged()",
+        "gateway.holdControlOwnerLease(at: controlTokenPath)",
         "beginGatewayServiceMonitorIfNeeded()",
         "healthMode()",
     ] {
@@ -933,8 +934,14 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
     if appModel.contains("startupRouteReachableButUnowned") {
         fatalError("startup health contract must retain Protected adoption without an unowned-listener expansion")
     }
-    for required in ["@MainActor\nfinal class GatewayProcess", "-managed-codex-target", "-managed-codex-state", "launchdManaged", "usesManagedService", "managedRouteEnabled: Bool = true", "private(set) var expectedServiceMode", "-route-enabled=\\(managedRouteEnabled ? \"true\" : \"false\")", "\"release\"", "Task { @MainActor", "process.terminationHandler = nil", "func restartDataPlane() throws", "func leaveRunningForFallback() throws", "nonisolated static func summarizeUsage", "nonisolated static func runGatewayCommand", "nonisolated static func appDirectory", "GatewayTerminationRelay: @unchecked Sendable"] {
+    for required in ["@MainActor\nfinal class GatewayProcess", "-managed-codex-target", "-managed-codex-state", "launchdManaged", "usesManagedService", "managedRouteEnabled: Bool = true", "private(set) var expectedServiceMode", "-route-enabled=\\(managedRouteEnabled ? \"true\" : \"false\")", "\"release\"", "Task { @MainActor", "process.terminationHandler = nil", "func holdControlOwnerLease(at path: String) throws", "O_EXLOCK | O_NONBLOCK", "func restartDataPlane() throws", "func leaveRunningForFallback() throws", "nonisolated static func summarizeUsage", "nonisolated static func runGatewayCommand", "nonisolated static func appDirectory", "GatewayTerminationRelay: @unchecked Sendable"] {
         if !gateway.contains(required) { fatalError("gateway lifecycle safety contract missing \(required)") }
+    }
+    guard let tokenPath = appModel.range(of: "let controlTokenPath = try ensureGatewayControlToken()"),
+          let ownerLease = appModel.range(of: "try gateway.holdControlOwnerLease(at: controlTokenPath)", range: tokenPath.upperBound..<appModel.endIndex),
+          let serviceRegistration = appModel.range(of: "GatewayBackgroundService().ensureRegisteredIfPackaged()", range: ownerLease.upperBound..<appModel.endIndex),
+          tokenPath.lowerBound < ownerLease.lowerBound && ownerLease.lowerBound < serviceRegistration.lowerBound else {
+        fatalError("App must hold the control-token owner lease before launchd can start the helper")
     }
     for required in ["let managedRouteEnabled = managedCodexRouteStatus() == \"enabled\"", "managedRouteEnabled: managedRouteEnabled", "mode != self.gateway.expectedServiceMode"] {
         if !appModel.contains(required) {

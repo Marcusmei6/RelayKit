@@ -200,6 +200,7 @@ final class AppModel: ObservableObject {
                 try KeychainCredentialStore.load(service: reference)
             }
             let controlTokenPath = try ensureGatewayControlToken()
+            try gateway.holdControlOwnerLease(at: controlTokenPath)
             let launchdManaged = try GatewayBackgroundService().ensureRegisteredIfPackaged()
             try gateway.start(
                 binaryPath: gatewayBinaryPath,

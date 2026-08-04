@@ -39,7 +39,7 @@ print_contract() {
   jq -n '{
     proof: "runtime_safety_launchd",
     runtime: "isolated_launchd_socket_activation",
-    cases: ["graceful_release", "app_loss", "helper_crash", "app_helper_loss"],
+    cases: ["graceful_release", "app_loss", "unowned_restart", "helper_crash", "app_helper_loss"],
     shared_guards: ["global_config", "global_auth", "user_launch_agents", "18787", "19777"],
     writes_user_launch_agents: false,
     fixture_only: true
@@ -231,8 +231,25 @@ direct_request() {
 }
 
 start_parent() {
-  /bin/sleep 600 &
+  local ready="${WORK_ROOT}/parent-owner.ready" index
+  rm -f "${ready}"
+  /usr/bin/python3 - "${TOKEN_PATH}" "${ready}" <<'PY' &
+import fcntl
+import pathlib
+import sys
+import time
+
+with open(sys.argv[1], "rb") as lease:
+    fcntl.flock(lease.fileno(), fcntl.LOCK_EX)
+    pathlib.Path(sys.argv[2]).write_text("ready", encoding="utf-8")
+    time.sleep(600)
+PY
   PARENT_PID=$!
+  for ((index = 0; index < 50; index++)); do
+    [[ -f "${ready}" ]] && return 0
+    /bin/sleep 0.05
+  done
+  return 1
 }
 
 stop_parent() {
@@ -427,7 +444,7 @@ cat >"${PLIST}" <<PLIST
 <string>-config</string><string>${CONFIG}</string><string>-usage-log</string><string>${USAGE}</string>
 <string>-managed-codex-target</string><string>${TARGET}</string><string>-managed-codex-state</string><string>${STATE}</string>
 <string>-control-token-file</string><string>${TOKEN_PATH}</string>
-<string>-initial-official-fallback</string><string>-restore-unowned-after</string><string>1s</string>
+<string>-initial-official-fallback</string><string>-restore-unowned-after</string><string>30s</string>
 </array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ThrottleInterval</key><integer>1</integer>
@@ -483,6 +500,20 @@ cached_request
 direct_request
 [[ "$(helper_pid)" == "${app_loss_helper}" ]]
 record_case app_loss restored_config_with_fallback_listener false true official_fallback true true true
+
+FAILURE=unowned_restart
+enable_route
+cached_request
+old_helper="$(helper_pid)"
+[[ -n "${old_helper}" ]]
+/bin/kill -KILL "${old_helper}"
+wait_pid_exit "${old_helper}"
+cached_request
+wait_restored_fallback
+direct_request
+new_helper="$(helper_pid)"
+[[ -n "${new_helper}" && "${new_helper}" != "${old_helper}" ]]
+record_case unowned_restart restored_config_before_unowned_listener true true official_fallback true true true
 
 FAILURE=helper_crash
 enable_route

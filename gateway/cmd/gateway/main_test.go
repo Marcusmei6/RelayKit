@@ -323,6 +323,103 @@ func TestBackgroundManagedLifecycleRequiresLaunchdControlAndRecoveryTimer(t *tes
 	}
 }
 
+func TestUnownedStartupRestoresManagedRouteBeforeServing(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	state := filepath.Join(dir, "state.json")
+	catalog := filepath.Join(dir, "catalog.json")
+	directBaseURL := "https://api.openai.com/v1"
+	managedBaseURL := "http://127.0.0.1:19777/v1"
+	if err := os.WriteFile(target, []byte("openai_base_url = "+strconv.Quote(directBaseURL)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(catalog, []byte(`{"models":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{
+		"enable-codex-config",
+		"-target", target,
+		"-catalog", catalog,
+		"-state", state,
+		"-base-url", managedBaseURL,
+	}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("could not create managed route")
+	}
+
+	retain, err := reconcileUnownedManagedRouteAtStartup(target, state, true, false)
+	if err != nil || !retain {
+		t.Fatalf("unowned startup recovery = %t, %v", retain, err)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), managedBaseURL) || !strings.Contains(string(body), directBaseURL) {
+		t.Fatalf("unowned startup did not restore direct Official config: %s", body)
+	}
+}
+
+func TestOwnedStartupPreservesManagedRouteForAppAdoption(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.toml")
+	state := filepath.Join(dir, "state.json")
+	catalog := filepath.Join(dir, "catalog.json")
+	managedBaseURL := "http://127.0.0.1:19777/v1"
+	if err := os.WriteFile(target, []byte("model = \"gpt-5.5\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(catalog, []byte(`{"models":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{
+		"enable-codex-config",
+		"-target", target,
+		"-catalog", catalog,
+		"-state", state,
+		"-base-url", managedBaseURL,
+	}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("could not create managed route")
+	}
+
+	retain, err := reconcileUnownedManagedRouteAtStartup(target, state, true, true)
+	if err != nil || retain {
+		t.Fatalf("owned startup recovery = %t, %v", retain, err)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), managedBaseURL) {
+		t.Fatal("owned startup changed the route before App adoption")
+	}
+}
+
+func TestControlTokenLeaseDetectsLiveAppOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.token")
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", 64)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	active, err := controlTokenLeaseActive(path)
+	if err != nil || active {
+		t.Fatalf("unlocked control token lease = %t, %v", active, err)
+	}
+
+	file, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+
+	active, err = controlTokenLeaseActive(path)
+	if err != nil || !active {
+		t.Fatalf("locked control token lease = %t, %v", active, err)
+	}
+}
+
 func TestGatewayParentLossRejectsAuthAndSymlinkManagedPaths(t *testing.T) {
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
