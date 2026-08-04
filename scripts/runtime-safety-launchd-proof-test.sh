@@ -36,6 +36,9 @@ for required in \
   'config_restored' \
   'cached_request_after' \
   'new_direct_after_restore' \
+  'StandardErrorPath' \
+  'classify_launchd_health_failure' \
+  'launchd_socket_activation_failed' \
   'helper_processes_stopped' \
   'global_guards_unchanged' \
   'runtime-safety-launchd'; do

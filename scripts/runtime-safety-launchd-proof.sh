@@ -139,6 +139,25 @@ wait_health() {
   return 1
 }
 
+classify_launchd_health_failure() {
+  local stderr_path="${WORK_ROOT}/helper.stderr"
+  if grep -Fq 'launchd socket activation failed:' "${stderr_path}" 2>/dev/null; then
+    printf launchd_socket_activation_failed
+  elif grep -Fq 'launchd socket activation returned' "${stderr_path}" 2>/dev/null; then
+    printf launchd_socket_descriptor_count_invalid
+  elif grep -Fq 'gateway config failed:' "${stderr_path}" 2>/dev/null; then
+    printf launchd_gateway_config_failed
+  elif grep -Fq 'gateway control token failed validation' "${stderr_path}" 2>/dev/null; then
+    printf launchd_control_token_invalid
+  elif grep -Fq 'gateway listen failed:' "${stderr_path}" 2>/dev/null; then
+    printf launchd_gateway_listen_failed
+  elif [[ ! -s "${stderr_path}" ]]; then
+    printf launchd_helper_not_started
+  else
+    printf launchd_helper_start_failed
+  fi
+}
+
 gateway_mode() {
   /usr/bin/curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/healthz" | jq -er '.mode'
 }
@@ -374,6 +393,9 @@ cat >"${PLIST}" <<PLIST
 <string>-initial-official-fallback</string><string>-restore-unowned-after</string><string>1s</string>
 </array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>Umask</key><integer>63</integer>
+<key>StandardOutPath</key><string>${WORK_ROOT}/helper.stdout</string>
+<key>StandardErrorPath</key><string>${WORK_ROOT}/helper.stderr</string>
 <key>Sockets</key><dict><key>RelayKitGateway</key><dict>
 <key>SockFamily</key><string>IPv4</string><key>SockNodeName</key><string>127.0.0.1</string>
 <key>SockServiceName</key><string>${PORT}</string><key>SockType</key><string>stream</string>
@@ -386,7 +408,10 @@ FAILURE=launchd_bootstrap
 /bin/launchctl bootstrap "gui/$(/usr/bin/id -u)" "${PLIST}"
 BOOTSTRAPPED=true
 FAILURE=launchd_health
-wait_health
+if ! wait_health; then
+  FAILURE="$(classify_launchd_health_failure)"
+  exit 1
+fi
 
 FAILURE=initial_enable
 enable_route
