@@ -462,6 +462,26 @@ wait_for_expected_listener() {
   return 1
 }
 
+wait_for_stable_expected_listener() {
+  local index pid stable_pid="" stable_checks=0
+  for ((index = 0; index < 200; index++)); do
+    if expected_listener_is_healthy && pid="$(listener_pid)"; then
+      if [[ "${pid}" == "${stable_pid}" ]]; then
+        stable_checks=$((stable_checks + 1))
+      else
+        stable_pid="${pid}"
+        stable_checks=1
+      fi
+      [[ "${stable_checks}" -ge 20 ]] && return 0
+    else
+      stable_pid=""
+      stable_checks=0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 verify_app_helper_ownership() {
   local parent command
   HELPER_PID="$(listener_pid)" || return 1
@@ -496,6 +516,10 @@ launch_managed_case() {
     fi
     return 1
   fi
+  wait_for_stable_expected_listener || {
+    FAILURE_CODE=source_app_listener_not_stable
+    return 1
+  }
   verify_app_helper_ownership || {
     FAILURE_CODE=source_app_helper_ownership_failed
     return 1

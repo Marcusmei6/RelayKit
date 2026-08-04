@@ -1293,7 +1293,7 @@ if grep -Eq '^assisted_canonical_route_status\(\)|--test-assisted-canonical-stat
   fail "assisted canonical status still has a disconnected helper or test hook"
 fi
 write_evidence_body="$(sed -n '/^write_evidence() {/,/^}/p' "${PROOF_SCRIPT}")"
-test "$(rg -c 'automated_first_five_manual_official_tool_complete' <<<"${write_evidence_body}")" -eq 1 ||
+test "$(grep -Fc 'automated_first_five_manual_official_tool_complete' <<<"${write_evidence_body}" || true)" -eq 1 ||
   fail "production write_evidence must contain exactly one assisted canonical classification"
 grep -Fq '$human_intervention_count == 1 and $automated_profile == "assisted_six_stage" then "automated_first_five_manual_official_tool_complete"' \
   <<<"${write_evidence_body}" || fail "production write_evidence does not bind the assisted canonical classification"
@@ -1864,9 +1864,9 @@ grep -Fq 'custom_tool_scenario_complete' <<<"${auto_body}" ||
   fail "single provider tool completion must recheck existing tool and screenshot evidence"
 grep -Fq 'codex-desktop-ax-driver.swift' <<<"${auto_body}" ||
   fail "automated proof must invoke the deterministic AX driver"
-test "$(rg -c '"\$\{AX_DRIVER_BINARY\}" submit' <<<"${auto_body}")" -eq 1 ||
+test "$(grep -Ec '"\$\{AX_DRIVER_BINARY\}" submit' <<<"${auto_body}" || true)" -eq 1 ||
   fail "the automated state machine must contain exactly one submit call site"
-test "$(rg -c '"\$\{AX_DRIVER_BINARY\}" select-model' <<<"${auto_body}")" -eq 1 ||
+test "$(grep -Ec '"\$\{AX_DRIVER_BINARY\}" select-model' <<<"${auto_body}" || true)" -eq 1 ||
   fail "the assisted state machine must contain exactly one pre-pause model-selection call site"
 if grep -Fq '"${AX_DRIVER_BINARY}" submit' <<<"${auto_wait_body}${submitted_binding_body}"; then
   fail "submitted observation paths must never resend or reopen the picker"
@@ -1874,12 +1874,12 @@ fi
 if grep -Fq '"${AX_DRIVER_BINARY}" select-model' <<<"${auto_wait_body}${submitted_binding_body}"; then
   fail "submitted observation paths must never change the selected model"
 fi
-test "$(rg -c 'verify_assisted_live_bindings' <<<"${submitted_binding_body}")" -eq 2 ||
+test "$(grep -Fc 'verify_assisted_live_bindings' <<<"${submitted_binding_body}" || true)" -eq 2 ||
   fail "stage-six rollout binding must guard every poll and the acceptance edge"
 if grep -Fq 'SECONDS + timeout_seconds' <<<"${submitted_binding_body}${auto_wait_body}"; then
   fail "binding and observation must not create independent stage deadlines"
 fi
-test "$(rg -c 'stage_deadline=\$\(\(SECONDS \+ stage_timeout\)\)' <<<"${auto_body}")" -eq 1 ||
+test "$(grep -Ec 'stage_deadline=\$\(\(SECONDS \+ stage_timeout\)\)' <<<"${auto_body}" || true)" -eq 1 ||
   fail "each stage must create exactly one absolute deadline"
 grep -Fq '"${stage_deadline}" "${evidence_role}"' <<<"${auto_body}" ||
   fail "rollout binding must receive the stage absolute deadline and role"
