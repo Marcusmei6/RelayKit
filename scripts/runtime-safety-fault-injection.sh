@@ -7,6 +7,9 @@ EVIDENCE_PATH="${EVIDENCE_DIR}/evidence.json"
 PHYSICAL_HOME="${HOME}"
 RUNTIME_PORT=""
 RUN_BASE_URL=""
+UPSTREAM_PORT=""
+UPSTREAM_BASE_URL=""
+UPSTREAM_PID=""
 SOURCE_SHA=""
 HARNESS_SHA=""
 HARNESS_TEST_SHA=""
@@ -21,6 +24,7 @@ BLOCKER_PID=""
 OWNED_APP_PIDS=()
 OWNED_HELPER_PIDS=()
 OWNED_BLOCKER_PIDS=()
+OWNED_UPSTREAM_PIDS=()
 CURRENT_TARGET=""
 CURRENT_STATE=""
 CURRENT_CODEX_DIR=""
@@ -47,6 +51,7 @@ PORT_18787_UNCHANGED=false
 CLEANUP_APP_PROCESSES=false
 CLEANUP_HELPER_PROCESSES=false
 CLEANUP_RUNTIME_PORT=false
+CLEANUP_UPSTREAM_PORT=false
 CLEANUP_TEMP=false
 FINALIZED=false
 
@@ -63,13 +68,16 @@ CASE_NAMES=(
 CASE_STATUSES=(not_run not_run not_run not_run not_run not_run not_run not_run)
 CASE_SCOPES=(none none none none none none none none)
 CASE_OUTCOMES=(none none none none none none none none)
+CASE_CACHED_REQUEST_BEFORE=(false false false false false false false false)
+CASE_CACHED_REQUEST_AFTER=(false false false false false false false false)
+CASE_NEW_DIRECT_AFTER_RESTORE=(false false false false false false false false)
 
 print_contract() {
   jq -n '{
     proof: "runtime_safety_fault_injection",
     source: "current_checkout",
     runtime: "isolated_source_app",
-    network: "loopback_health_only",
+    network: "loopback_official_fixture_only",
     protected_ports: [18787, 19777],
     global_files: "read_only_non_content_guards",
     launch_agents: "read_only_aggregate_guard",
@@ -94,6 +102,7 @@ print_contract() {
       "harness_test_sha",
       "random_port",
       "cases",
+      "client_continuity",
       "restore_failure_diagnostics",
       "global_guards",
       "installed_runtime_unchanged",
@@ -104,12 +113,12 @@ print_contract() {
 
 classify_safety_state() {
   local config_points="$1" helper_alive="$2" listener_exists="$3"
-  if [[ "${config_points}" == false ]]; then
-    printf 'managed_base_url_removed'
+  if [[ "${config_points}" == false && "${helper_alive}" == true && "${listener_exists}" == true ]]; then
+    printf 'restored_config_with_fallback_listener'
     return 0
   fi
   if [[ "${config_points}" == true && "${helper_alive}" == true && "${listener_exists}" == true ]]; then
-    printf 'healthy_expected_listener'
+    printf 'managed_config_with_expected_listener'
     return 0
   fi
   return 1
@@ -275,6 +284,53 @@ safe_outcome() {
   classify_safety_state "${config_points}" "${helper_alive}" "${listener_exists}"
 }
 
+gateway_mode() {
+  curl -fsS --max-time 1 "http://127.0.0.1:${RUNTIME_PORT}/healthz" 2>/dev/null |
+    jq -er '.mode | select(. == "managed" or . == "official_fallback")' 2>/dev/null
+}
+
+restored_fallback_is_healthy() {
+  ! target_points_to_run_base &&
+    pid_is_alive "${HELPER_PID}" &&
+    expected_listener_is_healthy &&
+    [[ "$(gateway_mode 2>/dev/null || true)" == "official_fallback" ]]
+}
+
+send_cached_official_request() {
+  local response
+  response="$(curl -fsS --max-time 3 \
+    -H 'Content-Type: application/json' \
+    --data '{"model":"runtime-safety-official","input":"fixture continuity"}' \
+    "${RUN_BASE_URL}/responses")" || return 1
+  jq -e '.status == "completed"' <<<"${response}" >/dev/null
+}
+
+send_new_direct_official_request() {
+  local configured response
+  configured="$(sed -n 's/^openai_base_url = "\(.*\)"$/\1/p' "${CURRENT_TARGET}")"
+  [[ "${configured}" == "${UPSTREAM_BASE_URL}/v1" ]] || return 1
+  response="$(curl -fsS --max-time 3 \
+    -H 'Content-Type: application/json' \
+    --data '{"model":"runtime-safety-official","input":"fixture direct"}' \
+    "${configured}/responses")" || return 1
+  jq -e '.status == "completed"' <<<"${response}" >/dev/null
+}
+
+record_cached_before() {
+  send_cached_official_request || return 1
+  CASE_CACHED_REQUEST_BEFORE[$CURRENT_CASE_INDEX]=true
+}
+
+record_cached_after() {
+  send_cached_official_request || return 1
+  CASE_CACHED_REQUEST_AFTER[$CURRENT_CASE_INDEX]=true
+}
+
+record_new_direct_after_restore() {
+  send_new_direct_official_request || return 1
+  CASE_NEW_DIRECT_AFTER_RESTORE[$CURRENT_CASE_INDEX]=true
+}
+
 capture_restore_failure_diagnostics() {
   RESTORE_DIAGNOSTICS_CAPTURED=true
   RESTORE_CONFIG_POINTS_TO_RUN_BASE=false
@@ -343,7 +399,73 @@ select_random_port() {
     [[ -z "$(listener_pids "${candidate}")" ]] || continue
     RUNTIME_PORT="${candidate}"
     RUN_BASE_URL="http://127.0.0.1:${RUNTIME_PORT}/v1"
-    return
+    break
+  done
+  [[ -n "${RUNTIME_PORT}" ]] || return 1
+  for ((attempt = 0; attempt < 200; attempt++)); do
+    candidate=$((20000 + (RANDOM % 40000)))
+    [[ "${candidate}" != "${RUNTIME_PORT}" && "${candidate}" != 18787 && "${candidate}" != 19777 ]] || continue
+    [[ -z "$(listener_pids "${candidate}")" ]] || continue
+    UPSTREAM_PORT="${candidate}"
+    UPSTREAM_BASE_URL="http://127.0.0.1:${UPSTREAM_PORT}"
+    return 0
+  done
+  return 1
+}
+
+start_official_fixture() {
+  env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" /usr/bin/python3 - "${UPSTREAM_PORT}" \
+    >"${WORK_ROOT}/official-fixture.stdout" 2>"${WORK_ROOT}/official-fixture.stderr" <<'PY' &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def do_GET(self):
+        if self.path != "/healthz":
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok"}')
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length:
+            self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        if self.path.endswith("/chat/completions"):
+            body = {
+                "id": "chatcmpl-runtime-safety",
+                "model": "runtime-safety-official",
+                "choices": [{"message": {"role": "assistant", "content": "fixture continuity"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        else:
+            body = {
+                "id": "resp-runtime-safety",
+                "object": "response",
+                "model": "runtime-safety-official",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+        self.wfile.write(json.dumps(body, separators=(",", ":")).encode())
+
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+PY
+  UPSTREAM_PID=$!
+  OWNED_UPSTREAM_PIDS+=("${UPSTREAM_PID}")
+  local index
+  for ((index = 0; index < 50; index++)); do
+    curl -fsS --max-time 1 "${UPSTREAM_BASE_URL}/healthz" >/dev/null 2>&1 && return 0
+    sleep 0.1
   done
   return 1
 }
@@ -412,10 +534,14 @@ prepare_case() {
   CURRENT_TARGET="${case_root}/home/.codex/config.toml"
   CURRENT_STATE="${support}/codex-config-state.json"
   CURRENT_CODEX_DIR="${case_root}/home/.codex"
-  printf 'model = "fixture-model"\n' >"${CURRENT_TARGET}"
+  printf 'model = "runtime-safety-official"\nopenai_base_url = "%s/v1"\n' "${UPSTREAM_BASE_URL}" >"${CURRENT_TARGET}"
   printf '%s\n' '{"models":[]}' >"${support}/codex-model-catalog.json"
   printf '%s\n' '{"providers":[{"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:9/v1","api_format":"openai_chat","models":[{"id":"fixture-model"}]}]}' >"${support}/providers.json"
-  chmod 600 "${CURRENT_TARGET}" "${support}/codex-model-catalog.json" "${support}/providers.json"
+  printf '%s\n' '{"models":[{"slug":"runtime-safety-official","display_name":"Runtime Safety Official","visibility":"list"}]}' \
+    >"${support}/runtime-safety-official-catalog.json"
+  printf '%s\n' 'fixture-official-key' >"${support}/runtime-safety-official.key"
+  chmod 600 "${CURRENT_TARGET}" "${support}/codex-model-catalog.json" "${support}/providers.json" \
+    "${support}/runtime-safety-official-catalog.json" "${support}/runtime-safety-official.key"
   CASE_HOME="${case_root}/home"
   CASE_CODEX_HOME="${case_root}/codex-home"
   CASE_TMP="${case_root}/tmp"
@@ -446,6 +572,9 @@ launch_source_app() {
     exec env -i HOME="${case_home}" CODEX_HOME="${case_codex_home}" CFFIXED_USER_HOME="${case_home}" \
       PATH="/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="${CASE_TMP}" \
       RELAYKIT_RUNTIME_SAFETY_TEST=1 RELAYKIT_RUNTIME_SAFETY_PORT="${RUNTIME_PORT}" \
+      RELAYKIT_RUNTIME_SAFETY_OFFICIAL_BASE_URL="${UPSTREAM_BASE_URL}/v1" \
+      RELAYKIT_RUNTIME_SAFETY_OFFICIAL_KEY_FILE="${CASE_HOME}/Library/Application Support/RelayKit/runtime-safety-official.key" \
+      RELAYKIT_RUNTIME_SAFETY_OFFICIAL_CATALOG="${CASE_HOME}/Library/Application Support/RelayKit/runtime-safety-official-catalog.json" \
       "${APP_BINARY}" --ui-smoke-provider-config "${CASE_PROVIDER_CONFIG}"
   ) >"${CASE_LOGS}/app.stdout" 2>"${CASE_LOGS}/app.stderr" &
   APP_PID=$!
@@ -570,14 +699,20 @@ run_graceful_quit() {
   case_begin graceful_quit
   prepare_case graceful_quit || case_fail graceful_quit_setup_failed
   launch_managed_case || case_fail "${FAILURE_CODE}"
+  record_cached_before || case_fail graceful_quit_cached_request_before_failed
   "${GRACEFUL_CONTROLLER}" "${APP_PID}" >"${CASE_LOGS}/graceful-controller.log" 2>&1 \
     || case_fail graceful_quit_request_failed
   wait_for_pid_exit "${APP_PID}" 100 || case_fail graceful_quit_app_survived
   for ((index = 0; index < 120; index++)); do
-    if outcome="$(safe_outcome)"; then break; fi
+    if restored_fallback_is_healthy; then
+      outcome="restored_config_with_fallback_listener"
+      break
+    fi
     sleep 0.1
   done
   [[ -n "${outcome:-}" ]] || case_fail graceful_quit_unsafe
+  record_cached_after || case_fail graceful_quit_cached_request_after_failed
+  record_new_direct_after_restore || case_fail graceful_quit_new_direct_request_failed
   stop_case_processes || case_fail graceful_quit_cleanup_failed
   case_pass product_lifecycle "${outcome}"
 }
@@ -587,13 +722,19 @@ run_app_signal_case() {
   case_begin "${name}"
   prepare_case "${name}" || case_fail "${name}_setup_failed"
   launch_managed_case || case_fail "${name}_launch_failed"
+  record_cached_before || case_fail "${name}_cached_request_before_failed"
   kill -"${signal}" "${APP_PID}" || case_fail "${name}_signal_failed"
   wait_for_pid_exit "${APP_PID}" 100 || case_fail "${name}_app_survived"
   for ((index = 0; index < 120; index++)); do
-    if outcome="$(safe_outcome)"; then break; fi
+    if restored_fallback_is_healthy; then
+      outcome="restored_config_with_fallback_listener"
+      break
+    fi
     sleep 0.1
   done
   [[ -n "${outcome:-}" ]] || case_fail "${name}_unsafe"
+  record_cached_after || case_fail "${name}_cached_request_after_failed"
+  record_new_direct_after_restore || case_fail "${name}_new_direct_request_failed"
   stop_case_processes || case_fail "${name}_cleanup_failed"
   case_pass product_lifecycle "${outcome}"
 }
@@ -611,6 +752,7 @@ run_helper_signal_case() {
   case_begin "${name}"
   prepare_case "${name}" || case_fail "${name}_setup_failed"
   launch_managed_case || case_fail "${name}_launch_failed"
+  record_cached_before || case_fail "${name}_cached_request_before_failed"
   old_helper="${HELPER_PID}"
   kill -"${signal}" "${old_helper}" || case_fail "${name}_signal_failed"
   wait_for_pid_exit "${old_helper}" 100 || case_fail "${name}_helper_survived"
@@ -620,6 +762,7 @@ run_helper_signal_case() {
   HELPER_PID="${new_helper}"
   verify_app_helper_ownership || case_fail "${name}_ownership_failed"
   outcome="$(safe_outcome)" || case_fail "${name}_unsafe"
+  record_cached_after || case_fail "${name}_cached_request_after_failed"
   stop_case_processes || case_fail "${name}_cleanup_failed"
   case_pass product_lifecycle "${outcome}"
 }
@@ -671,7 +814,8 @@ run_helper_startup_fail() {
   done
   [[ "${status:-}" == "disabled" ]] || case_fail helper_startup_fail_route_retained
   [[ -z "$(pgrep -P "${APP_PID}" -f "${WORK_ROOT}/layout/app/gateway/bin/relay" 2>/dev/null || true)" ]] || case_fail helper_startup_fail_child_survived
-  outcome="$(safe_outcome)" || case_fail helper_startup_fail_unsafe
+  [[ "$(listener_pid 2>/dev/null || true)" == "${BLOCKER_PID}" ]] || case_fail helper_startup_fail_listener_owner_changed
+  outcome="startup_failed_before_cached_client_epoch"
   stop_case_processes || case_fail helper_startup_fail_cleanup_failed
   case_pass product_lifecycle "${outcome}"
 }
@@ -681,6 +825,7 @@ run_config_drift() {
   case_begin config_drift
   prepare_case config_drift || case_fail config_drift_setup_failed
   launch_managed_case || case_fail config_drift_launch_failed
+  record_cached_before || case_fail config_drift_cached_request_before_failed
   drift_catalog="${CASE_HOME}/Library/Application Support/RelayKit/drifted-catalog.json"
   printf 'model = "fixture-model"\nopenai_base_url = "%s"\nmodel_catalog_json = "%s"\n' \
     "${RUN_BASE_URL}" "${drift_catalog}" >"${CURRENT_TARGET}"
@@ -691,10 +836,15 @@ run_config_drift() {
   kill -KILL "${APP_PID}" || case_fail config_drift_signal_failed
   wait_for_pid_exit "${APP_PID}" 100 || case_fail config_drift_app_survived
   for ((index = 0; index < 120; index++)); do
-    if outcome="$(safe_outcome)"; then break; fi
+    if restored_fallback_is_healthy; then
+      outcome="restored_config_with_fallback_listener"
+      break
+    fi
     sleep 0.1
   done
   [[ -n "${outcome:-}" ]] || case_fail config_drift_unsafe
+  record_cached_after || case_fail config_drift_cached_request_after_failed
+  record_new_direct_after_restore || case_fail config_drift_new_direct_request_failed
   grep -Fq "model_catalog_json = \"${drift_catalog}\"" "${CURRENT_TARGET}" || case_fail config_drift_catalog_not_preserved
   stop_case_processes || case_fail config_drift_cleanup_failed
   case_pass product_lifecycle "${outcome}"
@@ -705,6 +855,7 @@ run_restore_failure() {
   case_begin restore_failure
   prepare_case restore_failure || case_fail restore_failure_setup_failed
   launch_managed_case || case_fail restore_failure_launch_failed
+  record_cached_before || case_fail restore_failure_cached_request_before_failed
   retained_pid="${HELPER_PID}"
   chmod 500 "${CURRENT_CODEX_DIR}" || case_fail restore_failure_injection_failed
   if disable_route; then
@@ -721,15 +872,16 @@ run_restore_failure() {
   capture_restore_failure_diagnostics
   [[ "$(listener_pid 2>/dev/null || true)" == "${retained_pid}" ]] || case_fail restore_failure_listener_not_retained
   outcome="$(safe_outcome)" || case_fail restore_failure_unsafe
-  [[ "${outcome}" == "healthy_expected_listener" ]] || case_fail restore_failure_route_not_protected
+  [[ "${outcome}" == "managed_config_with_expected_listener" ]] || case_fail restore_failure_route_not_protected
   [[ "${RESTORE_RECOVERY_DECISION}" == "retain_listener" ]] || case_fail restore_failure_decision_not_observed
+  record_cached_after || case_fail restore_failure_cached_request_after_failed
   chmod 700 "${CURRENT_CODEX_DIR}" || case_fail restore_failure_permission_cleanup_failed
   stop_case_processes || case_fail restore_failure_cleanup_failed
   case_pass product_lifecycle "${outcome}"
 }
 
 write_evidence() {
-  local cases_json='[]' index temp_evidence personal_home_pattern
+  local cases_json='[]' index temp_evidence personal_home_pattern cached_before_count=0 cached_after_count=0 direct_after_count=0
   mkdir -p "${EVIDENCE_DIR}"
   for index in "${!CASE_NAMES[@]}"; do
     cases_json="$(jq -c \
@@ -737,7 +889,21 @@ write_evidence() {
       --arg status "${CASE_STATUSES[$index]}" \
       --arg scope "${CASE_SCOPES[$index]}" \
       --arg outcome "${CASE_OUTCOMES[$index]}" \
-      '. + [{name:$name,status:$status,scope:$scope,safe_outcome:$outcome}]' <<<"${cases_json}")"
+      --argjson cached_before "${CASE_CACHED_REQUEST_BEFORE[$index]}" \
+      --argjson cached_after "${CASE_CACHED_REQUEST_AFTER[$index]}" \
+      --argjson direct_after "${CASE_NEW_DIRECT_AFTER_RESTORE[$index]}" \
+      '. + [{
+        name:$name,
+        status:$status,
+        scope:$scope,
+        safe_outcome:$outcome,
+        cached_request_before:$cached_before,
+        cached_request_after:$cached_after,
+        new_direct_after_restore:$direct_after
+      }]' <<<"${cases_json}")"
+    [[ "${CASE_CACHED_REQUEST_BEFORE[$index]}" == true ]] && cached_before_count=$((cached_before_count + 1))
+    [[ "${CASE_CACHED_REQUEST_AFTER[$index]}" == true ]] && cached_after_count=$((cached_after_count + 1))
+    [[ "${CASE_NEW_DIRECT_AFTER_RESTORE[$index]}" == true ]] && direct_after_count=$((direct_after_count + 1))
   done
   temp_evidence="$(mktemp "${EVIDENCE_DIR}/.evidence.XXXXXX")"
   jq -n \
@@ -749,6 +915,9 @@ write_evidence() {
     --arg failure_phase "${FAILURE_PHASE}" \
     --argjson random_port "${RUNTIME_PORT:-0}" \
     --argjson cases "${cases_json}" \
+    --argjson cached_before_count "${cached_before_count}" \
+    --argjson cached_after_count "${cached_after_count}" \
+    --argjson direct_after_count "${direct_after_count}" \
     --argjson restore_injection_effective "${RESTORE_INJECTION_EFFECTIVE}" \
     --argjson restore_diagnostics_captured "${RESTORE_DIAGNOSTICS_CAPTURED}" \
     --argjson restore_config_points "${RESTORE_CONFIG_POINTS_TO_RUN_BASE}" \
@@ -767,6 +936,7 @@ write_evidence() {
     --argjson app_processes_stopped "${CLEANUP_APP_PROCESSES}" \
     --argjson helper_processes_stopped "${CLEANUP_HELPER_PROCESSES}" \
     --argjson runtime_port_released "${CLEANUP_RUNTIME_PORT}" \
+    --argjson upstream_port_released "${CLEANUP_UPSTREAM_PORT}" \
     --argjson temp_removed "${CLEANUP_TEMP}" \
     '{
       schema_version: 2,
@@ -779,6 +949,12 @@ write_evidence() {
       failure: $failure,
       failure_phase: $failure_phase,
       cases: $cases,
+      client_continuity: {
+        fixture_only: true,
+        cached_request_before_count: $cached_before_count,
+        cached_request_after_count: $cached_after_count,
+        new_direct_after_restore_count: $direct_after_count
+      },
       restore_failure_diagnostics: {
         injection_effective: $restore_injection_effective,
         captured_before_cleanup: $restore_diagnostics_captured,
@@ -806,6 +982,7 @@ write_evidence() {
         app_processes_stopped: $app_processes_stopped,
         helper_processes_stopped: $helper_processes_stopped,
         random_port_released: $runtime_port_released,
+        upstream_port_released: $upstream_port_released,
         temp_removed: $temp_removed
       }
     }' >"${temp_evidence}"
@@ -844,8 +1021,18 @@ cleanup() {
   for pid in "${OWNED_BLOCKER_PIDS[@]-}"; do
     pid_is_alive "${pid}" && processes_clean=false
   done
+  for pid in "${OWNED_UPSTREAM_PIDS[@]-}"; do
+    if pid_is_alive "${pid}"; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait_for_pid_exit "${pid}" 30 || {
+        kill -KILL "${pid}" 2>/dev/null || true
+        wait_for_pid_exit "${pid}" 20 || processes_clean=false
+      }
+    fi
+  done
   [[ "${processes_clean}" == true ]] || cleanup_ok=false
   runtime_port_is_free && CLEANUP_RUNTIME_PORT=true
+  [[ -z "${UPSTREAM_PORT}" || -z "$(listener_pids "${UPSTREAM_PORT}")" ]] && CLEANUP_UPSTREAM_PORT=true
   if [[ -n "${WORK_ROOT}" ]]; then
     case "${WORK_ROOT}" in
       /tmp/relaykit-runtime-safety.*|/private/tmp/relaykit-runtime-safety.*) rm -rf "${WORK_ROOT}" ;;
@@ -861,7 +1048,7 @@ cleanup() {
     FAILURE_PHASE=global_guard_verification
   fi
   if [[ "${CLEANUP_APP_PROCESSES}" != true || "${CLEANUP_HELPER_PROCESSES}" != true ||
-        "${CLEANUP_RUNTIME_PORT}" != true || "${CLEANUP_TEMP}" != true ]]; then
+        "${CLEANUP_RUNTIME_PORT}" != true || "${CLEANUP_UPSTREAM_PORT}" != true || "${CLEANUP_TEMP}" != true ]]; then
     cleanup_ok=false
     FAILURE_CODE=cleanup_failed
     FAILURE_PHASE=cleanup
@@ -921,6 +1108,10 @@ capture_global_before || {
 }
 WORK_ROOT="$(mktemp -d "/tmp/relaykit-runtime-safety.XXXXXX")"
 chmod 700 "${WORK_ROOT}"
+start_official_fixture || {
+  FAILURE_CODE=official_fixture_start_failed
+  exit 1
+}
 build_current_products || {
   FAILURE_CODE=current_source_build_failed
   exit 1

@@ -621,6 +621,40 @@ func TestRecoveryDecision(t *testing.T) {
 		}
 	})
 
+	t.Run("enabled continuity restores original values and retains listener", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "config.toml")
+		state := filepath.Join(dir, "state.json")
+		original := []byte("model = \"keep\"\nopenai_base_url = \"http://127.0.0.1:11434/v1\"\n")
+		if err := os.WriteFile(target, original, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Enable(EnableOptions{TargetPath: target, CatalogPath: filepath.Join(dir, "catalog.json"), StatePath: state}); err != nil {
+			t.Fatal(err)
+		}
+
+		decision, err := RecoveryDecisionForParentLossWithContinuity(target, state, true)
+		if err != nil || decision != RecoveryRetainListener {
+			t.Fatalf("decision=%q err=%v", decision, err)
+		}
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != string(original) {
+			t.Fatalf("original values not restored: %q, %v", got, err)
+		}
+	})
+
+	t.Run("disabled continuity retains listener for cached clients", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "config.toml")
+		if err := os.WriteFile(target, []byte("model = \"keep\"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		decision, err := RecoveryDecisionForParentLossWithContinuity(target, filepath.Join(dir, "state.json"), true)
+		if err != nil || decision != RecoveryRetainListener {
+			t.Fatalf("decision=%q err=%v", decision, err)
+		}
+	})
+
 	t.Run("partial drift restore failure retains listener", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "config.toml")

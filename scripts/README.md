@@ -135,9 +135,13 @@ Wave 1 focused contracts passed. Wave 2 harness, fixture, manifest, and negative
 ```bash
 ./scripts/runtime-safety-fault-injection-test.sh
 ./scripts/runtime-safety-fault-injection.sh
+./scripts/runtime-safety-launchd-proof-test.sh
+./scripts/runtime-safety-launchd-proof.sh
 ```
 
 The first command is an offline contract test. The targeted harness builds the current source in a temporary isolated layout, exercises managed App/helper failure cases on one random loopback port, and writes only redacted evidence to `dist/runtime-safety/evidence.json`. It treats `18787`, installed `19777`, global Codex files, and user LaunchAgents as read-only guards.
+
+The launchd proof has a separate offline contract and an explicitly authorized live gate. The live gate bootstraps one uniquely labeled temporary job from `/tmp`, uses two random non-protected ports, exercises graceful release, App loss, helper crash, and simultaneous App/helper loss, then boots out that exact job. Its evidence records config recovery, cached-client continuity, new-client direct routing, helper restart/retention, mode, global guards, and cleanup. It never writes `~/Library/LaunchAgents` and must not run against installed `19777` or `18787`.
 
 Focused non-live contracts are:
 

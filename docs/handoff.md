@@ -4,13 +4,30 @@
 
 RelayKit is a local macOS menu-bar app plus bundled gateway for bridging Codex-compatible clients to official and user-configured provider routes. The repository should stay public-safe: examples, tests, and smoke fixtures use demo providers, loopback servers, or `https://example.test`; real provider details belong only in a user's local App Support config.
 
-## Current Truth (2026-07-29, Build 17 pre-freeze release tooling)
+## Current Truth (2026-08-05, P0 two-epoch gateway lifecycle)
+
+Build 17 was successfully produced from clean commit `cc0fa01329ec472fe85c3128df8f4fcd9bd5763d` as marketing version `0.1.6`, build `17`. Its immutable signed zip is `dist/github-release/v0.1.6/RelayKitApp-0.1.6-signed.zip`, SHA-256 `41e4d4fca6c6481af4cee39be820b7557f7a06ea45024e7f378686674ebd35fb`; manifest schema 2, Developer ID signing, hardened runtime, notarization staple, Gatekeeper, checksum, and six same-SHA hosted checks passed. It is not installed: `/Applications/RelayKitApp.app` remains version `0.1.5`, build `16`. Build 17 is immutable and must not be overwritten or relabeled.
+
+Build 17 exposed a P0 lifecycle gap before installation. Restoring `config.toml` on App exit protects future Codex launches, but an already-running Codex process keeps its cached RelayKit base URL and loses its next request if the only `19777` listener exits. The current source candidate therefore separates the App control plane from a launchd socket-owned data plane:
+
+- App Quit/Disable restores only RelayKit-managed config fields for future Codex launches.
+- The launchd-owned listener remains available for already-running Codex clients and enters `official_fallback`.
+- Official requests continue; provider routes return typed `restart_codex_required` after owner release.
+- Provider credentials handed over by the App are removed on release. While the App is present but the disk route is disabled, credentials may be used only by the App's provider-test endpoint, not by Codex provider routes.
+- A packaged App registers the bundled helper through `SMAppService.agent`; the reviewed plist is embedded in `Contents/Library/LaunchAgents` and uses public `launch_activate_socket(3)`. Tests do not write `~/Library/LaunchAgents`.
+- Helper crash is recovered by the App/launchd owner. App loss and App+helper loss restore the managed fields and preserve/recreate the fallback listener.
+
+Fresh source validation currently passes focused lifecycle tests, full Go test/race/vet/gofmt, Swift build and App validation, the eight-case random-port fault matrix, bundle verification, extracted local-package verification, signed-release contracts, CI workflow contracts, public-boundary scans, and diff checks. `dist/runtime-safety/evidence.json` is current setup evidence for the uncommitted candidate: all eight cases pass cached-client and cleanup guards, but it is not the final clean-commit authority. It must be regenerated after the product commit.
+
+One explicit shared-runtime gate remains pending: `scripts/runtime-safety-launchd-proof.sh` must be authorized and run once. It temporarily bootstraps a unique `dev.relaykit.runtime-safety.<UUID>` job from `/tmp` on random ports, then boots it out and verifies global Codex files, user LaunchAgents, installed `19777`, and `18787` are unchanged. The offline launchd contract passes, but no live launchd PASS is claimed yet. Independent Test/CR, the clean product commit, hosted CI for that commit, Build 18, installation, and same-running-Codex lifecycle E2E remain pending. Build 17 must not be installed or published as the final candidate.
+
+## Historical Truth (2026-07-29, Build 17 pre-freeze release tooling)
 
 Build 17 remains a planned marketing `0.1.6`, build `17` distribution; no package, signing, notarization, installation, remote mutation, draft upload, GUI proof, or live model run occurred in this lane. The source tooling now names the six required checks exactly, requires same-SHA hosted CI evidence before signed finalization, records App and bundled-helper executable hashes in manifest schema 2, and finalizes only a non-writable zip/checksum/manifest directory. Production packaging freezes commit/archive identity, builds its own App, signs/notarizes a private frozen copy, and rechecks source identity; installation and draft creation consume private snapshots of the finalized bytes.
 
 The draft path freshly re-queries the manifest SHA, rejects existing release/tag state, creates and verifies a lightweight tag at the exact `source_commit_sha`, and uploads the private snapshot. If a remote operation succeeds but the command reports failure, the script reconciles only its marked draft and exact expected tag; unowned or undeletable state remains an explicit failure. The general Desktop proof path accepts `RELAYKIT_DESKTOP_PROOF_ZIP_PATH=/absolute/path/signed.zip`; when supplied it skips the local rebuild, extracts that exact archive, and records its path and SHA-256 in current evidence. This is tooling readiness only. GitHub-green evidence, Build 17 package/sign/notary/install/proof, and any draft creation remain pending.
 
-## Current Truth (2026-07-28, P0 runtime safety and GitHub-ready CI)
+## Historical Truth (2026-07-28, P0 runtime safety and GitHub-ready CI)
 
 The runtime-safety candidate at `5992d6d` passed all eight fault cases. The fresh evidence is `dist/runtime-safety/evidence.json`; it binds source commit `5992d6d`, the tracked harness SHA-256, and the tracked harness-test SHA-256. Later CI/documentation-only commits do not replace that runtime candidate. This is a source-candidate result, not a new installed or distributed build. Installed Build 16 remains the historical/current shared runtime and was not stopped, replaced, rebuilt, signed, or otherwise touched by this lane. Build 17 signed beta remains the next distribution goal.
 

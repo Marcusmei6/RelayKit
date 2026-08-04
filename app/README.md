@@ -74,7 +74,9 @@ This writes `dist/RelayKitApp-local.zip`, extracts it under `dist/verify-release
 
 ## Durable Local Helper
 
-The app Start/Stop buttons control the foreground helper process launched by the app. For a local user LaunchAgent flow, use the repo script from the repository root:
+Packaged builds embed `Contents/Library/LaunchAgents/dev.relaykit.gateway.plist` and register it through `SMAppService.agent`. launchd owns the `19777` listening socket; the App adopts the helper through an authenticated loopback control channel and hands provider credentials over only in memory. Quitting or disabling the App restores the managed Codex fields for future launches, while the helper remains in Official-only fallback for an already-running Codex process that cached the RelayKit URL. Provider routes then return `restart_codex_required`.
+
+Direct SwiftPM development builds do not register the packaged service and retain the parent-bound helper path. The older repository helper script remains a local-alpha development tool only:
 
 ```bash
 cd gateway

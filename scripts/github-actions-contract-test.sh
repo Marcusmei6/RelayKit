@@ -42,6 +42,8 @@ required = {
         "cache-dependency-path: gateway/go.sum",
         "./scripts/runtime-safety-fault-injection-test.sh",
         "./scripts/runtime-safety-fault-injection.sh",
+        "./scripts/runtime-safety-launchd-proof-test.sh",
+        "./scripts/runtime-safety-launchd-proof.sh",
     ),
     "protocol-contract.yml": (
         "go test ./internal/server -count=1",

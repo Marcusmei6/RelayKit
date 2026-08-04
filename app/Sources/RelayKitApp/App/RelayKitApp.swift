@@ -135,7 +135,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             self.outsideClickMonitor = nil
         }
         popover.close()
-        model.stopGateway()
+        model.finishGatewayLifecycleForAppTermination()
         model.stopOfficialAuthProcessForShutdown()
     }
 

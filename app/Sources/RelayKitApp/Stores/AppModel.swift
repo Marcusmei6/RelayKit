@@ -1,7 +1,9 @@
 import AppKit
 import CryptoKit
+import Darwin
 import Foundation
 import RelayKitCore
+import Security
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -98,6 +100,9 @@ final class AppModel: ObservableObject {
     private var usesSmokeModelHealthFixture = false
     private var recoveryRestartInFlight = false
     private var lastOfficialCatalog: Data?
+    private var managedRouteEpochObserved = false
+    private var gatewayMustSurviveTermination = false
+    private var gatewayServiceMonitor: Task<Void, Never>?
 
     init(endpoint: RelayKitRuntimeEndpoint) {
         runtimeEndpoint = endpoint
@@ -147,13 +152,7 @@ final class AppModel: ObservableObject {
 
     func startGatewayOnOrdinaryLaunch() async {
         let managedRouteStatus = managedCodexRouteStatus()
-        if managedRouteStatus == "enabled" {
-            if await gatewayIsHealthy() {
-                applyRuntimeSafety(event: .startupManagedRouteHealthy)
-                message = "RelayKit managed route is protected."
-                return
-            }
-        } else if codexIntegrationHasManagedState, managedRouteStatus != "disabled" {
+        if managedRouteStatus != "enabled", codexIntegrationHasManagedState, managedRouteStatus != "disabled" {
             runtimeSafetyState = .atRisk
             gatewayStatus = "stopped"
             message = "RelayKit could not verify managed Codex settings. Resolve the integration before changing the route."
@@ -166,7 +165,9 @@ final class AppModel: ObservableObject {
         }
         let officialCatalog: Data?
         do {
-            if officialSnapshot.isConnected {
+            if let fixture = try runtimeSafetyOfficialFixture() {
+                officialCatalog = try Data(contentsOf: fixture.catalogURL)
+            } else if officialSnapshot.isConnected {
                 let codexBinary = try CodexCatalogBuilder.resolveBinary()
                 officialCatalog = try await Task.detached(priority: .userInitiated) {
                     try CodexCatalogBuilder.catalog(accountProjection: true, binary: codexBinary).data
@@ -191,24 +192,34 @@ final class AppModel: ObservableObject {
 
     func startGateway(officialCatalog: Data? = nil) {
         do {
+            let managedRouteEnabled = managedCodexRouteStatus() == "enabled"
             let resolvedOfficialCatalog = officialCatalog ?? (officialSnapshot.isConnected ? lastOfficialCatalog : nil)
             lastOfficialCatalog = resolvedOfficialCatalog
             let runtimeConfig = try makeGatewayRuntimeConfig(officialCatalog: resolvedOfficialCatalog)
             let credentialHandoff = try GatewayCredentialHandoff.encode(configData: runtimeConfig.data) { reference in
                 try KeychainCredentialStore.load(service: reference)
             }
+            let controlTokenPath = try ensureGatewayControlToken()
+            let launchdManaged = try GatewayBackgroundService().ensureRegisteredIfPackaged()
             try gateway.start(
                 binaryPath: gatewayBinaryPath,
                 configPath: runtimeConfig.path,
                 usageLogPath: usageLogPath,
                 credentialHandoff: credentialHandoff,
+                controlTokenPath: controlTokenPath,
+                launchdManaged: launchdManaged,
+                managedRouteEnabled: managedRouteEnabled,
                 parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
                 managedCodexTarget: RelayKitPaths.defaultCodexConfigPath(),
                 managedCodexState: RelayKitPaths.codexConfigStatePath()
             )
-            gatewayStatus = "running"
+            gatewayStatus = managedRouteEnabled ? "running" : "official fallback"
             gatewayStartedAt = Date()
+            if launchdManaged || managedRouteEnabled {
+                managedRouteEpochObserved = true
+            }
             message = "Gateway started on \(runtimeEndpoint.listenAddress)"
+            beginGatewayServiceMonitorIfNeeded()
             refreshOfficialGatewayProjection()
         } catch {
             gatewayStatus = "error"
@@ -218,6 +229,23 @@ final class AppModel: ObservableObject {
     }
 
     func stopGateway() {
+        gatewayServiceMonitor?.cancel()
+        gatewayServiceMonitor = nil
+        if managedRouteEpochObserved, gateway.isRunning {
+            do {
+                try gateway.leaveRunningForFallback()
+            } catch {
+                beginGatewayServiceMonitorIfNeeded()
+                gatewayStatus = "error"
+                message = "Gateway could not enter fallback mode. RelayKit kept the current data plane running."
+                return
+            }
+            gatewayStartedAt = nil
+            gatewayStatus = "official fallback"
+            message = "RelayKit is disabled for future Codex launches. Restart existing Codex sessions before retiring the fallback gateway."
+            refreshOfficialGatewayProjection()
+            return
+        }
         gateway.stop()
         gatewayStartedAt = nil
         gatewayStatus = "stopped"
@@ -225,9 +253,48 @@ final class AppModel: ObservableObject {
         refreshOfficialGatewayProjection()
     }
 
-    func restartGateway() {
+    func finishGatewayLifecycleForAppTermination() {
+        gatewayServiceMonitor?.cancel()
+        gatewayServiceMonitor = nil
+        if gatewayMustSurviveTermination, gateway.isRunning {
+            try? gateway.leaveRunningForFallback()
+            gatewayStartedAt = nil
+            gatewayStatus = "official fallback"
+            return
+        }
         stopGateway()
+    }
+
+    func restartGateway() {
+        gatewayServiceMonitor?.cancel()
+        gatewayServiceMonitor = nil
+        let routeWasEnabled = managedCodexRouteStatus() == "enabled"
+        do {
+            try gateway.restartDataPlane()
+        } catch {
+            gatewayStatus = "error"
+            message = gatewayFailureMessage(error)
+            beginGatewayServiceMonitorIfNeeded()
+            return
+        }
+        gatewayStartedAt = nil
         startGateway()
+        guard routeWasEnabled, !gateway.isRunning else { return }
+        do {
+            _ = try gateway.disableCodexConfig(
+                binaryPath: gatewayBinaryPath,
+                target: RelayKitPaths.defaultCodexConfigPath(),
+                state: RelayKitPaths.codexConfigStatePath()
+            )
+            managedRouteEpochObserved = true
+            gatewayMustSurviveTermination = false
+            applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: false))
+            refreshCodexConnectionStatus()
+            message = "Gateway restart failed. RelayKit restored the config for future Codex launches; restart existing Codex sessions before retrying."
+        } catch {
+            runtimeSafetyState = .atRisk
+            message = "Gateway restart failed and RelayKit could not restore managed Codex settings. Keep RelayKit open and retry recovery."
+        }
     }
 
     func refreshHealth() async {
@@ -418,6 +485,13 @@ final class AppModel: ObservableObject {
     }
 
     private func loadOfficialAuthStateFromDisk() {
+        if (try? runtimeSafetyOfficialFixture()) != nil {
+            updateOfficialSnapshot(loggedIn: true, detail: "Runtime safety Official fixture is available.")
+            officialAuthURL = ""
+            officialDeviceCode = ""
+            officialDeviceCodeCopied = false
+            return
+        }
         let authURL = URL(fileURLWithPath: RelayKitPaths.officialCodexHomePath())
             .appendingPathComponent("auth.json")
         let loggedIn = OfficialCodexAuthState.isConnected(at: authURL)
@@ -692,6 +766,11 @@ final class AppModel: ObservableObject {
                 catalog: RelayKitPaths.codexCatalogPath(),
                 state: RelayKitPaths.codexConfigStatePath()
             )
+            managedRouteEpochObserved = true
+            startGateway(officialCatalog: lastOfficialCatalog)
+            guard gateway.isRunning else {
+                throw GatewayClientError.gatewayUnavailable
+            }
             let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
             message = detail.isEmpty ? "RelayKit enabled for Codex. Restart Codex to load the updated route." : "\(detail) Restart Codex to load the updated route."
             refreshCodexConnectionStatus()
@@ -716,6 +795,11 @@ final class AppModel: ObservableObject {
             let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
             message = detail.isEmpty ? "RelayKit disabled for Codex. Restart Codex to restore its previous configuration." : "\(detail) Restart Codex to restore its previous configuration."
             recoveryRestartInFlight = false
+            managedRouteEpochObserved = true
+            gatewayMustSurviveTermination = gateway.isRunning
+            gatewayServiceMonitor?.cancel()
+            gatewayServiceMonitor = nil
+            try gateway.leaveRunningForFallback()
             applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: false))
             refreshCodexConnectionStatus()
         } catch {
@@ -739,6 +823,8 @@ final class AppModel: ObservableObject {
                     state: RelayKitPaths.codexConfigStatePath()
                 )
                 recoveryRestartInFlight = false
+                managedRouteEpochObserved = true
+                gatewayMustSurviveTermination = gateway.isRunning
                 applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: false))
                 refreshCodexConnectionStatus()
                 return true
@@ -746,6 +832,7 @@ final class AppModel: ObservableObject {
                 message = "Quit canceled: RelayKit could not safely restore managed Codex settings. Resolve the Codex integration status before quitting."
                 return false
             case "disabled":
+                gatewayMustSurviveTermination = managedRouteEpochObserved && gateway.isRunning
                 applyRuntimeSafety(event: .intentionalShutdown)
                 return true
             default:
@@ -1078,6 +1165,70 @@ final class AppModel: ObservableObject {
         )
     }
 
+    private func ensureGatewayControlToken() throws -> String {
+        let tokenURL = URL(fileURLWithPath: RelayKitPaths.gatewayControlTokenPath())
+        try FileManager.default.createDirectory(
+            at: tokenURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        if let token = try readValidatedGatewayControlToken(at: tokenURL.path) {
+            _ = token
+            return tokenURL.path
+        }
+
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw GatewayProcessError.commandFailed("gateway control token could not be created")
+        }
+        let token = bytes.map { String(format: "%02x", $0) }.joined()
+        let descriptor = Darwin.open(tokenURL.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        if descriptor < 0 {
+            if errno == EEXIST, try readValidatedGatewayControlToken(at: tokenURL.path) != nil {
+                return tokenURL.path
+            }
+            throw GatewayProcessError.commandFailed("gateway control token could not be created")
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        do {
+            try handle.write(contentsOf: Data((token + "\n").utf8))
+            try handle.synchronize()
+            try handle.close()
+        } catch {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: tokenURL)
+            throw GatewayProcessError.commandFailed("gateway control token could not be created")
+        }
+        return tokenURL.path
+    }
+
+    private func readValidatedGatewayControlToken(at path: String) throws -> String? {
+        let descriptor = Darwin.open(path, O_RDONLY | O_NOFOLLOW)
+        if descriptor < 0 {
+            if errno == ENOENT {
+                return nil
+            }
+            throw GatewayProcessError.commandFailed("gateway control token is invalid")
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              (info.st_mode & 0o777) == 0o600,
+              info.st_uid == getuid(),
+              info.st_nlink == 1,
+              let token = String(data: try handle.readToEnd() ?? Data(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              token.count == 64,
+              token.unicodeScalars.allSatisfy({
+                  (48...57).contains($0.value) || (97...102).contains($0.value)
+              }) else {
+            throw GatewayProcessError.commandFailed("gateway control token is invalid")
+        }
+        return token
+    }
+
     private func storedGatewayConfigurationExists() -> Bool {
         guard let data = try? providerConfigData(),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -1085,6 +1236,55 @@ final class AppModel: ObservableObject {
         }
         let providers = root["providers"] as? [[String: Any]] ?? []
         return !providers.isEmpty || officialSnapshot.isConnected
+    }
+
+    private func beginGatewayServiceMonitorIfNeeded() {
+        gatewayServiceMonitor?.cancel()
+        guard gateway.usesManagedService else {
+            gatewayServiceMonitor = nil
+            return
+        }
+        gatewayServiceMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                guard !Task.isCancelled, let self else { return }
+                let mode = try? await self.client.healthMode()
+                if mode != self.gateway.expectedServiceMode {
+                    self.startGateway(officialCatalog: self.lastOfficialCatalog)
+                }
+            }
+        }
+    }
+
+    private func runtimeSafetyOfficialFixture() throws -> (baseURL: URL, keyURL: URL, catalogURL: URL)? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RELAYKIT_RUNTIME_SAFETY_TEST"] == "1" else {
+            return nil
+        }
+        guard let rawBaseURL = environment["RELAYKIT_RUNTIME_SAFETY_OFFICIAL_BASE_URL"],
+              let baseURL = URL(string: rawBaseURL),
+              baseURL.scheme == "http",
+              baseURL.host == "127.0.0.1",
+              baseURL.user == nil,
+              baseURL.password == nil,
+              baseURL.query == nil,
+              baseURL.fragment == nil,
+              let port = baseURL.port,
+              !RelayKitRuntimeEndpoint.isProtectedPort(port),
+              let rawKeyPath = environment["RELAYKIT_RUNTIME_SAFETY_OFFICIAL_KEY_FILE"],
+              let rawCatalogPath = environment["RELAYKIT_RUNTIME_SAFETY_OFFICIAL_CATALOG"] else {
+            throw GatewayProcessError.commandFailed("runtime safety Official fixture is invalid")
+        }
+        let support = RelayKitPaths.applicationSupportDirectory().standardizedFileURL
+        let keyURL = URL(fileURLWithPath: rawKeyPath).standardizedFileURL
+        let catalogURL = URL(fileURLWithPath: rawCatalogPath).standardizedFileURL
+        guard keyURL.path.hasPrefix(support.path + "/"),
+              catalogURL.path.hasPrefix(support.path + "/"),
+              FileManager.default.isReadableFile(atPath: keyURL.path),
+              FileManager.default.isReadableFile(atPath: catalogURL.path) else {
+            throw GatewayProcessError.commandFailed("runtime safety Official fixture is outside isolated RelayKit state")
+        }
+        return (baseURL, keyURL, catalogURL)
     }
 
     private func makeGatewayRuntimeConfig(officialCatalog: Data? = nil) throws -> (path: String, data: Data) {
@@ -1113,11 +1313,19 @@ final class AppModel: ObservableObject {
             guard !officialModels.isEmpty else {
                 throw CodexModelCatalogError.missingOfficialTemplate
             }
-            root["official_passthrough"] = [
-                "base_url": "https://chatgpt.com/backend-api/codex",
-                "credential_ref": ["kind": "codex_home", "value": RelayKitPaths.officialCodexHomePath()],
-                "models": officialModels,
-            ]
+            if let fixture = try runtimeSafetyOfficialFixture() {
+                root["official_passthrough"] = [
+                    "base_url": fixture.baseURL.absoluteString,
+                    "credential_ref": ["kind": "key_file", "value": fixture.keyURL.path],
+                    "models": officialModels,
+                ]
+            } else {
+                root["official_passthrough"] = [
+                    "base_url": "https://chatgpt.com/backend-api/codex",
+                    "credential_ref": ["kind": "codex_home", "value": RelayKitPaths.officialCodexHomePath()],
+                    "models": officialModels,
+                ]
+            }
         }
 
         guard !providers.isEmpty || root["official_passthrough"] != nil else {

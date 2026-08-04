@@ -14,6 +14,26 @@ usage() {
   echo "usage: $0 [package|--verify]" >&2
 }
 
+select_isolated_verify_port() {
+  /usr/bin/python3 - "${ROOT_DIR}/app/Sources/RelayKitCore/RelayKitRuntimeEndpoint.swift" <<'PY'
+import re
+import socket
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+protected = {int(value) for value in re.findall(r"(?:productPort\s*=\s*|port\s*==\s*)(\d+)", source)}
+for _ in range(20):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    if port not in protected:
+        print(port)
+        break
+else:
+    raise SystemExit(1)
+PY
+}
+
 package_app() {
   "${ROOT_DIR}/script/build_app_bundle.sh" --verify >&2
   rm -f "${ZIP_PATH}"
@@ -51,7 +71,13 @@ verify_package() {
     echo "Local beta package must not have a Developer ID team identifier" >&2
     exit 1
   fi
-  "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" --verify-bundled-gateway
+  local verify_port
+  verify_port="$(select_isolated_verify_port)" || {
+    echo "Could not allocate an isolated extracted-bundle verification port" >&2
+    exit 1
+  }
+  env RELAYKIT_RUNTIME_SAFETY_TEST=1 RELAYKIT_RUNTIME_SAFETY_PORT="${verify_port}" \
+    "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" --verify-bundled-gateway
   echo "RelayKit local beta package verified: ${artifact}"
 }
 

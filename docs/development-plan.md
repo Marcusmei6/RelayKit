@@ -394,6 +394,20 @@ Status: source tooling implemented with focused local contracts; Build 17 distri
 - No remote query, push, branch-protection change, package, signing, notarization, install, GUI/live proof, draft creation, or publication is completed by this source lane.
 - Focused contracts cover canonical test roots, production prepared-App rejection, post-build source drift, private build-byte freezing, exact immutable layout, post-validation mutation, exact draft assets/arguments, source-SHA tag binding, ambiguous tag/draft creation, and visible cleanup failure.
 
+## Phase 7.17: P0 Two-Epoch Data Plane Lifecycle
+
+Status: source candidate and random-port fault matrix pass; live launchd proof, clean commit, independent Test/CR, hosted CI, Build 18, and installed same-Codex E2E remain pending.
+
+- Build 17 (`0.1.6` build `17`, source `cc0fa013...`, zip SHA-256 `41e4d4fc...`) is signed, notarized, stapled, Gatekeeper-accepted, and immutable, but it remains uninstalled and is ineligible as the final candidate because it predates this lifecycle fix.
+- Restoring the managed Codex fields creates a new disk-config epoch for future clients. It does not reconfigure an already-running Codex process that cached `19777`.
+- The packaged data plane is owned by a RelayKit `SMAppService.agent` and a launchd socket. App lifecycle and data-plane lifecycle are separate.
+- App Quit/Disable restores managed fields, then releases ownership. The helper retains Official service in `official_fallback`; provider routes fail with typed `restart_codex_required`, and App-provided provider credentials are cleared.
+- A disabled-but-running App may adopt fallback with credentials only so the App's explicit provider-test endpoint remains usable. Codex provider routes remain blocked.
+- Helper crash is restartable without leaving an enabled route pointed at a missing listener. App loss and simultaneous App/helper loss use field-level recovery plus socket activation.
+- Short idle and WebSocket disconnect are not retirement signals. The fallback service is observable and controlled by launchd; logout removes the GUI-domain process, and the next login reconciles any stale managed route before future clients rely on it.
+- Local verification uses random ports and an isolated fixture. The live launchd proof uses a unique temporary label and never writes user LaunchAgents or touches global Codex auth/config, installed `19777`, or `18787`.
+- Upgrade activation is separate from byte installation. A session currently using the old `19777` data plane must not quit that old App from within itself. Install new bytes from an independent control channel, keep the old data plane alive for the cached epoch, and activate the new App only after that epoch is retired or handed off.
+
 ## Release Gate
 
 First public release requires:

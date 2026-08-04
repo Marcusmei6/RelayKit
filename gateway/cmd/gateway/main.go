@@ -4,6 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,16 +17,19 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"relaykit/gateway/internal/codexconfig"
+	"relaykit/gateway/internal/launchsocket"
 	"relaykit/gateway/internal/server"
 )
 
@@ -45,12 +53,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "summarize-usage" {
 		return summarizeUsage(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "gateway-control" {
+		return gatewayControl(args[1:], stdinForControl(), stdout, stderr)
+	}
 	signal.Ignore(syscall.SIGPIPE)
 	if err := runServer(args, os.Stdin, stderr); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
 	return 0
+}
+
+var stdinForControl = func() io.Reader {
+	return os.Stdin
 }
 
 func codexConfigStatus(args []string, stdout, stderr io.Writer) int {
@@ -262,7 +277,10 @@ func activateCodexConfig(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-const maximumCredentialHandoffBytes = 1 << 20
+const (
+	maximumCredentialHandoffBytes      = 1 << 20
+	maximumGatewayControlEnvelopeBytes = 2 << 20
+)
 
 func parseParentPID(value string) (int, error) {
 	pid, err := strconv.Atoi(value)
@@ -272,14 +290,14 @@ func parseParentPID(value string) (int, error) {
 	return pid, nil
 }
 
-func validateManagedCodexRecoveryPaths(parentPID int, targetPath, statePath string) error {
+func validateManagedCodexRecoveryPaths(parentPID int, targetPath, statePath string, allowUnowned bool) error {
 	if (targetPath == "") != (statePath == "") {
 		return fmt.Errorf("managed Codex target and state must be supplied together")
 	}
 	if targetPath == "" {
 		return nil
 	}
-	if parentPID <= 0 {
+	if parentPID <= 0 && !allowUnowned {
 		return fmt.Errorf("managed Codex recovery requires a positive parent PID")
 	}
 	if codexconfig.IsAuthJSONPath(targetPath) || codexconfig.IsAuthJSONPath(statePath) {
@@ -303,6 +321,24 @@ func parentProcessAlive(pid int) bool {
 type credentialHandoff struct {
 	Version     int               `json:"version"`
 	Credentials map[string]string `json:"credentials"`
+}
+
+type gatewayControlRequest struct {
+	Version      int               `json:"version"`
+	Action       string            `json:"action"`
+	ParentPID    int               `json:"parent_pid,omitempty"`
+	RouteEnabled bool              `json:"route_enabled,omitempty"`
+	Credentials  map[string]string `json:"credentials"`
+}
+
+type gatewayControlResponse struct {
+	Status string `json:"status"`
+	Mode   string `json:"mode"`
+}
+
+type gatewayControlEnvelope struct {
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
 }
 
 func readCredentialHandoff(reader io.Reader) (map[string]string, error) {
@@ -335,6 +371,206 @@ func readCredentialHandoff(reader io.Reader) (map[string]string, error) {
 	return credentials, nil
 }
 
+func gatewayControl(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("gateway-control", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	endpoint := fs.String("endpoint", "http://127.0.0.1:19777", "RelayKit loopback endpoint")
+	tokenPath := fs.String("token-file", "", "owner-only RelayKit control token path")
+	action := fs.String("action", "status", "status, adopt, release, or shutdown")
+	parentPID := fs.Int("parent-pid", 0, "adopting App process ID")
+	routeEnabled := fs.Bool("route-enabled", true, "enable provider routes for an adopted managed Codex epoch")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *tokenPath == "" {
+		fmt.Fprintln(stderr, "control token file is required")
+		return 2
+	}
+	if *action != "status" && *action != "adopt" && *action != "release" && *action != "shutdown" {
+		fmt.Fprintln(stderr, "unsupported gateway control action")
+		return 2
+	}
+	if (*action == "adopt" || *action == "release" || *action == "shutdown") && *parentPID <= 0 {
+		fmt.Fprintln(stderr, "positive parent PID is required")
+		return 2
+	}
+	parsed, err := url.Parse(*endpoint)
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.User != nil ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		fmt.Fprintln(stderr, "gateway control endpoint must be loopback HTTP")
+		return 2
+	}
+	token, err := readControlToken(*tokenPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "gateway control token is unavailable")
+		return 1
+	}
+	request := gatewayControlRequest{Version: 1, Action: *action, ParentPID: *parentPID, RouteEnabled: *routeEnabled}
+	if *action == "adopt" {
+		handoff, readErr := readCredentialHandoff(stdin)
+		if readErr != nil {
+			fmt.Fprintln(stderr, "gateway credential handoff failed")
+			return 1
+		}
+		request.Credentials = handoff
+	}
+	plaintext, err := json.Marshal(request)
+	if err != nil {
+		fmt.Fprintln(stderr, "gateway control request failed")
+		return 1
+	}
+	body, err := sealGatewayControlPayload(token, plaintext)
+	if err != nil {
+		fmt.Fprintln(stderr, "gateway control request failed")
+		return 1
+	}
+	controlURL := strings.TrimRight(*endpoint, "/") + "/_relaykit/control"
+	httpRequest, err := http.NewRequest(http.MethodPost, controlURL, bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintln(stderr, "gateway control request failed")
+		return 1
+	}
+	httpRequest.Header.Set("Content-Type", "application/vnd.relaykit.control+json")
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Do(httpRequest)
+	if err != nil {
+		fmt.Fprintln(stderr, "gateway control endpoint is unavailable")
+		return 1
+	}
+	defer response.Body.Close()
+	encryptedResponse, err := io.ReadAll(io.LimitReader(response.Body, 8193))
+	if err != nil || len(encryptedResponse) > 8192 {
+		fmt.Fprintln(stderr, "gateway control response is invalid")
+		return 1
+	}
+	responseBody, err := openGatewayControlPayload(token, encryptedResponse)
+	if err != nil {
+		fmt.Fprintln(stderr, "gateway control response is invalid")
+		return 1
+	}
+	var result gatewayControlResponse
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		fmt.Fprintln(stderr, "gateway control response is invalid")
+		return 1
+	}
+	if response.StatusCode != http.StatusOK || result.Status != "ok" {
+		fmt.Fprintf(stderr, "gateway control action failed with status %d\n", response.StatusCode)
+		return 1
+	}
+	fmt.Fprintf(stdout, "gateway control %s: %s\n", *action, result.Mode)
+	return 0
+}
+
+func readControlToken(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) || codexconfig.IsAuthJSONPath(path) {
+		return "", fmt.Errorf("invalid control token path")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		return "", fmt.Errorf("unsafe control token file")
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) != os.Getuid() {
+		return "", fmt.Errorf("control token owner mismatch")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(body))
+	decoded, err := hex.DecodeString(token)
+	if err != nil || len(decoded) != 32 {
+		return "", fmt.Errorf("invalid control token")
+	}
+	return token, nil
+}
+
+func gatewayControlAEAD(token string) (cipher.AEAD, error) {
+	key, err := hex.DecodeString(token)
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("invalid control token")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func sealGatewayControlPayload(token string, plaintext []byte) ([]byte, error) {
+	aead, err := gatewayControlAEAD(token)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	ciphertext := aead.Seal(nil, nonce, plaintext, []byte("relaykit-gateway-control-v1"))
+	return json.Marshal(gatewayControlEnvelope{
+		Nonce:      base64.RawStdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.RawStdEncoding.EncodeToString(ciphertext),
+	})
+}
+
+func openGatewayControlPayload(token string, body []byte) ([]byte, error) {
+	var envelope gatewayControlEnvelope
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&envelope); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, fmt.Errorf("invalid control envelope")
+	}
+	aead, err := gatewayControlAEAD(token)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := base64.RawStdEncoding.DecodeString(envelope.Nonce)
+	if err != nil || len(nonce) != aead.NonceSize() {
+		return nil, fmt.Errorf("invalid control nonce")
+	}
+	ciphertext, err := base64.RawStdEncoding.DecodeString(envelope.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("invalid control ciphertext")
+	}
+	return aead.Open(nil, nonce, ciphertext, []byte("relaykit-gateway-control-v1"))
+}
+
+func validCredentialMap(credentials map[string]string) bool {
+	if credentials == nil {
+		return false
+	}
+	for reference, value := range credentials {
+		if reference == "" || value == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func writeControlResponse(w http.ResponseWriter, status int, result string, handler *server.Server, token string) {
+	mode := "managed"
+	if handler.IsOfficialFallback() {
+		mode = "official_fallback"
+	}
+	plaintext, err := json.Marshal(gatewayControlResponse{Status: result, Mode: mode})
+	if err != nil {
+		http.Error(w, "control response unavailable", http.StatusInternalServerError)
+		return
+	}
+	body, err := sealGatewayControlPayload(token, plaintext)
+	if err != nil {
+		http.Error(w, "control response unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.relaykit.control+json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
 func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -345,8 +581,35 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	parentPIDValue := fs.String("parent-pid", "", "optional positive parent process ID")
 	managedCodexTarget := fs.String("managed-codex-target", "", "optional managed Codex config TOML path for parent-loss recovery")
 	managedCodexState := fs.String("managed-codex-state", "", "optional RelayKit managed-state JSON path for parent-loss recovery")
+	controlTokenPath := fs.String("control-token-file", "", "optional owner-only control token path")
+	launchdSocketName := fs.String("launchd-socket-name", "", "optional launchd socket activation name")
+	appManaged := fs.Bool("app-managed", false, "use RelayKit App-owned paths and launchd socket activation")
+	initialOfficialFallback := fs.Bool("initial-official-fallback", false, "start without provider credentials until an App adopts the helper")
+	initialRouteEnabled := fs.Bool("route-enabled", true, "allow provider routes for an App-owned direct helper")
+	restoreUnownedAfter := fs.Duration("restore-unowned-after", 0, "restore an unowned managed route after this adoption grace period")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *appManaged {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return fmt.Errorf("RelayKit Application Support directory is unavailable")
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("RelayKit home directory is unavailable")
+		}
+		support := filepath.Join(configDir, "RelayKit")
+		*configPath = filepath.Join(support, "gateway-runtime.json")
+		*usageLogPath = filepath.Join(support, "usage.jsonl")
+		*managedCodexTarget = filepath.Join(home, ".codex", "config.toml")
+		*managedCodexState = filepath.Join(support, "codex-config-state.json")
+		*controlTokenPath = filepath.Join(support, "gateway-control.token")
+		*launchdSocketName = "RelayKitGateway"
+		*initialOfficialFallback = true
+		if *restoreUnownedAfter == 0 {
+			*restoreUnownedAfter = 10 * time.Second
+		}
 	}
 	parentPID := 0
 	if *parentPIDValue != "" {
@@ -359,16 +622,26 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 			return fmt.Errorf("parent process is not running")
 		}
 	}
-	if err := validateManagedCodexRecoveryPaths(parentPID, *managedCodexTarget, *managedCodexState); err != nil {
+	if err := validateManagedCodexRecoveryPaths(parentPID, *managedCodexTarget, *managedCodexState, *appManaged); err != nil {
 		return err
 	}
-	var handler http.Handler
+	controlToken := ""
+	if *controlTokenPath != "" {
+		var err error
+		controlToken, err = readControlToken(*controlTokenPath)
+		if err != nil {
+			return fmt.Errorf("gateway control token failed validation")
+		}
+	}
+	var handler *server.Server
+	var runtimeCredentials map[string]string
 	var err error
 	if *credentialStdin {
 		credentials, readErr := readCredentialHandoff(stdin)
 		if readErr != nil {
 			return readErr
 		}
+		runtimeCredentials = credentials
 		handler, err = server.NewWithUsageLogAndCredentials(*configPath, *usageLogPath, credentials)
 	} else {
 		handler, err = server.NewWithUsageLog(*configPath, *usageLogPath)
@@ -376,15 +649,116 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("gateway config failed: %w", err)
 	}
+	if *initialOfficialFallback {
+		handler.EnterFallbackOfficialOnly()
+	} else if !*initialRouteEnabled {
+		handler.EnterFallbackWithCredentials(runtimeCredentials)
+	}
 
-	listener, err := net.Listen("tcp", *listen)
-	if err != nil {
-		return fmt.Errorf("gateway listen failed: %w", err)
+	var managedEpochObserved atomic.Bool
+	if *appManaged {
+		managedEpochObserved.Store(true)
+	}
+	if *managedCodexTarget != "" {
+		status, statusErr := codexconfig.IntegrationStatus(*managedCodexTarget, *managedCodexState)
+		if statusErr == nil && (status == codexconfig.StatusEnabled || status == codexconfig.StatusDrifted) {
+			managedEpochObserved.Store(true)
+		}
+	}
+
+	var listener net.Listener
+	if *launchdSocketName != "" {
+		listener, err = launchsocket.Activate(*launchdSocketName)
+		if err != nil {
+			return err
+		}
+	} else {
+		listener, err = net.Listen("tcp", *listen)
+		if err != nil {
+			return fmt.Errorf("gateway listen failed: %w", err)
+		}
 	}
 	rootCtx, cancelRoot := context.WithCancel(context.Background())
+	var ownerPID atomic.Int64
+	ownerPID.Store(int64(parentPID))
+	ownerLost := make(chan int, 1)
+	retireRequested := make(chan struct{}, 1)
+	rootHandler := http.Handler(handler)
+	if controlToken != "" {
+		controlMux := http.NewServeMux()
+		controlMux.Handle("/", handler)
+		controlMux.HandleFunc("POST /_relaykit/control", func(w http.ResponseWriter, r *http.Request) {
+			encryptedBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maximumGatewayControlEnvelopeBytes))
+			if err != nil {
+				http.Error(w, "invalid control request", http.StatusBadRequest)
+				return
+			}
+			plaintext, err := openGatewayControlPayload(controlToken, encryptedBody)
+			if err != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			var request gatewayControlRequest
+			decoder := json.NewDecoder(bytes.NewReader(plaintext))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || request.Version != 1 {
+				writeControlResponse(w, http.StatusBadRequest, "invalid_request", handler, controlToken)
+				return
+			}
+			switch request.Action {
+			case "status":
+				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
+			case "adopt":
+				if request.ParentPID <= 0 || !parentProcessAlive(request.ParentPID) || !validCredentialMap(request.Credentials) {
+					writeControlResponse(w, http.StatusBadRequest, "invalid_request", handler, controlToken)
+					return
+				}
+				if request.RouteEnabled {
+					handler.EnterManaged(request.Credentials)
+					managedEpochObserved.Store(true)
+				} else {
+					handler.EnterFallbackWithCredentials(request.Credentials)
+				}
+				ownerPID.Store(int64(request.ParentPID))
+				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
+			case "release":
+				if request.ParentPID <= 0 || int64(request.ParentPID) != ownerPID.Load() {
+					writeControlResponse(w, http.StatusConflict, "owner_mismatch", handler, controlToken)
+					return
+				}
+				if *managedCodexTarget != "" {
+					decision, recoveryErr := codexconfig.RecoveryDecisionForParentLossWithContinuity(
+						*managedCodexTarget,
+						*managedCodexState,
+						managedEpochObserved.Load(),
+					)
+					if decision != codexconfig.RecoveryRetainListener || recoveryErr != nil {
+						writeControlResponse(w, http.StatusConflict, "route_restore_failed", handler, controlToken)
+						return
+					}
+				}
+				handler.EnterFallbackOfficialOnly()
+				ownerPID.Store(0)
+				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
+			case "shutdown":
+				if request.ParentPID <= 0 || int64(request.ParentPID) != ownerPID.Load() {
+					writeControlResponse(w, http.StatusConflict, "owner_mismatch", handler, controlToken)
+					return
+				}
+				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
+				select {
+				case retireRequested <- struct{}{}:
+				default:
+				}
+			default:
+				writeControlResponse(w, http.StatusBadRequest, "invalid_request", handler, controlToken)
+			}
+		})
+		rootHandler = controlMux
+	}
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           handler,
+		Handler:           rootHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		BaseContext: func(net.Listener) context.Context {
 			return rootCtx
@@ -396,9 +770,8 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		log.Printf("relaykit gateway listening on http://%s", *listen)
 		errCh <- srv.Serve(listener)
 	}()
-	parentLost := make(chan struct{})
 	parentMonitorDone := make(chan struct{})
-	if parentPID > 0 {
+	if parentPID > 0 || controlToken != "" {
 		go func() {
 			defer close(parentMonitorDone)
 			ticker := time.NewTicker(250 * time.Millisecond)
@@ -408,15 +781,45 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 				case <-rootCtx.Done():
 					return
 				case <-ticker.C:
-					if !parentProcessAlive(parentPID) {
-						close(parentLost)
-						return
+					currentOwner := int(ownerPID.Load())
+					if currentOwner <= 0 {
+						continue
+					}
+					if !managedEpochObserved.Load() && *managedCodexTarget != "" {
+						status, statusErr := codexconfig.IntegrationStatus(*managedCodexTarget, *managedCodexState)
+						if statusErr == nil && (status == codexconfig.StatusEnabled || status == codexconfig.StatusDrifted) {
+							managedEpochObserved.Store(true)
+						}
+					}
+					if !parentProcessAlive(currentOwner) && ownerPID.CompareAndSwap(int64(currentOwner), 0) {
+						select {
+						case ownerLost <- currentOwner:
+						case <-rootCtx.Done():
+							return
+						}
 					}
 				}
 			}
 		}()
 	} else {
 		close(parentMonitorDone)
+	}
+	if *restoreUnownedAfter > 0 && managedEpochObserved.Load() {
+		go func() {
+			timer := time.NewTimer(*restoreUnownedAfter)
+			defer timer.Stop()
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-timer.C:
+				if ownerPID.Load() == 0 {
+					select {
+					case ownerLost <- 0:
+					case <-rootCtx.Done():
+					}
+				}
+			}
+		}()
 	}
 	defer func() {
 		cancelRoot()
@@ -432,12 +835,19 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		case sig := <-stop:
 			log.Printf("shutting down after %s", sig)
 			goto shutdown
-		case <-parentLost:
+		case <-retireRequested:
+			log.Printf("shutting down after owner request")
+			goto shutdown
+		case <-ownerLost:
 			if *managedCodexTarget != "" {
-				decision, recoveryErr := codexconfig.RecoveryDecisionForParentLoss(*managedCodexTarget, *managedCodexState)
+				decision, recoveryErr := codexconfig.RecoveryDecisionForParentLossWithContinuity(
+					*managedCodexTarget,
+					*managedCodexState,
+					managedEpochObserved.Load(),
+				)
 				if decision == codexconfig.RecoveryRetainListener {
+					handler.EnterFallbackOfficialOnly()
 					log.Printf("parent process exited; gateway listener retained (At risk): %v", recoveryErr)
-					parentLost = nil
 					continue
 				}
 			}

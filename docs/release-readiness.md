@@ -4,9 +4,13 @@ RelayKit is preparing for public beta distribution, not a public release yet.
 
 ## Current Source Candidate and CI Status
 
-At runtime-safety source candidate `5992d6d`, the P0 matrix is 8/8 PASS. `dist/runtime-safety/evidence.json` binds that source commit and the tracked harness/test hashes; later CI/documentation-only commits do not replace the runtime candidate. Installed Build 16 remains the historical/current shared runtime and was untouched. The planned next distribution is marketing version `0.1.6`, build `17`; it has not been packaged, signed, notarized, installed, uploaded, or published.
+Build 17 was produced from clean commit `cc0fa01329ec472fe85c3128df8f4fcd9bd5763d` as version `0.1.6`, build `17`. The immutable signed zip is `dist/github-release/v0.1.6/RelayKitApp-0.1.6-signed.zip`, SHA-256 `41e4d4fca6c6481af4cee39be820b7557f7a06ea45024e7f378686674ebd35fb`. Manifest schema 2, Developer ID signing, hardened runtime, notarization, stapling, Gatekeeper, checksum, and all six same-SHA hosted checks passed. It was not installed; Build 16 remains installed.
 
-The repository now contains GitHub-ready workflows, but this checkout has no Git remote and none of the workflows has run on GitHub. CI is therefore not yet GitHub-green. On the first separately authorized public push, confirm these exact checks before making them required on `main`:
+Build 17 is no longer eligible as the final release candidate. It predates the P0 two-epoch lifecycle that keeps the data plane available for an already-running Codex process after the App restores disk config and exits. Do not overwrite, re-sign, relabel, install as final, upload, or publish Build 17.
+
+The current source candidate adds a launchd socket-owned fallback data plane, typed provider rejection after Disable, provider credential clearing on owner release, helper crash recovery, and App/helper lifecycle separation. Its random-port eight-case matrix passes, as do focused/full Go, Swift, bundle/package, signed-release contract, CI contract, public-boundary, and diff gates. The live unique-label launchd proof is not yet run, and current evidence is not yet bound to a clean product commit. Independent Test/CR, hosted CI, Build 18, installation, and same-running-Codex E2E remain required.
+
+The required hosted checks remain:
 
 - `Fast Public Boundary`
 - `Fast Shell Contracts`
@@ -15,13 +19,13 @@ The repository now contains GitHub-ready workflows, but this checkout has no Git
 - `macOS Runtime Safety`
 - `Protocol Contract`
 
-After the checks appear and pass, enable branch protection requiring all six and an up-to-date branch. Remote creation, push, signing, notarization, packaging, and release remain outside this lane.
+The current `macOS Runtime Safety` workflow also runs the offline and live isolated launchd socket-activation proofs. Every action remains pinned to a full commit SHA with `contents: read`, bounded timeouts, and concurrency cancellation. A replacement Build 18 may be built only from a clean commit whose six checks all pass.
 
-Build 17 release tooling now requires an absolute CI evidence file for a clean current HEAD before finalization. Manifest schema 2 binds both executable hashes and embeds the six hosted checks plus deduplicated Actions runs. Production packaging freezes the commit/archive identity, builds its own App, signs and notarizes a private frozen copy, rechecks source identity, and finalizes exactly three non-writable files: the signed zip, checksum, and manifest. Installation and draft creation consume private snapshots of those files so later source-directory mutation cannot change the verified bytes. Draft creation freshly queries the manifest's exact SHA, rejects existing release/tag state, and creates a new lightweight tag at that SHA. Ambiguous remote failures reconcile and remove only the current run's marked draft and exact expected tag; cleanup failure remains explicit. No hosted query or release operation was run in this source-only lane, so GitHub-green status and Build 17 distribution remain pending.
+The release tooling requires an absolute CI evidence file for a clean current HEAD before finalization. Manifest schema 2 binds both executable hashes and embeds the six hosted checks plus deduplicated Actions runs. Production packaging freezes the commit/archive identity, builds its own App, signs and notarizes a private frozen copy, rechecks source identity, and finalizes exactly three non-writable files: the signed zip, checksum, and manifest. Installation and draft creation consume private snapshots of those files so later source-directory mutation cannot change the verified bytes. Build 17 later satisfied this tooling, but its product lifecycle is now superseded; Build 18 must repeat the same-SHA release gates after Phase 7.17 closes.
 
 The hosted shell/App checks run the required-check evidence, signed-package orchestration, and explicit-zip proof behavior contracts; local test package mode is restricted to canonical repository-external roots. Focused behavior coverage includes production prepared-App rejection, post-build source drift, private build-byte freezing, exact release layout, immutable snapshot consumption, exact draft arguments/assets, source-SHA tag binding, ambiguous remote creation, and visible cleanup failure.
 
-## Signed Beta v0.1.0 Current Candidate
+## Historical Signed Beta v0.1.0 Candidate
 
 Release readiness is **complete for a signed beta candidate; public release remains unpublished**. The current artifact is `dist/github-release/v0.1.0/RelayKitApp-0.1.0-signed.zip`, SHA-256 `116928bda89b6ca9a266bd7e1b3b820fc811d45f6ba118be16a367c619cf1a78`. Its release/trimmed-path binaries passed the archive personal-path scan, Developer ID signing, hardened runtime, fresh notarization acceptance, stapling, Gatekeeper validation, signed-zip dogfood, and the menu-bar right-click Quit lifecycle.
 

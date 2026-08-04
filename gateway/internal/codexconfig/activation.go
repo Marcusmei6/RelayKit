@@ -306,16 +306,30 @@ func IntegrationStatus(targetPath, statePath string) (Status, error) {
 // restoration. If that cannot be proven safe, the caller must retain its
 // listener.
 func RecoveryDecisionForParentLoss(targetPath, statePath string) (RecoveryDecision, error) {
+	return RecoveryDecisionForParentLossWithContinuity(targetPath, statePath, false)
+}
+
+// RecoveryDecisionForParentLossWithContinuity restores managed config fields
+// while retaining the listener for a client that may have cached the managed
+// base URL. Callers must set continuityRequired only after observing an
+// enabled managed-route epoch.
+func RecoveryDecisionForParentLossWithContinuity(targetPath, statePath string, continuityRequired bool) (RecoveryDecision, error) {
 	status, err := IntegrationStatus(targetPath, statePath)
 	if err != nil {
 		return RecoveryRetainListener, fmt.Errorf("inspect managed Codex route: %w", err)
 	}
 	switch status {
 	case StatusDisabled:
+		if continuityRequired {
+			return RecoveryRetainListener, nil
+		}
 		return RecoveryShutdown, nil
 	case StatusEnabled, StatusDrifted:
 		_, err := Disable(targetPath, statePath)
 		if err == nil {
+			if continuityRequired {
+				return RecoveryRetainListener, nil
+			}
 			return RecoveryShutdown, nil
 		}
 		stillManaged, proofErr := managedBaseURLStillConfigured(targetPath, statePath)

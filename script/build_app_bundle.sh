@@ -14,9 +14,11 @@ APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 APP_CONTENTS="${APP_BUNDLE}/Contents"
 APP_MACOS="${APP_CONTENTS}/MacOS"
 APP_RESOURCES="${APP_CONTENTS}/Resources"
+APP_LAUNCH_AGENTS="${APP_CONTENTS}/Library/LaunchAgents"
 APP_REAL_BINARY="${APP_MACOS}/${APP_NAME}.bin"
 BUNDLED_GATEWAY="${APP_MACOS}/relay"
 INFO_PLIST="${APP_CONTENTS}/Info.plist"
+GATEWAY_AGENT_PLIST="${APP_LAUNCH_AGENTS}/dev.relaykit.gateway.plist"
 
 usage() {
   echo "usage: $0 [build|--verify]" >&2
@@ -44,6 +46,26 @@ PY
     echo "release binary personal-path scan failed: ${role} (rule=personal-absolute-path count=${count})" >&2
     exit 1
   fi
+}
+
+select_isolated_verify_port() {
+  /usr/bin/python3 - "${ROOT_DIR}/app/Sources/RelayKitCore/RelayKitRuntimeEndpoint.swift" <<'PY'
+import re
+import socket
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+protected = {int(value) for value in re.findall(r"(?:productPort\s*=\s*|port\s*==\s*)(\d+)", source)}
+for _ in range(20):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    if port not in protected:
+        print(port)
+        break
+else:
+    raise SystemExit(1)
+PY
 }
 
 build_bundle() {
@@ -77,12 +99,13 @@ build_bundle() {
   build_binary="$(swift build --scratch-path "${swift_scratch}" "${swift_build_args[@]}" --show-bin-path)/${APP_NAME}"
 
   rm -rf "${APP_BUNDLE}"
-  mkdir -p "${APP_MACOS}" "${APP_RESOURCES}"
+  mkdir -p "${APP_MACOS}" "${APP_RESOURCES}" "${APP_LAUNCH_AGENTS}"
   cp "${build_binary}" "${APP_REAL_BINARY}"
   cp "${ROOT_DIR}/gateway/bin/relay" "${BUNDLED_GATEWAY}"
   cp "${ROOT_DIR}/examples/providers.example.json" "${APP_RESOURCES}/providers.example.json"
   cp "${ROOT_DIR}/examples/codex.config.example.toml" "${APP_RESOURCES}/codex.config.example.toml"
   cp "${ROOT_DIR}/app/Resources/RelayKitApp.icns" "${APP_RESOURCES}/RelayKitApp.icns"
+  cp "${ROOT_DIR}/app/Resources/dev.relaykit.gateway.plist" "${APP_LAUNCH_AGENTS}/dev.relaykit.gateway.plist"
   chmod +x "${APP_REAL_BINARY}"
   chmod +x "${BUNDLED_GATEWAY}"
 
@@ -143,6 +166,11 @@ verify_bundle() {
     echo "App bundle is missing the Finder icon contract" >&2
     exit 1
   fi
+  /usr/bin/plutil -lint "${GATEWAY_AGENT_PLIST}" >/dev/null
+  if ! cmp -s "${ROOT_DIR}/app/Resources/dev.relaykit.gateway.plist" "${GATEWAY_AGENT_PLIST}"; then
+    echo "App bundle background gateway plist differs from its reviewed source" >&2
+    exit 1
+  fi
   local provisioning_path
   provisioning_path="$(find "${APP_CONTENTS}" \( -name 'embedded.mobileprovision' -o -name '*.mobileprovision' -o -name '*.provisionprofile' \) -print -quit)"
   if [[ -n "${provisioning_path}" ]]; then
@@ -160,7 +188,13 @@ verify_bundle() {
     echo "Local beta must not have a Developer ID team identifier" >&2
     exit 1
   fi
-  "${APP_REAL_BINARY}" --verify-bundled-gateway
+  local verify_port
+  verify_port="$(select_isolated_verify_port)" || {
+    echo "Could not allocate an isolated bundled-gateway verification port" >&2
+    exit 1
+  }
+  env RELAYKIT_RUNTIME_SAFETY_TEST=1 RELAYKIT_RUNTIME_SAFETY_PORT="${verify_port}" \
+    "${APP_REAL_BINARY}" --verify-bundled-gateway
 }
 
 case "${MODE}" in

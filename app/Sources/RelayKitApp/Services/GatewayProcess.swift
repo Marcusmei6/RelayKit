@@ -5,6 +5,12 @@ import RelayKitCore
 @MainActor
 final class GatewayProcess {
     private var process: Process?
+    private var adoptedBackgroundGateway = false
+    private var controlBinaryPath = ""
+    private var controlTokenPath = ""
+    private var controlParentProcessIdentifier: Int32?
+    private(set) var usesManagedService = false
+    private(set) var expectedServiceMode = "managed"
     private let endpoint: RelayKitRuntimeEndpoint
     var onUnexpectedTermination: (() -> Void)?
 
@@ -13,7 +19,7 @@ final class GatewayProcess {
     }
 
     var isRunning: Bool {
-        process?.isRunning == true
+        process?.isRunning == true || adoptedBackgroundGateway
     }
 
     var processIdentifier: Int32? {
@@ -28,17 +34,65 @@ final class GatewayProcess {
         configPath: String,
         usageLogPath: String? = nil,
         credentialHandoff: Data,
+        controlTokenPath: String = "",
+        launchdManaged: Bool = false,
+        managedRouteEnabled: Bool = true,
         parentProcessIdentifier: Int32? = nil,
         managedCodexTarget: String? = nil,
         managedCodexState: String? = nil
     ) throws {
-        if isRunning {
-            return
-        }
         guard (managedCodexTarget == nil) == (managedCodexState == nil),
               managedCodexTarget?.isEmpty != true,
               managedCodexState?.isEmpty != true else {
             throw GatewayProcessError.commandFailed("managed Codex target and state must be passed together")
+        }
+        let directProcessRunning = process?.isRunning == true
+        let previouslyAdopted = adoptedBackgroundGateway
+        if (directProcessRunning || previouslyAdopted),
+           let parentProcessIdentifier,
+           parentProcessIdentifier > 0 {
+            guard adoptRunningGateway(
+                binaryPath: binaryPath,
+                credentialHandoff: credentialHandoff,
+                controlTokenPath: controlTokenPath,
+                parentProcessIdentifier: parentProcessIdentifier,
+                managedRouteEnabled: managedRouteEnabled,
+                attempts: launchdManaged ? 20 : 1
+            ) else {
+                throw GatewayProcessError.commandFailed("RelayKit gateway could not update its route mode.")
+            }
+            adoptedBackgroundGateway = previouslyAdopted
+            controlBinaryPath = binaryPath
+            self.controlTokenPath = controlTokenPath
+            controlParentProcessIdentifier = parentProcessIdentifier
+            usesManagedService = launchdManaged
+            expectedServiceMode = managedRouteEnabled ? "managed" : "official_fallback"
+            return
+        }
+        if directProcessRunning || previouslyAdopted {
+            return
+        }
+        if let parentProcessIdentifier, parentProcessIdentifier > 0,
+           adoptRunningGateway(
+               binaryPath: binaryPath,
+               credentialHandoff: credentialHandoff,
+               controlTokenPath: controlTokenPath,
+               parentProcessIdentifier: parentProcessIdentifier,
+               managedRouteEnabled: managedRouteEnabled,
+               attempts: launchdManaged ? 20 : 1
+           ) {
+            adoptedBackgroundGateway = true
+            controlBinaryPath = binaryPath
+            self.controlTokenPath = controlTokenPath
+            controlParentProcessIdentifier = parentProcessIdentifier
+            usesManagedService = launchdManaged
+            expectedServiceMode = managedRouteEnabled ? "managed" : "official_fallback"
+            return
+        }
+        if launchdManaged {
+            adoptedBackgroundGateway = false
+            usesManagedService = false
+            throw GatewayProcessError.commandFailed("RelayKit background gateway did not become available.")
         }
         let process = makeStartProcess(
             binaryPath: binaryPath,
@@ -46,7 +100,9 @@ final class GatewayProcess {
             usageLogPath: usageLogPath,
             parentProcessIdentifier: parentProcessIdentifier,
             managedCodexTarget: managedCodexTarget,
-            managedCodexState: managedCodexState
+            managedCodexState: managedCodexState,
+            controlTokenPath: controlTokenPath,
+            managedRouteEnabled: managedRouteEnabled
         )
         let terminationRelay = GatewayTerminationRelay { [weak self] processIdentifier in
             self?.handleTermination(processIdentifier: processIdentifier)
@@ -72,6 +128,12 @@ final class GatewayProcess {
             throw GatewayProcessError.commandFailed("gateway exited during startup")
         }
         self.process = process
+        adoptedBackgroundGateway = false
+        controlBinaryPath = binaryPath
+        self.controlTokenPath = controlTokenPath
+        controlParentProcessIdentifier = parentProcessIdentifier
+        usesManagedService = false
+        expectedServiceMode = managedRouteEnabled ? "managed" : "official_fallback"
     }
 
     func makeStartProcess(
@@ -80,7 +142,9 @@ final class GatewayProcess {
         usageLogPath: String? = nil,
         parentProcessIdentifier: Int32? = nil,
         managedCodexTarget: String? = nil,
-        managedCodexState: String? = nil
+        managedCodexState: String? = nil,
+        controlTokenPath: String? = nil,
+        managedRouteEnabled: Bool = true
     ) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath, relativeTo: Self.appDirectory()).standardized
@@ -94,17 +158,69 @@ final class GatewayProcess {
         if let managedCodexTarget, let managedCodexState {
             process.arguments?.append(contentsOf: ["-managed-codex-target", managedCodexTarget, "-managed-codex-state", managedCodexState])
         }
+        if let controlTokenPath, !controlTokenPath.isEmpty {
+            process.arguments?.append(contentsOf: ["-control-token-file", controlTokenPath])
+        }
+        process.arguments?.append("-route-enabled=\(managedRouteEnabled ? "true" : "false")")
         return process
     }
 
     func stop() {
+        if adoptedBackgroundGateway {
+            requestAdoptedGatewayShutdown()
+            adoptedBackgroundGateway = false
+            usesManagedService = false
+            clearControlState()
+            return
+        }
         guard let process, process.isRunning else {
             self.process = nil
+            clearControlState()
             return
         }
         process.terminationHandler = nil
         terminateAndReap(process)
         self.process = nil
+        clearControlState()
+    }
+
+    func restartDataPlane() throws {
+        if adoptedBackgroundGateway {
+            try requestAdoptedGatewayShutdownOrThrow()
+            adoptedBackgroundGateway = false
+            usesManagedService = false
+            clearControlState()
+            Thread.sleep(forTimeInterval: 0.25)
+            return
+        }
+        guard let process, process.isRunning else {
+            self.process = nil
+            clearControlState()
+            return
+        }
+        process.terminationHandler = nil
+        terminateAndReap(process)
+        self.process = nil
+        clearControlState()
+    }
+
+    func leaveRunningForFallback() throws {
+        if adoptedBackgroundGateway {
+            try requestAdoptedGatewayRelease()
+            adoptedBackgroundGateway = false
+            usesManagedService = false
+            clearControlState()
+            return
+        }
+        guard let process, process.isRunning else {
+            self.process = nil
+            clearControlState()
+            return
+        }
+        try requestAdoptedGatewayRelease()
+        process.terminationHandler = nil
+        self.process = nil
+        clearControlState()
     }
 
     func enableCodexConfig(binaryPath: String, target: String, catalog: String, state: String) throws -> String {
@@ -132,7 +248,7 @@ final class GatewayProcess {
         try runGatewayCommand(binaryPath: binaryPath, arguments: ["summarize-usage", "-path", usageLogPath])
     }
 
-    private nonisolated static func runGatewayCommand(binaryPath: String, arguments: [String]) throws -> String {
+    private nonisolated static func runGatewayCommand(binaryPath: String, arguments: [String], standardInput: Data? = nil) throws -> String {
         let process = Process()
         let output = Pipe()
         let errors = Pipe()
@@ -140,7 +256,13 @@ final class GatewayProcess {
         process.arguments = arguments
         process.standardOutput = output
         process.standardError = errors
+        let input = standardInput.map { _ in Pipe() }
+        process.standardInput = input
         try process.run()
+        if let standardInput, let input {
+            try input.fileHandleForWriting.write(contentsOf: standardInput)
+            try input.fileHandleForWriting.close()
+        }
         process.waitUntilExit()
 
         let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -149,6 +271,85 @@ final class GatewayProcess {
             throw GatewayProcessError.commandFailed(stderr.isEmpty ? stdout : stderr)
         }
         return stdout
+    }
+
+    private func requestAdoptedGatewayShutdown() {
+        try? requestAdoptedGatewayShutdownOrThrow()
+    }
+
+    private func requestAdoptedGatewayShutdownOrThrow() throws {
+        guard !controlBinaryPath.isEmpty,
+              !controlTokenPath.isEmpty,
+              let parent = controlParentProcessIdentifier,
+              parent > 0 else {
+            throw GatewayProcessError.commandFailed("gateway shutdown control is unavailable")
+        }
+        _ = try Self.runGatewayCommand(
+            binaryPath: controlBinaryPath,
+            arguments: [
+                "gateway-control",
+                "-endpoint", endpoint.httpBaseURL.absoluteString,
+                "-token-file", controlTokenPath,
+                "-action", "shutdown",
+                "-parent-pid", "\(parent)",
+            ]
+        )
+    }
+
+    private func requestAdoptedGatewayRelease() throws {
+        guard !controlBinaryPath.isEmpty,
+              !controlTokenPath.isEmpty,
+              let parent = controlParentProcessIdentifier,
+              parent > 0 else {
+            throw GatewayProcessError.commandFailed("gateway fallback control is unavailable")
+        }
+        _ = try Self.runGatewayCommand(
+            binaryPath: controlBinaryPath,
+            arguments: [
+                "gateway-control",
+                "-endpoint", endpoint.httpBaseURL.absoluteString,
+                "-token-file", controlTokenPath,
+                "-action", "release",
+                "-parent-pid", "\(parent)",
+            ]
+        )
+    }
+
+    private func adoptRunningGateway(
+        binaryPath: String,
+        credentialHandoff: Data,
+        controlTokenPath: String,
+        parentProcessIdentifier: Int32,
+        managedRouteEnabled: Bool,
+        attempts: Int
+    ) -> Bool {
+        for attempt in 0..<attempts {
+            if (try? Self.runGatewayCommand(
+                binaryPath: binaryPath,
+                arguments: [
+                    "gateway-control",
+                    "-endpoint", endpoint.httpBaseURL.absoluteString,
+                    "-token-file", controlTokenPath,
+                    "-action", "adopt",
+                    "-parent-pid", "\(parentProcessIdentifier)",
+                    "-route-enabled=\(managedRouteEnabled ? "true" : "false")",
+                ],
+                standardInput: credentialHandoff
+            )) != nil {
+                return true
+            }
+            if attempt + 1 < attempts {
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+        }
+        return false
+    }
+
+    private func clearControlState() {
+        controlBinaryPath = ""
+        controlTokenPath = ""
+        controlParentProcessIdentifier = nil
+        usesManagedService = false
     }
 
     private nonisolated static func appDirectory() -> URL {

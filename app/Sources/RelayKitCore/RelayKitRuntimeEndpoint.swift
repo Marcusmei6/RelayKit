@@ -8,6 +8,10 @@ public struct RelayKitRuntimeEndpoint: Equatable, Sendable {
 
     public static let product = RelayKitRuntimeEndpoint(port: productPort)
 
+    public static func isProtectedPort(_ port: Int) -> Bool {
+        port == 18787 || port == productPort
+    }
+
     public var listenAddress: String {
         "\(Self.host):\(port)"
     }
@@ -28,8 +32,7 @@ public struct RelayKitRuntimeEndpoint: Equatable, Sendable {
               rawPort.unicodeScalars.allSatisfy({ (48...57).contains($0.value) }),
               let port = Int(rawPort),
               (1024...65535).contains(port),
-              port != 18787,
-              port != productPort else {
+              !isProtectedPort(port) else {
             throw RelayKitRuntimeEndpointError.invalidTestEndpoint
         }
         return RelayKitRuntimeEndpoint(port: port)

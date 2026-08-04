@@ -845,8 +845,10 @@ func expectRuntimeSafetyEndpointContract() throws {
         "guard environment[\"RELAYKIT_RUNTIME_SAFETY_TEST\"] == \"1\" else",
         "return product",
         "(1024...65535).contains(port)",
-        "port != 18787",
-        "port != productPort",
+        "static func isProtectedPort",
+        "port == 18787",
+        "port == productPort",
+        "!isProtectedPort(port)",
         "RelayKit runtime safety test endpoint is invalid.",
         "var listenAddress: String",
         "var httpBaseURL: URL",
@@ -905,8 +907,12 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
     let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
     let gateway = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/GatewayProcess.swift"), encoding: .utf8)
+    let backgroundService = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/GatewayBackgroundService.swift"), encoding: .utf8)
     let bundledVerifier = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/BundledGatewayVerifier.swift"), encoding: .utf8)
     let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    let agentPlist = try String(contentsOf: root.appendingPathComponent("Resources/dev.relaykit.gateway.plist"), encoding: .utf8)
+    let bundleScript = try String(contentsOf: root.deletingLastPathComponent().appendingPathComponent("script/build_app_bundle.sh"), encoding: .utf8)
+    let packageScript = try String(contentsOf: root.deletingLastPathComponent().appendingPathComponent("script/package_release.sh"), encoding: .utf8)
 
     for required in [
         "@Published private(set) var runtimeSafetyState: RuntimeSafetyState = .disabled",
@@ -918,14 +924,48 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
         "if disabled.stopHelper {\n                gateway.stop()",
         "gatewayStatus = gateway.isRunning ? \"running\" : \"stopped\"",
         "lastOfficialCatalog",
+        "GatewayBackgroundService().ensureRegisteredIfPackaged()",
+        "beginGatewayServiceMonitorIfNeeded()",
+        "healthMode()",
     ] {
         if !appModel.contains(required) { fatalError("runtime safety lifecycle contract missing \(required)") }
     }
     if appModel.contains("startupRouteReachableButUnowned") {
         fatalError("startup health contract must retain Protected adoption without an unowned-listener expansion")
     }
-    for required in ["@MainActor\nfinal class GatewayProcess", "-managed-codex-target", "-managed-codex-state", "Task { @MainActor", "process.terminationHandler = nil", "nonisolated static func summarizeUsage", "nonisolated static func runGatewayCommand", "nonisolated static func appDirectory", "GatewayTerminationRelay: @unchecked Sendable"] {
+    for required in ["@MainActor\nfinal class GatewayProcess", "-managed-codex-target", "-managed-codex-state", "launchdManaged", "usesManagedService", "managedRouteEnabled: Bool = true", "private(set) var expectedServiceMode", "-route-enabled=\\(managedRouteEnabled ? \"true\" : \"false\")", "\"release\"", "Task { @MainActor", "process.terminationHandler = nil", "func restartDataPlane() throws", "func leaveRunningForFallback() throws", "nonisolated static func summarizeUsage", "nonisolated static func runGatewayCommand", "nonisolated static func appDirectory", "GatewayTerminationRelay: @unchecked Sendable"] {
         if !gateway.contains(required) { fatalError("gateway lifecycle safety contract missing \(required)") }
+    }
+    for required in ["let managedRouteEnabled = managedCodexRouteStatus() == \"enabled\"", "managedRouteEnabled: managedRouteEnabled", "mode != self.gateway.expectedServiceMode"] {
+        if !appModel.contains(required) {
+            fatalError("two-epoch App route-mode contract missing \(required)")
+        }
+    }
+    for required in ["SMAppService.agent(plistName:", "case .requiresApproval:", "System Settings > General > Login Items", "return false"] {
+        if !backgroundService.contains(required) {
+            fatalError("background service fail-closed contract missing \(required)")
+        }
+    }
+    for required in ["<key>BundleProgram</key>", "<string>Contents/MacOS/relay</string>", "<key>RunAtLoad</key>", "<key>Sockets</key>", "<key>RelayKitGateway</key>", "<string>127.0.0.1</string>", "<string>19777</string>"] {
+        if !agentPlist.contains(required) {
+            fatalError("background gateway plist contract missing \(required)")
+        }
+    }
+    for forbidden in ["credential", "auth.json", "StandardOutPath", "StandardErrorPath", "18787"] {
+        if agentPlist.localizedCaseInsensitiveContains(forbidden) {
+            fatalError("background gateway plist must not contain \(forbidden)")
+        }
+    }
+    guard bundleScript.contains("APP_LAUNCH_AGENTS="),
+          bundleScript.contains("dev.relaykit.gateway.plist") else {
+        fatalError("App bundle must embed the RelayKit-owned background gateway plist")
+    }
+    for script in [bundleScript, packageScript] {
+        guard script.contains("select_isolated_verify_port"),
+              script.contains("RELAYKIT_RUNTIME_SAFETY_TEST=1"),
+              script.contains("RELAYKIT_RUNTIME_SAFETY_PORT=") else {
+            fatalError("bundled gateway verification must use an isolated non-product endpoint")
+        }
     }
     guard let startBegin = gateway.range(of: "func start("),
           let startEnd = gateway.range(of: "func makeStartProcess", range: startBegin.upperBound..<gateway.endIndex) else {
@@ -949,6 +989,23 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
           let terminate = gateway.range(of: "terminateAndReap(process)", range: detach.upperBound..<stopEnd.lowerBound),
           detach.lowerBound < terminate.lowerBound else {
         fatalError("intentional gateway stop must detach terminationHandler before stopping")
+    }
+    guard let fallbackStart = gateway.range(of: "func leaveRunningForFallback() throws"),
+          let fallbackEnd = gateway.range(of: "func enableCodexConfig", range: fallbackStart.upperBound..<gateway.endIndex),
+          let fallbackBody = gateway.range(of: "process.terminationHandler = nil", range: fallbackStart.upperBound..<fallbackEnd.lowerBound),
+          !gateway[fallbackStart.lowerBound..<fallbackEnd.lowerBound].contains("terminateAndReap") else {
+        fatalError("fallback handoff must detach App ownership without terminating the data plane")
+    }
+    _ = fallbackBody
+    guard let restartStart = appModel.range(of: "func restartGateway()"),
+          let restartEnd = appModel.range(of: "func refreshHealth()", range: restartStart.upperBound..<appModel.endIndex) else {
+        fatalError("gateway restart implementation is missing")
+    }
+    let restartBody = appModel[restartStart.lowerBound..<restartEnd.lowerBound]
+    guard restartBody.contains("try gateway.restartDataPlane()"),
+          !restartBody.contains("stopGateway()"),
+          restartBody.contains("gateway.disableCodexConfig") else {
+        fatalError("gateway restart must preserve the managed epoch and fail closed if replacement startup fails")
     }
     if !content.contains("Route safety: \\(model.runtimeSafetyState.rawValue)") {
         fatalError("Codex surface must show the observable runtime safety state")
@@ -1858,11 +1915,14 @@ func expectStatusPopoverContract() throws {
     }
     guard let removeMonitor = termination.range(of: "NSEvent.removeMonitor"),
           let close = termination.range(of: "popover.close()"),
-          let gatewayStop = termination.range(of: "model.stopGateway()"),
+          let gatewayFinish = termination.range(of: "model.finishGatewayLifecycleForAppTermination()"),
           let authStop = termination.range(of: "model.stopOfficialAuthProcessForShutdown()"),
-          removeMonitor.lowerBound < close.lowerBound && close.lowerBound < gatewayStop.lowerBound &&
-          gatewayStop.lowerBound < authStop.lowerBound else {
+          removeMonitor.lowerBound < close.lowerBound && close.lowerBound < gatewayFinish.lowerBound &&
+          gatewayFinish.lowerBound < authStop.lowerBound else {
         fatalError("termination must remove monitor and close popover before shutdown")
+    }
+    if termination.contains("model.stopGateway()") {
+        fatalError("App termination must not unconditionally destroy the cached-client data plane")
     }
     if !quit.contains("NSApplication.shared.terminate(sender)") {
         fatalError("Quit must use NSApplication termination")
@@ -1896,7 +1956,7 @@ func expectGracefulTerminationRestoresCodexRouteBeforeStoppingGateway() throws {
         fatalError("graceful termination must check guarded Codex state before guarded restoration")
     }
     let shutdown = appModel[shutdownStart.lowerBound..<appModel.endIndex]
-    for required in ["case \"enabled\"", "case \"disabled\"", "case \"drifted\"", "RelayKitPaths.defaultCodexConfigPath()", "RelayKitPaths.codexConfigStatePath()"] {
+    for required in ["case \"enabled\"", "case \"disabled\"", "case \"drifted\"", "RelayKitPaths.defaultCodexConfigPath()", "RelayKitPaths.codexConfigStatePath()", "gatewayMustSurviveTermination = gateway.isRunning", "managedRouteEpochObserved && gateway.isRunning"] {
         if !shutdown.contains(required) {
             fatalError("graceful termination guard is missing \(required)")
         }
@@ -1924,10 +1984,10 @@ func expectGracefulTerminationRestoresCodexRouteBeforeStoppingGateway() throws {
     }
 
     let termination = app[willTerminateStart.lowerBound..<app.endIndex]
-    guard let gatewayStop = termination.range(of: "model.stopGateway()"),
+    guard let gatewayFinish = termination.range(of: "model.finishGatewayLifecycleForAppTermination()"),
           let authStop = termination.range(of: "model.stopOfficialAuthProcessForShutdown()"),
-          gatewayStop.lowerBound < authStop.lowerBound else {
-        fatalError("successful termination must retain gateway then auth shutdown ordering")
+          gatewayFinish.lowerBound < authStop.lowerBound else {
+        fatalError("successful termination must preserve cached-client continuity before auth shutdown")
     }
 }
 
@@ -1982,6 +2042,7 @@ if !RelayKitPaths.providerConfigPath(bundle: Bundle(for: BundleSentinel.self)).h
 }
 if !RelayKitPaths.codexCatalogPath().hasSuffix("Library/Application Support/RelayKit/codex-model-catalog.json") ||
     !RelayKitPaths.codexConfigStatePath().hasSuffix("Library/Application Support/RelayKit/codex-config-state.json") ||
+    !RelayKitPaths.gatewayControlTokenPath().hasSuffix("Library/Application Support/RelayKit/gateway-control.token") ||
     !RelayKitPaths.defaultCodexConfigPath().hasSuffix(".codex/config.toml") {
     fatalError("Codex managed paths must stay in App Support with the default Codex config target")
 }

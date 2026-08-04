@@ -74,6 +74,12 @@ public enum RelayKitPaths {
             .path
     }
 
+    public static func gatewayControlTokenPath() -> String {
+        applicationSupportDirectory()
+            .appendingPathComponent("gateway-control.token")
+            .path
+    }
+
     public static func codexCatalogPath() -> String {
         applicationSupportDirectory()
             .appendingPathComponent("codex-model-catalog.json")

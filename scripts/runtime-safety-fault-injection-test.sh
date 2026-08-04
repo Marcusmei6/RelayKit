@@ -17,7 +17,7 @@ jq -e '
   .proof == "runtime_safety_fault_injection" and
   .source == "current_checkout" and
   .runtime == "isolated_source_app" and
-  .network == "loopback_health_only" and
+  .network == "loopback_official_fixture_only" and
   .protected_ports == [18787, 19777] and
   .global_files == "read_only_non_content_guards" and
   .launch_agents == "read_only_aggregate_guard" and
@@ -42,6 +42,7 @@ jq -e '
     "harness_test_sha",
     "random_port",
     "cases",
+    "client_continuity",
     "restore_failure_diagnostics",
     "global_guards",
     "installed_runtime_unchanged",
@@ -70,6 +71,13 @@ require_source 'source_sha'
 require_source 'harness_sha'
 require_source 'harness_test_sha'
 require_source 'safe_outcome'
+require_source 'restored_fallback_is_healthy'
+require_source 'official_fallback'
+require_source 'record_cached_before'
+require_source 'record_cached_after'
+require_source 'record_new_direct_after_restore'
+require_source 'RELAYKIT_RUNTIME_SAFETY_OFFICIAL_BASE_URL'
+require_source 'fixture_only: true'
 require_source 'wait_for_stable_expected_listener'
 require_source 'source_app_listener_not_stable'
 require_source 'kill -TERM "${HELPER_PID}" 2>/dev/null || true'
@@ -97,17 +105,20 @@ for case_name in graceful_quit app_sigterm app_sigkill helper_sigterm helper_sig
   require_source "run_${case_name}"
 done
 
-if grep -Eq '/v1/responses|security (find|add|delete)|launchctl|/usr/bin/open|RELAYKIT_RUNTIME_SAFETY_(HOST|BASE_URL)' "${HARNESS}"; then
-  fail "harness contains provider, credential, LaunchAgent, GUI, or host/base-URL override behavior"
+if grep -Eq 'security (find|add|delete)|launchctl|/usr/bin/open|RELAYKIT_RUNTIME_SAFETY_(HOST|BASE_URL)' "${HARNESS}"; then
+  fail "harness contains credential, LaunchAgent, GUI, or unrestricted host/base-URL override behavior"
 fi
 if grep -Fq 'graceful_config_path' "${HARNESS}"; then
   fail "graceful quit must exercise the product lifecycle"
 fi
 
-[[ "$(${HARNESS} --evaluate-safety false false false)" == "managed_base_url_removed" ]] \
-  || fail "restored config must allow the helper to exit"
-[[ "$(${HARNESS} --evaluate-safety true true true)" == "healthy_expected_listener" ]] \
+[[ "$(${HARNESS} --evaluate-safety false true true)" == "restored_config_with_fallback_listener" ]] \
+  || fail "restored config must retain the fallback data plane for cached clients"
+[[ "$(${HARNESS} --evaluate-safety true true true)" == "managed_config_with_expected_listener" ]] \
   || fail "managed config must require a live expected listener"
+if ${HARNESS} --evaluate-safety false false false >/dev/null 2>&1; then
+  fail "restored config must not excuse a dead fallback data plane after a managed epoch"
+fi
 if ${HARNESS} --evaluate-safety true false false >/dev/null 2>&1; then
   fail "managed config with a dead helper/listener must be unsafe"
 fi

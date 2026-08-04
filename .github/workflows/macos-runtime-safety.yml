@@ -35,3 +35,7 @@ jobs:
         run: ./scripts/runtime-safety-fault-injection-test.sh
       - name: Run isolated fault harness
         run: ./scripts/runtime-safety-fault-injection.sh
+      - name: Verify launchd socket-activation contract
+        run: ./scripts/runtime-safety-launchd-proof-test.sh
+      - name: Run isolated launchd socket-activation proof
+        run: ./scripts/runtime-safety-launchd-proof.sh

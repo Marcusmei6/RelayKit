@@ -16,6 +16,11 @@ enum GatewayClientError: LocalizedError {
 }
 
 struct GatewayClient {
+    private struct HealthResponse: Decodable {
+        let status: String
+        let mode: String
+    }
+
     let baseURL: URL
 
     init(endpoint: RelayKitRuntimeEndpoint) {
@@ -23,11 +28,20 @@ struct GatewayClient {
     }
 
     func health() async throws -> String {
-        let (_, response) = try await URLSession.shared.data(from: baseURL.appending(path: "healthz"))
+        let health = try await healthResponse()
+        return health.status
+    }
+
+    func healthMode() async throws -> String {
+        try await healthResponse().mode
+    }
+
+    private func healthResponse() async throws -> HealthResponse {
+        let (data, response) = try await URLSession.shared.data(from: baseURL.appending(path: "healthz"))
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
-        return "ok"
+        return try JSONDecoder().decode(HealthResponse.self, from: data)
     }
 
     func models() async throws -> [RelayModel] {

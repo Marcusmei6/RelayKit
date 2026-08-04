@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -31,9 +32,13 @@ import (
 type Server struct {
 	config                   *config.Config
 	client                   *http.Client
+	handler                  http.Handler
 	usageLogPath             string
+	credentialMu             sync.RWMutex
 	keychainCredentials      map[string]string
 	allowKeychainCLIFallback bool
+	fallbackOfficialOnly     atomic.Bool
+	fallbackProviderTest     atomic.Bool
 	officialAuthRefreshMu    sync.Mutex
 	compactionTargetMu       sync.Mutex
 	compactionTargets        map[string]compactionTargetHint
@@ -67,23 +72,23 @@ var lookupKeychainCredential = func(name string) (string, error) {
 	return token, nil
 }
 
-func New(configPath string) (http.Handler, error) {
+func New(configPath string) (*Server, error) {
 	return NewWithUsageLog(configPath, "")
 }
 
-func NewWithUsageLog(configPath, usageLogPath string) (http.Handler, error) {
+func NewWithUsageLog(configPath, usageLogPath string) (*Server, error) {
 	return newServer(configPath, usageLogPath, nil, true)
 }
 
-func NewWithUsageLogAndCredentials(configPath, usageLogPath string, credentials map[string]string) (http.Handler, error) {
+func NewWithUsageLogAndCredentials(configPath, usageLogPath string, credentials map[string]string) (*Server, error) {
 	return newServer(configPath, usageLogPath, credentials, false)
 }
 
-func newServer(configPath, usageLogPath string, credentials map[string]string, allowKeychainCLIFallback bool) (http.Handler, error) {
+func newServer(configPath, usageLogPath string, credentials map[string]string, allowKeychainCLIFallback bool) (*Server, error) {
 	return newServerWithOfficialEndpoint(configPath, usageLogPath, credentials, allowKeychainCLIFallback, config.OfficialCodexBaseURL)
 }
 
-func newServerWithOfficialEndpoint(configPath, usageLogPath string, credentials map[string]string, allowKeychainCLIFallback bool, officialCodexBaseURL string) (http.Handler, error) {
+func newServerWithOfficialEndpoint(configPath, usageLogPath string, credentials map[string]string, allowKeychainCLIFallback bool, officialCodexBaseURL string) (*Server, error) {
 	credentialCopy := make(map[string]string, len(credentials))
 	for reference, value := range credentials {
 		credentialCopy[reference] = value
@@ -121,7 +126,68 @@ func newServerWithOfficialEndpoint(configPath, usageLogPath string, credentials 
 	mux.HandleFunc("GET /v1/responses", s.responsesWebSocket)
 	mux.HandleFunc("POST /v1/responses", s.responses)
 	mux.HandleFunc("POST /v1/responses/compact", s.officialResponsesCompact)
-	return mux, nil
+	s.handler = mux
+	return s, nil
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handler.ServeHTTP(w, r)
+}
+
+// EnterFallbackOfficialOnly preserves the listener for already-running Codex
+// clients while removing provider credential capability after the App owner
+// exits. Official passthrough remains available through its existing route.
+func (s *Server) EnterFallbackOfficialOnly() {
+	s.fallbackOfficialOnly.Store(true)
+	s.fallbackProviderTest.Store(false)
+	s.credentialMu.Lock()
+	for reference := range s.keychainCredentials {
+		delete(s.keychainCredentials, reference)
+	}
+	s.credentialMu.Unlock()
+}
+
+func (s *Server) EnterFallbackWithCredentials(credentials map[string]string) {
+	s.replaceRuntimeCredentials(credentials)
+	s.fallbackProviderTest.Store(true)
+	s.fallbackOfficialOnly.Store(true)
+}
+
+func (s *Server) EnterManaged(credentials map[string]string) {
+	s.replaceRuntimeCredentials(credentials)
+	s.fallbackProviderTest.Store(false)
+	s.fallbackOfficialOnly.Store(false)
+}
+
+func (s *Server) replaceRuntimeCredentials(credentials map[string]string) {
+	replacement := make(map[string]string, len(credentials))
+	for reference, value := range credentials {
+		replacement[reference] = value
+	}
+	s.credentialMu.Lock()
+	for reference := range s.keychainCredentials {
+		delete(s.keychainCredentials, reference)
+	}
+	for reference, value := range replacement {
+		s.keychainCredentials[reference] = value
+	}
+	s.credentialMu.Unlock()
+}
+
+func (s *Server) IsOfficialFallback() bool {
+	return s.fallbackOfficialOnly.Load()
+}
+
+func (s *Server) providerRouteUnavailable(model string) bool {
+	if !s.fallbackOfficialOnly.Load() {
+		return false
+	}
+	_, _, ok := s.providerForModel(model)
+	return ok
+}
+
+func fallbackProviderError() map[string]any {
+	return errorBody("restart_codex_required", "RelayKit was disabled. Restart Codex before using provider models.")
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -133,9 +199,14 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	if s.config.OfficialPassthrough != nil {
 		officialModelCount = len(s.config.OfficialPassthrough.Models)
 	}
+	mode := "managed"
+	if s.fallbackOfficialOnly.Load() {
+		mode = "official_fallback"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service":                "relaykit",
 		"status":                 "ok",
+		"mode":                   mode,
 		"provider_count":         len(s.config.Providers),
 		"configured_model_count": configuredModelCount,
 		"official_model_count":   officialModelCount,
@@ -177,6 +248,10 @@ func (s *Server) providerTest(w http.ResponseWriter, r *http.Request) {
 	provider, model, ok := s.providerByIDAndModel(request.ProviderID, request.ModelID)
 	if !ok || !providerEnabled(provider) {
 		writeProviderTestResult(w, http.StatusBadRequest, request, "failed", "unknown_model")
+		return
+	}
+	if s.fallbackOfficialOnly.Load() && !s.fallbackProviderTest.Load() {
+		writeProviderTestResult(w, http.StatusConflict, request, "failed", "restart_codex_required")
 		return
 	}
 	if provider.APIFormat != config.APIFormatOpenAIResponses {
@@ -600,6 +675,13 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, body)
 		return
 	}
+	if s.providerRouteUnavailable(req.Model) {
+		if provider, _, ok := s.providerForModel(req.Model); ok {
+			s.recordFailedUsage(provider.ID, req.Model, "restart_codex_required", http.StatusConflict, start, "responses_http")
+		}
+		writeJSON(w, http.StatusConflict, fallbackProviderError())
+		return
+	}
 	officialCompaction, officialCompactionModel, officialCompactionOK := s.observeOfficialCompactionTarget(req)
 	if model, ok := s.officialModelForModel(req.Model); ok && officialUsesCodexHome(*s.config.OfficialPassthrough) {
 		s.officialOpenAIResponses(w, r, rawRequest, req, *s.config.OfficialPassthrough, model, start, false)
@@ -843,6 +925,13 @@ func (s *Server) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 				_ = writeWebSocketJSON(rw.Writer, nativeResponsesErrorEvent("invalid_request_error"))
 				_ = writeWebSocketClose(rw.Writer)
 				return
+			}
+			if s.providerRouteUnavailable(req.Model) {
+				if provider, _, ok := s.providerForModel(req.Model); ok {
+					s.recordFailedUsage(provider.ID, req.Model, "restart_codex_required", http.StatusConflict, start, "responses_websocket")
+				}
+				_ = writeWebSocketFailedEvent(rw.Writer, req.Model, fallbackProviderError())
+				continue
 			}
 			officialCompaction, officialCompactionModel, officialCompactionOK := s.observeOfficialCompactionTarget(req)
 			requestCtx, cancelRequest := context.WithCancel(r.Context())
@@ -1724,7 +1813,10 @@ func (s *Server) credentialRefToken(ref config.CredentialRef) (string, error) {
 }
 
 func (s *Server) keychainCredential(reference string) (string, error) {
-	if token := s.keychainCredentials[reference]; token != "" {
+	s.credentialMu.RLock()
+	token := s.keychainCredentials[reference]
+	s.credentialMu.RUnlock()
+	if token != "" {
 		return token, nil
 	}
 	if !s.allowKeychainCLIFallback {

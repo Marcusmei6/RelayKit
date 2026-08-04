@@ -45,13 +45,19 @@ for forbidden_build_runtime_action in \
   '/Applications/' \
   '19777' \
   '18787' \
-  'LaunchAgents' \
   '.codex/' \
   'agent-local-gateway'; do
   if grep -Fq "${forbidden_build_runtime_action}" "${BUILD_SCRIPT}"; then
     fail "bundle build/package entry must not inspect or terminate App, port, LaunchAgent, or shared runtime state: ${forbidden_build_runtime_action}"
   fi
 done
+grep -Fq 'APP_LAUNCH_AGENTS="${APP_CONTENTS}/Library/LaunchAgents"' "${BUILD_SCRIPT}" ||
+  fail "bundle build must constrain the background agent to the App bundle"
+if grep -Eq '(\$HOME|\$\{HOME\}|~)/Library/LaunchAgents|Library/LaunchAgents/.+\\.plist' "${BUILD_SCRIPT}"; then
+  fail "bundle build must not write or inspect user LaunchAgents"
+fi
+grep -Fq 'cmp -s "${ROOT_DIR}/app/Resources/dev.relaykit.gateway.plist" "${GATEWAY_AGENT_PLIST}"' "${BUILD_SCRIPT}" ||
+  fail "bundle build must byte-verify the embedded background agent source"
 if grep -Eq '(^|[^[:alnum:]_])(kill|killall|pkill)([[:space:]]|$)' "${BUILD_SCRIPT}"; then
   fail "bundle build/package entry must not terminate processes"
 fi

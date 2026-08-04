@@ -303,69 +303,15 @@ func TestGatewayParentLossRejectsAuthAndSymlinkManagedPaths(t *testing.T) {
 	if err := os.WriteFile(authPath, []byte(`{"fixture":"RELAYKIT_FAKE_SENTINEL_DO_NOT_USE"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateManagedCodexRecoveryPaths(os.Getpid(), authPath, filepath.Join(dir, "state.json")); err == nil || !strings.Contains(err.Error(), "must not be auth.json") {
+	if err := validateManagedCodexRecoveryPaths(os.Getpid(), authPath, filepath.Join(dir, "state.json"), false); err == nil || !strings.Contains(err.Error(), "must not be auth.json") {
 		t.Fatalf("auth target error = %v", err)
 	}
 	link := filepath.Join(dir, "config.toml")
 	if err := os.Symlink(filepath.Join(dir, "target.toml"), link); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateManagedCodexRecoveryPaths(os.Getpid(), link, filepath.Join(dir, "state.json")); err == nil || !strings.Contains(err.Error(), "must not be a symbolic link") {
+	if err := validateManagedCodexRecoveryPaths(os.Getpid(), link, filepath.Join(dir, "state.json"), false); err == nil || !strings.Contains(err.Error(), "must not be a symbolic link") {
 		t.Fatalf("symlink target error = %v", err)
-	}
-}
-
-func TestGatewayParentLossRestoresManagedRouteBeforeStopping(t *testing.T) {
-	if os.Getenv("RELAYKIT_TEST_PARENT") == "restore" {
-		time.Sleep(300 * time.Millisecond)
-		os.Exit(0)
-	}
-
-	parent := exec.Command(os.Args[0], "-test.run=^TestGatewayParentLossRestoresManagedRouteBeforeStopping$")
-	parent.Env = append(os.Environ(), "RELAYKIT_TEST_PARENT=restore")
-	if err := parent.Start(); err != nil {
-		t.Fatal(err)
-	}
-
-	dir := t.TempDir()
-	target := filepath.Join(dir, "config.toml")
-	state := filepath.Join(dir, "state.json")
-	original := []byte("model = \"keep\"\n")
-	if err := os.WriteFile(target, original, 0600); err != nil {
-		t.Fatal(err)
-	}
-	managedBaseURL := "http://" + randomLoopbackAddress(t) + "/v1"
-	if code := run([]string{"enable-codex-config", "-target", target, "-catalog", filepath.Join(dir, "catalog.json"), "-state", state, "-base-url", managedBaseURL}, io.Discard, io.Discard); code != 0 {
-		t.Fatal("could not create managed route")
-	}
-	configPath := writeGatewayConfig(t)
-	listenAddress := randomLoopbackAddress(t)
-	usagePath := filepath.Join(t.TempDir(), "usage.jsonl")
-	done := make(chan error, 1)
-	go func() {
-		done <- runServer([]string{
-			"-listen", listenAddress,
-			"-config", configPath,
-			"-usage-log", usagePath,
-			"-parent-pid", strconv.Itoa(parent.Process.Pid),
-			"-managed-codex-target", target,
-			"-managed-codex-state", state,
-		}, strings.NewReader(""), io.Discard)
-	}()
-	if err := parent.Wait(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("runServer returned %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("gateway did not stop after parent exited")
-	}
-	got, err := os.ReadFile(target)
-	if err != nil || string(got) != string(original) {
-		t.Fatalf("managed route was not restored: %q, %v", got, err)
 	}
 }
 
