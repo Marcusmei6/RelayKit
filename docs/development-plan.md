@@ -396,7 +396,7 @@ Status: source tooling implemented with focused local contracts; Build 17 distri
 
 ## Phase 7.17: P0 Two-Epoch Data Plane Lifecycle
 
-Status: source implementation is committed through `aa3dddd`; focused/full source validation, the random-port eight-case fault matrix, all six hosted checks, and the live isolated launchd proof pass. Independent Test/CR, Build 18, and installed same-Codex E2E remain pending.
+Status: source implementation is committed through `7e90c63`; focused/full source validation, the random-port eight-case fault matrix, all six hosted checks, and the five-case live isolated launchd proof pass. Independent Test/CR, Build 18, and installed same-Codex E2E remain pending.
 
 - Build 17 (`0.1.6` build `17`, source `cc0fa013...`, zip SHA-256 `41e4d4fc...`) is signed, notarized, stapled, Gatekeeper-accepted, and immutable, but it remains uninstalled and is ineligible as the final candidate because it predates this lifecycle fix.
 - Restoring the managed Codex fields creates a new disk-config epoch for future clients. It does not reconfigure an already-running Codex process that cached `19777`.
@@ -405,9 +405,10 @@ Status: source implementation is committed through `aa3dddd`; focused/full sourc
 - A disabled-but-running App may adopt fallback with credentials only so the App's explicit provider-test endpoint remains usable. Codex provider routes remain blocked.
 - Helper crash is restartable without leaving an enabled route pointed at a missing listener. App loss and simultaneous App/helper loss use field-level recovery plus socket activation.
 - The launchd helper may start before App adoption only when socket activation, an owner-only control token, and a positive unowned-recovery timer are all configured. Direct helpers still require a live parent PID. The reviewed launchd plist uses a one-second nonzero throttle so repeated helper loss does not exceed the cached client's single-request recovery budget.
-- Short idle and WebSocket disconnect are not retirement signals. The fallback service is observable and controlled by launchd; logout removes the GUI-domain process, and the next login reconciles any stale managed route before future clients rely on it.
+- The App takes an exclusive advisory lease on the existing 0600 control-token file before service registration. A helper replacement that sees the live lease preserves the enabled route for App adoption. A launchd helper with no owner lease restores stale managed fields before serving, so a new login epoch does not wait on the adoption timer.
+- Short idle and WebSocket disconnect are not retirement signals. The fallback service is observable and controlled by launchd; logout removes both the GUI-domain owner lease and process, and the next launchd start reconciles stale managed fields before accepting a client.
 - Local verification uses random ports and an isolated fixture. The live launchd proof uses a unique temporary label and never writes user LaunchAgents or touches global Codex auth/config, installed `19777`, or `18787`.
-- Hosted run `30944489758` proves `graceful_release`, `app_loss`, `helper_crash`, and `app_helper_loss` on clean product commit `aa3dddd`, including cached requests, config restoration/new-client direct routing, helper restart, global guards, and cleanup.
+- Hosted run `30951938542` proves `graceful_release`, `app_loss`, `unowned_restart`, `helper_crash`, and `app_helper_loss` on clean product commit `7e90c63`, including cached requests, pre-listener unowned restoration/new-client direct routing, helper restart, global guards, and cleanup. Fast Gates `30951938497`, Protocol Contract `30951938559`, and macOS App `30951938585` passed on the same SHA.
 - Upgrade activation is separate from byte installation. A session currently using the old `19777` data plane must not quit that old App from within itself. Install new bytes from an independent control channel, keep the old data plane alive for the cached epoch, and activate the new App only after that epoch is retired or handed off.
 
 ## Release Gate
