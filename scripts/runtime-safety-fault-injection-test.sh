@@ -72,6 +72,7 @@ require_source 'harness_sha'
 require_source 'harness_test_sha'
 require_source 'safe_outcome'
 require_source 'restored_fallback_is_healthy'
+require_source 'direct_graceful_quit_is_safe'
 require_source 'official_fallback'
 require_source 'record_cached_before'
 require_source 'record_cached_after'
@@ -111,6 +112,28 @@ fi
 if grep -Fq 'graceful_config_path' "${HARNESS}"; then
   fail "graceful quit must exercise the product lifecycle"
 fi
+
+direct_graceful_predicate="$(sed -n '/^direct_graceful_quit_is_safe() {$/,/^}$/p' "${HARNESS}")"
+[[ "${direct_graceful_predicate}" == *'! target_points_to_run_base'* ]] \
+  || fail "direct graceful quit must require restored config"
+[[ "${direct_graceful_predicate}" == *'! kill -0 "${HELPER_PID}" 2>/dev/null'* ]] \
+  || fail "direct graceful quit must require the recorded helper PID to be gone"
+[[ "${direct_graceful_predicate}" == *'runtime_port_is_free'* ]] \
+  || fail "direct graceful quit must require the isolated runtime port to be free"
+
+graceful_quit_source="$(sed -n '/^run_graceful_quit() {$/,/^}$/p' "${HARNESS}")"
+[[ "${graceful_quit_source}" == *'direct_graceful_quit_is_safe'* ]] \
+  || fail "graceful quit must poll the direct-helper-stopped predicate"
+[[ "${graceful_quit_source}" == *'outcome="restored_config_with_direct_helper_stopped"'* ]] \
+  || fail "graceful quit must record the direct-helper-stopped outcome"
+[[ "${graceful_quit_source}" != *'restored_fallback_is_healthy'* ]] \
+  || fail "graceful quit must not accept the background fallback predicate"
+[[ "${graceful_quit_source}" != *'record_cached_after'* ]] \
+  || fail "graceful quit must not request through the stopped direct helper"
+[[ "${graceful_quit_source}" == *'record_cached_before'* ]] \
+  || fail "graceful quit must preserve the pre-quit cached request"
+[[ "${graceful_quit_source}" == *'record_new_direct_after_restore'* ]] \
+  || fail "graceful quit must preserve the post-restore direct request"
 
 [[ "$(${HARNESS} --evaluate-safety false true true)" == "restored_config_with_fallback_listener" ]] \
   || fail "restored config must retain the fallback data plane for cached clients"

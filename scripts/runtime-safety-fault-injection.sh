@@ -296,6 +296,13 @@ restored_fallback_is_healthy() {
     [[ "$(gateway_mode 2>/dev/null || true)" == "official_fallback" ]]
 }
 
+direct_graceful_quit_is_safe() {
+  ! target_points_to_run_base &&
+    [[ -n "${HELPER_PID}" ]] &&
+    ! kill -0 "${HELPER_PID}" 2>/dev/null &&
+    runtime_port_is_free
+}
+
 send_cached_official_request() {
   local response
   response="$(curl -fsS --max-time 3 \
@@ -704,14 +711,13 @@ run_graceful_quit() {
     || case_fail graceful_quit_request_failed
   wait_for_pid_exit "${APP_PID}" 100 || case_fail graceful_quit_app_survived
   for ((index = 0; index < 120; index++)); do
-    if restored_fallback_is_healthy; then
-      outcome="restored_config_with_fallback_listener"
+    if direct_graceful_quit_is_safe; then
+      outcome="restored_config_with_direct_helper_stopped"
       break
     fi
     sleep 0.1
   done
   [[ -n "${outcome:-}" ]] || case_fail graceful_quit_unsafe
-  record_cached_after || case_fail graceful_quit_cached_request_after_failed
   record_new_direct_after_restore || case_fail graceful_quit_new_direct_request_failed
   stop_case_processes || case_fail graceful_quit_cleanup_failed
   case_pass product_lifecycle "${outcome}"
