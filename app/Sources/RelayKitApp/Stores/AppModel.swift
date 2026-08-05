@@ -103,6 +103,7 @@ final class AppModel: ObservableObject {
     private var managedRouteEpochObserved = false
     private var gatewayMustSurviveTermination = false
     private var gatewayServiceMonitor: Task<Void, Never>?
+    private var managedRouteStatusError: Error?
 
     init(endpoint: RelayKitRuntimeEndpoint) {
         runtimeEndpoint = endpoint
@@ -118,7 +119,13 @@ final class AppModel: ObservableObject {
         codexTargetPath = RelayKitPaths.defaultCodexConfigPath()
         appearanceMode = settingsStore.appearanceMode
         launchAtLoginRequested = settingsStore.launchAtLoginRequested
-        refreshCodexConnectionStatus()
+        do {
+            _ = try acquireControlOwnerLease()
+            refreshCodexConnectionStatus()
+        } catch {
+            managedRouteStatusError = error
+            codexConnectionStatus = "Needs attention · gateway control owner lease unavailable"
+        }
         refreshLaunchAtLoginStatus()
         refreshConfiguredProviders()
         loadOfficialAuthStateFromDisk()
@@ -151,7 +158,22 @@ final class AppModel: ObservableObject {
     }
 
     func startGatewayOnOrdinaryLaunch() async {
+        do {
+            _ = try acquireControlOwnerLease()
+        } catch {
+            managedRouteStatusError = error
+            runtimeSafetyState = .atRisk
+            gatewayStatus = "stopped"
+            message = "RelayKit could not acquire the gateway control owner lease. Resolve the integration before changing the route."
+            return
+        }
         let managedRouteStatus = managedCodexRouteStatus()
+        if managedRouteStatusError != nil {
+            runtimeSafetyState = .atRisk
+            gatewayStatus = "stopped"
+            message = "RelayKit could not acquire the gateway control owner lease. Resolve the integration before changing the route."
+            return
+        }
         if managedRouteStatus != "enabled", codexIntegrationHasManagedState, managedRouteStatus != "disabled" {
             runtimeSafetyState = .atRisk
             gatewayStatus = "stopped"
@@ -195,6 +217,9 @@ final class AppModel: ObservableObject {
             let controlTokenPath = try ensureGatewayControlToken()
             try gateway.holdControlOwnerLease(at: controlTokenPath)
             let managedRouteEnabled = managedCodexRouteStatus() == "enabled"
+            if let managedRouteStatusError {
+                throw managedRouteStatusError
+            }
             let resolvedOfficialCatalog = officialCatalog ?? (officialSnapshot.isConnected ? lastOfficialCatalog : nil)
             lastOfficialCatalog = resolvedOfficialCatalog
             let runtimeConfig = try makeGatewayRuntimeConfig(officialCatalog: resolvedOfficialCatalog)
@@ -208,6 +233,7 @@ final class AppModel: ObservableObject {
                 usageLogPath: usageLogPath,
                 credentialHandoff: credentialHandoff,
                 controlTokenPath: controlTokenPath,
+                runtimeConfigSHA256: runtimeConfig.sha256,
                 launchdManaged: launchdManaged,
                 managedRouteEnabled: managedRouteEnabled,
                 parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
@@ -233,6 +259,7 @@ final class AppModel: ObservableObject {
         gatewayServiceMonitor?.cancel()
         gatewayServiceMonitor = nil
         if managedRouteEpochObserved, gateway.isRunning {
+            let preservesManagedService = gateway.usesManagedService
             do {
                 try gateway.leaveRunningForFallback()
             } catch {
@@ -242,8 +269,10 @@ final class AppModel: ObservableObject {
                 return
             }
             gatewayStartedAt = nil
-            gatewayStatus = "official fallback"
-            message = "RelayKit is disabled for future Codex launches. Restart existing Codex sessions before retiring the fallback gateway."
+            gatewayStatus = preservesManagedService ? "official fallback" : "stopped"
+            message = preservesManagedService
+                ? "RelayKit is disabled for future Codex launches. Restart existing Codex sessions before retiring the fallback gateway."
+                : "Gateway stopped"
             refreshOfficialGatewayProjection()
             return
         }
@@ -258,9 +287,10 @@ final class AppModel: ObservableObject {
         gatewayServiceMonitor?.cancel()
         gatewayServiceMonitor = nil
         if gatewayMustSurviveTermination, gateway.isRunning {
+            let preservesManagedService = gateway.usesManagedService
             try? gateway.leaveRunningForFallback()
             gatewayStartedAt = nil
-            gatewayStatus = "official fallback"
+            gatewayStatus = preservesManagedService ? "official fallback" : "stopped"
             return
         }
         stopGateway()
@@ -270,6 +300,11 @@ final class AppModel: ObservableObject {
         gatewayServiceMonitor?.cancel()
         gatewayServiceMonitor = nil
         let routeWasEnabled = managedCodexRouteStatus() == "enabled"
+        if managedRouteStatusError != nil {
+            gatewayStatus = "error"
+            message = "RelayKit could not acquire the gateway control owner lease. Gateway restart was canceled."
+            return
+        }
         do {
             try gateway.restartDataPlane()
         } catch {
@@ -797,7 +832,8 @@ final class AppModel: ObservableObject {
             message = detail.isEmpty ? "RelayKit disabled for Codex. Restart Codex to restore its previous configuration." : "\(detail) Restart Codex to restore its previous configuration."
             recoveryRestartInFlight = false
             managedRouteEpochObserved = true
-            gatewayMustSurviveTermination = gateway.isRunning
+            let preservesManagedService = gateway.usesManagedService
+            gatewayMustSurviveTermination = preservesManagedService && gateway.isRunning
             gatewayServiceMonitor?.cancel()
             gatewayServiceMonitor = nil
             try gateway.leaveRunningForFallback()
@@ -810,11 +846,9 @@ final class AppModel: ObservableObject {
 
     func prepareForGracefulTermination() -> Bool {
         do {
-            let status = try gateway.codexConfigStatus(
-                binaryPath: gatewayBinaryPath,
-                target: RelayKitPaths.defaultCodexConfigPath(),
-                state: RelayKitPaths.codexConfigStatePath()
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let status = managedCodexRouteStatus(), managedRouteStatusError == nil else {
+                throw managedRouteStatusError ?? GatewayProcessError.commandFailed("gateway control owner lease is unavailable")
+            }
 
             switch status {
             case "enabled":
@@ -825,7 +859,7 @@ final class AppModel: ObservableObject {
                 )
                 recoveryRestartInFlight = false
                 managedRouteEpochObserved = true
-                gatewayMustSurviveTermination = gateway.isRunning
+                gatewayMustSurviveTermination = gateway.usesManagedService && gateway.isRunning
                 applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: false))
                 refreshCodexConnectionStatus()
                 return true
@@ -903,11 +937,7 @@ final class AppModel: ObservableObject {
 
     func refreshCodexConnectionStatus() {
         do {
-            let status = try gateway.codexConfigStatus(
-                binaryPath: gatewayBinaryPath,
-                target: RelayKitPaths.defaultCodexConfigPath(),
-                state: RelayKitPaths.codexConfigStatePath()
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            let status = try readManagedCodexRouteStatus()
             switch status {
             case "enabled": codexConnectionStatus = "Enabled · restart Codex to apply changes"
             case "drifted": codexConnectionStatus = "Needs attention · managed Codex settings changed"
@@ -1288,7 +1318,7 @@ final class AppModel: ObservableObject {
         return (baseURL, keyURL, catalogURL)
     }
 
-    private func makeGatewayRuntimeConfig(officialCatalog: Data? = nil) throws -> (path: String, data: Data) {
+    private func makeGatewayRuntimeConfig(officialCatalog: Data? = nil) throws -> (path: String, data: Data, sha256: String) {
         let source = try providerConfigData()
         guard var root = try JSONSerialization.jsonObject(with: source) as? [String: Any] else {
             throw ProviderConfigError.invalid("Provider configuration must be a JSON object.")
@@ -1338,7 +1368,8 @@ final class AppModel: ObservableObject {
         try FileManager.default.createDirectory(at: runtimeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: runtimeURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeURL.path)
-        return (runtimeURL.path, data)
+        let sha256 = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return (runtimeURL.path, data, sha256)
     }
 
     private func reloadGatewayAfterProviderConfigChange() throws {
@@ -1405,7 +1436,7 @@ final class AppModel: ObservableObject {
 
     private func recoverUnexpectedManagedGatewayExit() async {
         gatewayStartedAt = nil
-        guard managedCodexRouteStatus() == "enabled" else {
+        guard managedCodexRouteStatus() == "enabled", managedRouteStatusError == nil else {
             runtimeSafetyState = codexIntegrationHasManagedState ? .atRisk : .disabled
             gatewayStatus = "stopped"
             message = runtimeSafetyState == .atRisk
@@ -1487,12 +1518,29 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func managedCodexRouteStatus() -> String? {
-        try? gateway.codexConfigStatus(
+    private func readManagedCodexRouteStatus() throws -> String {
+        _ = try acquireControlOwnerLease()
+        return try gateway.codexConfigStatus(
             binaryPath: gatewayBinaryPath,
             target: RelayKitPaths.defaultCodexConfigPath(),
             state: RelayKitPaths.codexConfigStatePath()
         ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func acquireControlOwnerLease() throws -> String {
+        let controlTokenPath = try ensureGatewayControlToken()
+        try gateway.holdControlOwnerLease(at: controlTokenPath)
+        return controlTokenPath
+    }
+
+    private func managedCodexRouteStatus() -> String? {
+        do {
+            managedRouteStatusError = nil
+            return try readManagedCodexRouteStatus()
+        } catch {
+            managedRouteStatusError = error
+            return nil
+        }
     }
 
     @discardableResult

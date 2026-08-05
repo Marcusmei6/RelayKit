@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -34,6 +36,7 @@ type Server struct {
 	client                   *http.Client
 	handler                  http.Handler
 	usageLogPath             string
+	runtimeConfigSHA256      string
 	credentialMu             sync.RWMutex
 	keychainCredentials      map[string]string
 	allowKeychainCLIFallback bool
@@ -102,11 +105,17 @@ func newServerWithOfficialEndpoint(configPath, usageLogPath string, credentials 
 	}
 	s.usageLogPath = usageLogPath
 	if configPath != "" {
-		cfg, err := config.Load(configPath)
+		body, err := os.ReadFile(configPath)
+		if err != nil {
+			return nil, &config.Error{Code: config.CodeReadError, Err: err}
+		}
+		cfg, err := config.LoadBytes(body)
 		if err != nil {
 			return nil, err
 		}
 		s.config = cfg
+		digest := sha256.Sum256(body)
+		s.runtimeConfigSHA256 = hex.EncodeToString(digest[:])
 	}
 	if s.config == nil {
 		s.config = &config.Config{
@@ -118,6 +127,12 @@ func newServerWithOfficialEndpoint(configPath, usageLogPath string, credentials 
 				Models:    []config.Model{{ID: "relaykit-demo"}},
 			}},
 		}
+		body, err := json.Marshal(s.config)
+		if err != nil {
+			return nil, err
+		}
+		digest := sha256.Sum256(body)
+		s.runtimeConfigSHA256 = hex.EncodeToString(digest[:])
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -128,6 +143,12 @@ func newServerWithOfficialEndpoint(configPath, usageLogPath string, credentials 
 	mux.HandleFunc("POST /v1/responses/compact", s.officialResponsesCompact)
 	s.handler = mux
 	return s, nil
+}
+
+// RuntimeConfigSHA256 is the lowercase SHA-256 digest of the exact config
+// bytes parsed into this server's in-memory runtime configuration.
+func (s *Server) RuntimeConfigSHA256() string {
+	return s.runtimeConfigSHA256
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -413,6 +434,13 @@ func (s *Server) catalogModels() ([]map[string]any, map[string]any) {
 	hidden := make([]map[string]any, 0)
 	for _, candidate := range candidates {
 		configured = append(configured, map[string]any{"id": candidate.model.ID})
+		if s.fallbackOfficialOnly.Load() && candidate.provider.ID != "" {
+			// Official fallback keeps the listener available for cached Official
+			// clients, but must not discover or probe provider routes from the
+			// catalog endpoint. Keep the configured entry redacted and inert.
+			data = append(data, candidate.entry)
+			continue
+		}
 		if candidate.provider.ID == "" || !shouldProbeCatalogModel(candidate.provider) {
 			data = append(data, candidate.entry)
 			continue

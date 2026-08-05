@@ -280,6 +280,92 @@ func TestParseParentPIDRequiresPositiveInteger(t *testing.T) {
 	}
 }
 
+func TestOwnerStateRejectsStaleQueuedLossAfterNewAdoption(t *testing.T) {
+	state := newOwnerState(101, true)
+	loss, ok := state.markOwnerLost(101)
+	if !ok {
+		t.Fatal("owner loss was not recorded")
+	}
+	if !state.beginAdopt(202) {
+		t.Fatal("new owner could not adopt after old owner loss")
+	}
+	state.adoptLocked(202, true)
+	state.endTransition()
+	if state.beginRecovery(loss) {
+		state.endTransition()
+		t.Fatal("stale owner loss was allowed to recover a newer epoch")
+	}
+}
+
+func TestOwnerStateAllowsRecoveryForRealOwnerLoss(t *testing.T) {
+	state := newOwnerState(101, true)
+	loss, ok := state.markOwnerLost(101)
+	if !ok || !state.beginRecovery(loss) {
+		t.Fatalf("real owner loss was not eligible: ok=%t loss=%+v", ok, loss)
+	}
+	if !state.managedEpochObservedLocked() {
+		state.endTransition()
+		t.Fatal("managed epoch observation was lost during recovery")
+	}
+	state.endTransition()
+}
+
+func TestOwnerStateClearsOwnerCapabilityBeforeNextAdoption(t *testing.T) {
+	state := newOwnerState(101, true)
+	cleared := false
+	loss, ok := state.markOwnerLostAndClear(101, func() {
+		cleared = true
+	})
+	if !ok || loss.generation == 0 {
+		t.Fatalf("owner loss was not recorded: ok=%t loss=%+v", ok, loss)
+	}
+	if !cleared {
+		t.Fatal("owner capability was not cleared during the loss transition")
+	}
+	if !state.beginAdopt(202) {
+		t.Fatal("replacement owner could not adopt after capability clear")
+	}
+	state.adoptLocked(202, true)
+	state.endTransition()
+	if state.beginRecovery(loss) {
+		state.endTransition()
+		t.Fatal("old loss generation remained eligible after replacement adoption")
+	}
+}
+
+func TestOwnerRecoveryRetryKeepsOnePendingGeneration(t *testing.T) {
+	var retry ownerRecoveryRetry
+	loss := ownerLoss{pid: 101, generation: 2}
+	retry.arm(loss)
+	firstTimer := retry.timer
+	retry.arm(loss)
+	if retry.timer != firstTimer {
+		t.Fatal("duplicate owner-loss recovery created another retry timer")
+	}
+	if retry.pending == nil || *retry.pending != loss {
+		t.Fatalf("pending owner loss = %+v, want %+v", retry.pending, loss)
+	}
+	retry.clear()
+	if retry.pending != nil || retry.timer != nil || retry.channel != nil {
+		t.Fatalf("retry state was not cancelled cleanly: %+v", retry)
+	}
+}
+
+func TestRuntimeConfigSHA256ValidationIsLowercaseHex(t *testing.T) {
+	valid := strings.Repeat("a", 64)
+	for value, want := range map[string]bool{
+		valid:                             true,
+		strings.Repeat("A", 64):           false,
+		strings.Repeat("a", 63):           false,
+		strings.Repeat("g", 64):           false,
+		strings.Repeat("0", 64) + "extra": false,
+	} {
+		if got := validRuntimeConfigSHA256(value); got != want {
+			t.Fatalf("validRuntimeConfigSHA256(%q) = %t, want %t", value, got, want)
+		}
+	}
+}
+
 func TestGatewayParentLossRejectsIncompleteManagedRouteFlags(t *testing.T) {
 	configPath := writeGatewayConfig(t)
 	target := filepath.Join(t.TempDir(), "config.toml")

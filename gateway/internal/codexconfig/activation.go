@@ -316,6 +316,9 @@ func RecoveryDecisionForParentLoss(targetPath, statePath string) (RecoveryDecisi
 func RecoveryDecisionForParentLossWithContinuity(targetPath, statePath string, continuityRequired bool) (RecoveryDecision, error) {
 	status, err := IntegrationStatus(targetPath, statePath)
 	if err != nil {
+		if continuityRequired {
+			return RecoveryRetainListener, err
+		}
 		return RecoveryRetainListener, fmt.Errorf("inspect managed Codex route: %w", err)
 	}
 	switch status {
@@ -331,6 +334,12 @@ func RecoveryDecisionForParentLossWithContinuity(targetPath, statePath string, c
 				return RecoveryRetainListener, nil
 			}
 			return RecoveryShutdown, nil
+		}
+		if continuityRequired {
+			// Once a managed epoch has been observed, cached clients may still
+			// be bound to the loopback listener. Preserve that listener even when
+			// cleanup fails, and return the original cleanup error unchanged.
+			return RecoveryRetainListener, err
 		}
 		stillManaged, proofErr := managedBaseURLStillConfigured(targetPath, statePath)
 		if proofErr != nil {

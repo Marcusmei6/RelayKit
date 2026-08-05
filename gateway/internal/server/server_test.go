@@ -3,8 +3,10 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +27,23 @@ import (
 
 	"relaykit/gateway/internal/config"
 )
+
+func TestRuntimeConfigSHA256BindsExactLoadedBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runtime.json")
+	body := []byte(`{"providers":[{"id":"digest","name":"Digest Fixture","base_url":"http://127.0.0.1:11434/v1","api_format":"openai_chat","models":[{"id":"digest-model"}]}]}`)
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(body)
+	if got := h.RuntimeConfigSHA256(); got != hex.EncodeToString(expected[:]) {
+		t.Fatalf("runtime config digest = %q, want %q", got, hex.EncodeToString(expected[:]))
+	}
+}
 
 func testBearerCredential(parts ...string) string {
 	return "Bearer " + strings.Join(parts, "-")

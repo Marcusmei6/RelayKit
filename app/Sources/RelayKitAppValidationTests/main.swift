@@ -1001,8 +1001,10 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
     guard let fallbackStart = gateway.range(of: "func leaveRunningForFallback() throws"),
           let fallbackEnd = gateway.range(of: "func enableCodexConfig", range: fallbackStart.upperBound..<gateway.endIndex),
           let fallbackBody = gateway.range(of: "process.terminationHandler = nil", range: fallbackStart.upperBound..<fallbackEnd.lowerBound),
-          !gateway[fallbackStart.lowerBound..<fallbackEnd.lowerBound].contains("terminateAndReap") else {
-        fatalError("fallback handoff must detach App ownership without terminating the data plane")
+          gateway[fallbackStart.lowerBound..<fallbackEnd.lowerBound].contains("if !usesManagedService"),
+          gateway[fallbackStart.lowerBound..<fallbackEnd.lowerBound].contains("terminateAndReap(process)"),
+          gateway[fallbackStart.lowerBound..<fallbackEnd.lowerBound].contains("requestAdoptedGatewayRelease()") else {
+        fatalError("fallback must terminate direct helpers and release only managed services")
     }
     _ = fallbackBody
     guard let restartStart = appModel.range(of: "func restartGateway()"),
@@ -1037,6 +1039,72 @@ func expectCodexCatalogProcessDrainContract() throws {
     guard source.contains(".local/bin/codex"),
           source.contains("FileManager.default.isExecutableFile") else {
         fatalError("Codex catalog builder must use a controlled installed-CLI fallback")
+    }
+}
+
+func expectBuild18AppLifecycleRemediationContracts() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let gateway = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/GatewayProcess.swift"), encoding: .utf8)
+
+    for required in [
+        "private func acquireControlOwnerLease() throws -> String",
+        "try acquireControlOwnerLease()",
+        "SHA256.hash(data: data)",
+        "runtimeConfigSHA256: runtimeConfig.sha256",
+        "runtimeConfigSHA256: String = \"\"",
+        "-runtime-config-sha256",
+        "runtime_config_sha256=",
+        "requestAdoptedGatewayReplacement",
+        "var replacementRequested = false",
+        "if replacementRequested",
+        "status.runtimeConfigSHA256 != runtimeConfigSHA256",
+        "if !usesManagedService",
+        "terminateAndReap(process)",
+    ] {
+        if !appModel.contains(required) && !gateway.contains(required) {
+            fatalError("Build 18 App lifecycle contract missing \(required)")
+        }
+    }
+
+    guard let initializerStart = appModel.range(of: "    init(endpoint: RelayKitRuntimeEndpoint) {"),
+          let initializerEnd = appModel.range(of: "    func useTemporaryProviderConfigPath", range: initializerStart.upperBound..<appModel.endIndex) else {
+        fatalError("Build 18 initializer boundary is missing")
+    }
+    let initializer = appModel[initializerStart.lowerBound..<initializerEnd.lowerBound]
+    guard let initializerLease = initializer.range(of: "try acquireControlOwnerLease()"),
+          let initializerStatus = initializer.range(of: "refreshCodexConnectionStatus()"),
+          initializerLease.lowerBound < initializerStatus.lowerBound else {
+        fatalError("initializer must acquire the control owner lease before status")
+    }
+
+    guard let ordinaryStart = appModel.range(of: "func startGatewayOnOrdinaryLaunch() async"),
+          let ordinaryEnd = appModel.range(of: "    func startGateway(officialCatalog:", range: ordinaryStart.upperBound..<appModel.endIndex) else {
+        fatalError("ordinary-launch lifecycle boundary is missing")
+    }
+    let ordinary = appModel[ordinaryStart.lowerBound..<ordinaryEnd.lowerBound]
+    guard let ordinaryLease = ordinary.range(of: "try acquireControlOwnerLease()"),
+          let ordinaryStatus = ordinary.range(of: "let managedRouteStatus = managedCodexRouteStatus()"),
+          ordinaryLease.lowerBound < ordinaryStatus.lowerBound else {
+        fatalError("ordinary launch must acquire the control owner lease before route status")
+    }
+
+    if appModel.components(separatedBy: "gateway.codexConfigStatus(").count - 1 != 1 {
+        fatalError("managed Codex status must have one lease-guarded access point")
+    }
+
+    guard let adoptStart = gateway.range(of: "private func adoptRunningGateway("),
+          let adoptEnd = gateway.range(of: "    private func clearControlState()", range: adoptStart.upperBound..<gateway.endIndex) else {
+        fatalError("gateway adoption lifecycle boundary is missing")
+    }
+    let adopt = gateway[adoptStart.lowerBound..<adoptEnd.lowerBound]
+    guard let mismatch = adopt.range(of: "status.runtimeConfigSHA256 != runtimeConfigSHA256"),
+          let handoff = adopt.range(of: "standardInput: credentialHandoff"),
+          mismatch.lowerBound < handoff.lowerBound else {
+        fatalError("gateway must verify digest before sending credentials")
+    }
+    if adopt.components(separatedBy: "requestAdoptedGatewayReplacement").count - 1 != 1 {
+        fatalError("gateway replacement must remain a single bounded request path")
     }
 }
 
@@ -1958,13 +2026,13 @@ func expectGracefulTerminationRestoresCodexRouteBeforeStoppingGateway() throws {
     let app = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift"), encoding: .utf8)
 
     guard let shutdownStart = appModel.range(of: "func prepareForGracefulTermination() -> Bool"),
-          let statusStart = appModel.range(of: "gateway.codexConfigStatus(", range: shutdownStart.upperBound..<appModel.endIndex),
+          let statusStart = appModel.range(of: "managedCodexRouteStatus()", range: shutdownStart.upperBound..<appModel.endIndex),
           let disableStart = appModel.range(of: "gateway.disableCodexConfig(", range: statusStart.upperBound..<appModel.endIndex),
           statusStart.lowerBound < disableStart.lowerBound else {
         fatalError("graceful termination must check guarded Codex state before guarded restoration")
     }
     let shutdown = appModel[shutdownStart.lowerBound..<appModel.endIndex]
-    for required in ["case \"enabled\"", "case \"disabled\"", "case \"drifted\"", "RelayKitPaths.defaultCodexConfigPath()", "RelayKitPaths.codexConfigStatePath()", "gatewayMustSurviveTermination = gateway.isRunning", "managedRouteEpochObserved && gateway.isRunning"] {
+    for required in ["case \"enabled\"", "case \"disabled\"", "case \"drifted\"", "RelayKitPaths.defaultCodexConfigPath()", "RelayKitPaths.codexConfigStatePath()", "gatewayMustSurviveTermination = gateway.usesManagedService && gateway.isRunning", "managedRouteEpochObserved && gateway.isRunning"] {
         if !shutdown.contains(required) {
             fatalError("graceful termination guard is missing \(required)")
         }
@@ -2017,6 +2085,7 @@ try expectCodexCatalogMerge()
 expectRuntimeSafetyStateContracts()
 try expectRuntimeSafetyEndpointContract()
 try expectRuntimeSafetyLifecycleSourceContracts()
+try expectBuild18AppLifecycleRemediationContracts()
 try expectCodexCatalogProcessDrainContract()
 try expectCredentialRefContract()
 try expectCapabilityContract()

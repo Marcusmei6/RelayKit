@@ -7,6 +7,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -24,7 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 
@@ -339,16 +340,218 @@ type credentialHandoff struct {
 }
 
 type gatewayControlRequest struct {
-	Version      int               `json:"version"`
-	Action       string            `json:"action"`
-	ParentPID    int               `json:"parent_pid,omitempty"`
-	RouteEnabled bool              `json:"route_enabled,omitempty"`
-	Credentials  map[string]string `json:"credentials"`
+	Version             int               `json:"version"`
+	Action              string            `json:"action"`
+	ParentPID           int               `json:"parent_pid,omitempty"`
+	RouteEnabled        bool              `json:"route_enabled,omitempty"`
+	RuntimeConfigSHA256 string            `json:"runtime_config_sha256,omitempty"`
+	Credentials         map[string]string `json:"credentials"`
 }
 
 type gatewayControlResponse struct {
-	Status string `json:"status"`
-	Mode   string `json:"mode"`
+	Status              string `json:"status"`
+	Mode                string `json:"mode"`
+	RuntimeConfigSHA256 string `json:"runtime_config_sha256"`
+}
+
+type ownerLoss struct {
+	pid        int
+	generation uint64
+}
+
+type ownerState struct {
+	mu                   sync.Mutex
+	pid                  int
+	generation           uint64
+	managedEpochObserved bool
+}
+
+const ownerRecoveryRetryInterval = 250 * time.Millisecond
+
+// ownerRecoveryRetry owns the single retry timer for an unowned generation.
+// It is only touched by the runServer event loop, so retries cannot create
+// competing goroutines or timers.
+type ownerRecoveryRetry struct {
+	pending *ownerLoss
+	timer   *time.Timer
+	channel <-chan time.Time
+}
+
+func (r *ownerRecoveryRetry) arm(loss ownerLoss) {
+	if r.pending == nil || *r.pending != loss {
+		pending := loss
+		r.pending = &pending
+	}
+	if r.timer == nil {
+		r.timer = time.NewTimer(ownerRecoveryRetryInterval)
+		r.channel = r.timer.C
+		return
+	}
+	if r.channel != nil {
+		return
+	}
+	r.timer.Reset(ownerRecoveryRetryInterval)
+	r.channel = r.timer.C
+}
+
+func (r *ownerRecoveryRetry) take() (ownerLoss, bool) {
+	if r.channel == nil || r.pending == nil {
+		return ownerLoss{}, false
+	}
+	r.channel = nil
+	return *r.pending, true
+}
+
+func (r *ownerRecoveryRetry) clear() {
+	r.pending = nil
+	if r.timer == nil {
+		r.channel = nil
+		return
+	}
+	if !r.timer.Stop() {
+		select {
+		case <-r.timer.C:
+		default:
+		}
+	}
+	r.timer = nil
+	r.channel = nil
+}
+
+func newOwnerState(pid int, managedEpochObserved bool) *ownerState {
+	generation := uint64(0)
+	if pid > 0 || managedEpochObserved {
+		generation = 1
+	}
+	return &ownerState{pid: pid, generation: generation, managedEpochObserved: managedEpochObserved}
+}
+
+func (s *ownerState) snapshot() (int, uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pid, s.generation, s.managedEpochObserved
+}
+
+func (s *ownerState) markManagedEpoch() {
+	s.mu.Lock()
+	s.managedEpochObserved = true
+	s.mu.Unlock()
+}
+
+func (s *ownerState) adopt(pid int, routeEnabled bool) {
+	s.mu.Lock()
+	s.adoptLocked(pid, routeEnabled)
+	s.mu.Unlock()
+}
+
+func (s *ownerState) beginAdopt(pid int) bool {
+	s.mu.Lock()
+	if s.pid > 0 && s.pid != pid {
+		s.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (s *ownerState) adoptLocked(pid int, routeEnabled bool) {
+	s.generation++
+	s.pid = pid
+	if routeEnabled {
+		s.managedEpochObserved = true
+	}
+}
+
+func (s *ownerState) release(pid int) bool {
+	s.mu.Lock()
+	if !s.beginReleaseLocked(pid) {
+		s.mu.Unlock()
+		return false
+	}
+	s.finishReleaseLocked()
+	return true
+}
+
+func (s *ownerState) beginRelease(pid int) bool {
+	s.mu.Lock()
+	if !s.beginReleaseLocked(pid) {
+		s.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (s *ownerState) beginReleaseLocked(pid int) bool {
+	if s.pid != pid || pid <= 0 {
+		return false
+	}
+	return true
+}
+
+func (s *ownerState) finishReleaseLocked() {
+	s.pid = 0
+	s.generation++
+	s.mu.Unlock()
+}
+
+func (s *ownerState) markOwnerLost(pid int) (ownerLoss, bool) {
+	return s.markOwnerLostAndClear(pid, nil)
+}
+
+// markOwnerLostAndClear closes the old owner epoch while holding the same
+// generation lock used by adoption and recovery. The clear callback must
+// remove all owner-scoped capability before another epoch can adopt.
+func (s *ownerState) markOwnerLostAndClear(pid int, clear func()) (ownerLoss, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pid <= 0 || s.pid != pid {
+		return ownerLoss{}, false
+	}
+	s.pid = 0
+	s.generation++
+	if clear != nil {
+		clear()
+	}
+	return ownerLoss{pid: pid, generation: s.generation}, true
+}
+
+func (s *ownerState) unownedLoss() ownerLoss {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ownerLoss{generation: s.generation}
+}
+
+func (s *ownerState) recoveryEligible(event ownerLoss) bool {
+	s.mu.Lock()
+	eligible := s.pid == 0 && s.generation == event.generation
+	s.mu.Unlock()
+	return eligible
+}
+
+func (s *ownerState) beginRecovery(event ownerLoss) bool {
+	s.mu.Lock()
+	if s.pid != 0 || s.generation != event.generation {
+		s.mu.Unlock()
+		return false
+	}
+	return true
+
+}
+
+func (s *ownerState) beginUnownedReplace() bool {
+	s.mu.Lock()
+	if s.pid != 0 {
+		s.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (s *ownerState) endTransition() {
+	s.mu.Unlock()
+}
+
+func (s *ownerState) managedEpochObservedLocked() bool {
+	return s.managedEpochObserved
 }
 
 type gatewayControlEnvelope struct {
@@ -391,9 +594,10 @@ func gatewayControl(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	fs.SetOutput(stderr)
 	endpoint := fs.String("endpoint", "http://127.0.0.1:19777", "RelayKit loopback endpoint")
 	tokenPath := fs.String("token-file", "", "owner-only RelayKit control token path")
-	action := fs.String("action", "status", "status, adopt, release, or shutdown")
+	action := fs.String("action", "status", "status, adopt, replace, release, or shutdown")
 	parentPID := fs.Int("parent-pid", 0, "adopting App process ID")
 	routeEnabled := fs.Bool("route-enabled", true, "enable provider routes for an adopted managed Codex epoch")
+	runtimeConfigSHA256 := fs.String("runtime-config-sha256", "", "expected runtime-config SHA-256 digest")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -401,11 +605,11 @@ func gatewayControl(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "control token file is required")
 		return 2
 	}
-	if *action != "status" && *action != "adopt" && *action != "release" && *action != "shutdown" {
+	if *action != "status" && *action != "adopt" && *action != "replace" && *action != "release" && *action != "shutdown" {
 		fmt.Fprintln(stderr, "unsupported gateway control action")
 		return 2
 	}
-	if (*action == "adopt" || *action == "release" || *action == "shutdown") && *parentPID <= 0 {
+	if (*action == "adopt" || *action == "replace" || *action == "release" || *action == "shutdown") && *parentPID <= 0 {
 		fmt.Fprintln(stderr, "positive parent PID is required")
 		return 2
 	}
@@ -420,7 +624,13 @@ func gatewayControl(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "gateway control token is unavailable")
 		return 1
 	}
-	request := gatewayControlRequest{Version: 1, Action: *action, ParentPID: *parentPID, RouteEnabled: *routeEnabled}
+	request := gatewayControlRequest{
+		Version:             1,
+		Action:              *action,
+		ParentPID:           *parentPID,
+		RouteEnabled:        *routeEnabled,
+		RuntimeConfigSHA256: *runtimeConfigSHA256,
+	}
 	if *action == "adopt" {
 		handoff, readErr := readCredentialHandoff(stdin)
 		if readErr != nil {
@@ -475,6 +685,9 @@ func gatewayControl(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		return 1
 	}
 	fmt.Fprintf(stdout, "gateway control %s: %s\n", *action, result.Mode)
+	if result.RuntimeConfigSHA256 != "" {
+		fmt.Fprintf(stdout, "runtime_config_sha256=%s\n", result.RuntimeConfigSHA256)
+	}
 	return 0
 }
 
@@ -598,12 +811,40 @@ func validCredentialMap(credentials map[string]string) bool {
 	return true
 }
 
+func validRuntimeConfigSHA256(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func runtimeConfigDigest(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("runtime config path is unavailable")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:]), nil
+}
+
 func writeControlResponse(w http.ResponseWriter, status int, result string, handler *server.Server, token string) {
 	mode := "managed"
 	if handler.IsOfficialFallback() {
 		mode = "official_fallback"
 	}
-	plaintext, err := json.Marshal(gatewayControlResponse{Status: result, Mode: mode})
+	plaintext, err := json.Marshal(gatewayControlResponse{
+		Status:              result,
+		Mode:                mode,
+		RuntimeConfigSHA256: handler.RuntimeConfigSHA256(),
+	})
 	if err != nil {
 		http.Error(w, "control response unavailable", http.StatusInternalServerError)
 		return
@@ -705,13 +946,17 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	var handler *server.Server
 	var runtimeCredentials map[string]string
 	var err error
-	if *credentialStdin {
-		credentials, readErr := readCredentialHandoff(stdin)
-		if readErr != nil {
-			return readErr
+	if *credentialStdin || *appManaged {
+		if *credentialStdin {
+			credentials, readErr := readCredentialHandoff(stdin)
+			if readErr != nil {
+				return readErr
+			}
+			runtimeCredentials = credentials
 		}
-		runtimeCredentials = credentials
-		handler, err = server.NewWithUsageLogAndCredentials(*configPath, *usageLogPath, credentials)
+		// App-managed helpers are permanently handoff-only. In particular,
+		// they must never fall back to invoking the macOS Keychain CLI.
+		handler, err = server.NewWithUsageLogAndCredentials(*configPath, *usageLogPath, runtimeCredentials)
 	} else {
 		handler, err = server.NewWithUsageLog(*configPath, *usageLogPath)
 	}
@@ -724,20 +969,18 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		handler.EnterFallbackWithCredentials(runtimeCredentials)
 	}
 
-	var managedEpochObserved atomic.Bool
-	if *appManaged {
-		managedEpochObserved.Store(true)
-	}
+	managedEpochObserved := *appManaged
+	ownerState := newOwnerState(parentPID, managedEpochObserved)
 	if *managedCodexTarget != "" {
 		status, statusErr := codexconfig.IntegrationStatus(*managedCodexTarget, *managedCodexState)
 		if statusErr == nil && (status == codexconfig.StatusEnabled || status == codexconfig.StatusDrifted) {
-			managedEpochObserved.Store(true)
+			ownerState.markManagedEpoch()
 		}
 	}
 	if retain, recoveryErr := reconcileUnownedManagedRouteAtStartup(
 		*managedCodexTarget,
 		*managedCodexState,
-		backgroundManaged && managedEpochObserved.Load(),
+		backgroundManaged && func() bool { _, _, observed := ownerState.snapshot(); return observed }(),
 		appOwnerActive,
 	); retain {
 		handler.EnterFallbackOfficialOnly()
@@ -765,10 +1008,9 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		}
 	}
 	rootCtx, cancelRoot := context.WithCancel(context.Background())
-	var ownerPID atomic.Int64
-	ownerPID.Store(int64(parentPID))
-	ownerLost := make(chan int, 1)
+	ownerLost := make(chan ownerLoss, 1)
 	retireRequested := make(chan struct{}, 1)
+	var recoveryRetry ownerRecoveryRetry
 	rootHandler := http.Handler(handler)
 	if controlToken != "" {
 		controlMux := http.NewServeMux()
@@ -795,39 +1037,89 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 			case "status":
 				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
 			case "adopt":
+				if !validRuntimeConfigSHA256(request.RuntimeConfigSHA256) || request.RuntimeConfigSHA256 != handler.RuntimeConfigSHA256() {
+					writeControlResponse(w, http.StatusConflict, "runtime_config_mismatch", handler, controlToken)
+					return
+				}
 				if request.ParentPID <= 0 || !parentProcessAlive(request.ParentPID) || !validCredentialMap(request.Credentials) {
 					writeControlResponse(w, http.StatusBadRequest, "invalid_request", handler, controlToken)
 					return
 				}
-				if request.RouteEnabled {
-					handler.EnterManaged(request.Credentials)
-					managedEpochObserved.Store(true)
-				} else {
-					handler.EnterFallbackWithCredentials(request.Credentials)
-				}
-				ownerPID.Store(int64(request.ParentPID))
-				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
-			case "release":
-				if request.ParentPID <= 0 || int64(request.ParentPID) != ownerPID.Load() {
+				if !ownerState.beginAdopt(request.ParentPID) {
 					writeControlResponse(w, http.StatusConflict, "owner_mismatch", handler, controlToken)
 					return
 				}
+				if request.RouteEnabled {
+					handler.EnterManaged(request.Credentials)
+				} else {
+					handler.EnterFallbackWithCredentials(request.Credentials)
+				}
+				ownerState.adoptLocked(request.ParentPID, request.RouteEnabled)
+				ownerState.endTransition()
+				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
+			case "replace":
+				if !backgroundManaged {
+					writeControlResponse(w, http.StatusConflict, "background_helper_required", handler, controlToken)
+					return
+				}
+				if !validRuntimeConfigSHA256(request.RuntimeConfigSHA256) {
+					writeControlResponse(w, http.StatusConflict, "runtime_config_mismatch", handler, controlToken)
+					return
+				}
+				if !ownerState.beginUnownedReplace() {
+					writeControlResponse(w, http.StatusConflict, "owner_mismatch", handler, controlToken)
+					return
+				}
+				if !handler.IsOfficialFallback() {
+					ownerState.endTransition()
+					writeControlResponse(w, http.StatusConflict, "owner_mismatch", handler, controlToken)
+					return
+				}
+				if request.ParentPID <= 0 || !parentProcessAlive(request.ParentPID) {
+					ownerState.endTransition()
+					writeControlResponse(w, http.StatusConflict, "requester_unavailable", handler, controlToken)
+					return
+				}
+				diskDigest, digestErr := runtimeConfigDigest(*configPath)
+				if digestErr != nil || diskDigest != request.RuntimeConfigSHA256 {
+					ownerState.endTransition()
+					writeControlResponse(w, http.StatusConflict, "runtime_config_mismatch", handler, controlToken)
+					return
+				}
+				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
+				ownerState.endTransition()
+				select {
+				case retireRequested <- struct{}{}:
+				default:
+				}
+			case "release":
+				if !backgroundManaged {
+					writeControlResponse(w, http.StatusConflict, "direct_helper_release_forbidden", handler, controlToken)
+					return
+				}
+				if request.ParentPID <= 0 || !ownerState.beginRelease(request.ParentPID) {
+					writeControlResponse(w, http.StatusConflict, "owner_mismatch", handler, controlToken)
+					return
+				}
+				managedEpochObserved := ownerState.managedEpochObservedLocked()
 				if *managedCodexTarget != "" {
 					decision, recoveryErr := codexconfig.RecoveryDecisionForParentLossWithContinuity(
 						*managedCodexTarget,
 						*managedCodexState,
-						managedEpochObserved.Load(),
+						managedEpochObserved,
 					)
 					if decision != codexconfig.RecoveryRetainListener || recoveryErr != nil {
+						ownerState.endTransition()
 						writeControlResponse(w, http.StatusConflict, "route_restore_failed", handler, controlToken)
 						return
 					}
 				}
 				handler.EnterFallbackOfficialOnly()
-				ownerPID.Store(0)
+				ownerState.finishReleaseLocked()
 				writeControlResponse(w, http.StatusOK, "ok", handler, controlToken)
 			case "shutdown":
-				if request.ParentPID <= 0 || int64(request.ParentPID) != ownerPID.Load() {
+				currentOwner, _, _ := ownerState.snapshot()
+				if request.ParentPID <= 0 || request.ParentPID != currentOwner {
 					writeControlResponse(w, http.StatusConflict, "owner_mismatch", handler, controlToken)
 					return
 				}
@@ -867,19 +1159,24 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 				case <-rootCtx.Done():
 					return
 				case <-ticker.C:
-					currentOwner := int(ownerPID.Load())
+					currentOwner, _, _ := ownerState.snapshot()
 					if currentOwner <= 0 {
 						continue
 					}
-					if !managedEpochObserved.Load() && *managedCodexTarget != "" {
+					_, _, managedEpochObserved := ownerState.snapshot()
+					if !managedEpochObserved && *managedCodexTarget != "" {
 						status, statusErr := codexconfig.IntegrationStatus(*managedCodexTarget, *managedCodexState)
 						if statusErr == nil && (status == codexconfig.StatusEnabled || status == codexconfig.StatusDrifted) {
-							managedEpochObserved.Store(true)
+							ownerState.markManagedEpoch()
 						}
 					}
-					if !parentProcessAlive(currentOwner) && ownerPID.CompareAndSwap(int64(currentOwner), 0) {
+					if !parentProcessAlive(currentOwner) {
+						loss, marked := ownerState.markOwnerLostAndClear(currentOwner, handler.EnterFallbackOfficialOnly)
+						if !marked {
+							continue
+						}
 						select {
-						case ownerLost <- currentOwner:
+						case ownerLost <- loss:
 						case <-rootCtx.Done():
 							return
 						}
@@ -890,7 +1187,8 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	} else {
 		close(parentMonitorDone)
 	}
-	if *restoreUnownedAfter > 0 && managedEpochObserved.Load() && appOwnerActive {
+	_, _, managedEpochObserved = ownerState.snapshot()
+	if *restoreUnownedAfter > 0 && managedEpochObserved && appOwnerActive {
 		go func() {
 			timer := time.NewTimer(*restoreUnownedAfter)
 			defer timer.Stop()
@@ -898,9 +1196,10 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 			case <-rootCtx.Done():
 				return
 			case <-timer.C:
-				if ownerPID.Load() == 0 {
+				currentOwner, _, _ := ownerState.snapshot()
+				if currentOwner == 0 {
 					select {
-					case ownerLost <- 0:
+					case ownerLost <- ownerState.unownedLoss():
 					case <-rootCtx.Done():
 					}
 				}
@@ -908,6 +1207,7 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		}()
 	}
 	defer func() {
+		recoveryRetry.clear()
 		cancelRoot()
 		<-parentMonitorDone
 	}()
@@ -915,6 +1215,48 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(stop)
+
+	attemptOwnerLossRecovery := func(loss ownerLoss) bool {
+		if !ownerState.beginRecovery(loss) {
+			if recoveryRetry.pending != nil && *recoveryRetry.pending == loss {
+				recoveryRetry.clear()
+			}
+			return true
+		}
+		// Clear owner-scoped credentials before probing for a replacement lease.
+		// The owner-state lock remains held so adoption cannot race this cutover.
+		handler.EnterFallbackOfficialOnly()
+		if backgroundManaged {
+			active, lease, leaseErr := acquireControlTokenLeaseProbe(*controlTokenPath)
+			if lease != nil {
+				_ = lease.Close()
+			}
+			if leaseErr != nil || active {
+				ownerState.endTransition()
+				recoveryRetry.arm(loss)
+				return true
+			}
+		}
+		managedEpochObserved := ownerState.managedEpochObservedLocked()
+		if *managedCodexTarget != "" {
+			decision, recoveryErr := codexconfig.RecoveryDecisionForParentLossWithContinuity(
+				*managedCodexTarget,
+				*managedCodexState,
+				managedEpochObserved,
+			)
+			if decision == codexconfig.RecoveryRetainListener {
+				ownerState.endTransition()
+				recoveryRetry.clear()
+				if recoveryErr != nil {
+					log.Printf("parent process exited; gateway listener retained (At risk): managed route recovery was not fully verified")
+				}
+				return true
+			}
+		}
+		ownerState.endTransition()
+		recoveryRetry.clear()
+		return false
+	}
 
 	for {
 		select {
@@ -924,21 +1266,20 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 		case <-retireRequested:
 			log.Printf("shutting down after owner request")
 			goto shutdown
-		case <-ownerLost:
-			if *managedCodexTarget != "" {
-				decision, recoveryErr := codexconfig.RecoveryDecisionForParentLossWithContinuity(
-					*managedCodexTarget,
-					*managedCodexState,
-					managedEpochObserved.Load(),
-				)
-				if decision == codexconfig.RecoveryRetainListener {
-					handler.EnterFallbackOfficialOnly()
-					log.Printf("parent process exited; gateway listener retained (At risk): %v", recoveryErr)
-					continue
-				}
+		case loss := <-ownerLost:
+			if !attemptOwnerLossRecovery(loss) {
+				log.Printf("shutting down after parent process exited")
+				goto shutdown
 			}
-			log.Printf("shutting down after parent process exited")
-			goto shutdown
+		case <-recoveryRetry.channel:
+			loss, pending := recoveryRetry.take()
+			if !pending {
+				continue
+			}
+			if !attemptOwnerLossRecovery(loss) {
+				log.Printf("shutting down after parent process exited")
+				goto shutdown
+			}
 		case err := <-errCh:
 			if rootCtx.Err() != nil {
 				goto shutdown
@@ -951,6 +1292,7 @@ func runServer(args []string, stdin io.Reader, stderr io.Writer) error {
 	}
 
 shutdown:
+	recoveryRetry.clear()
 	cancelRoot()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

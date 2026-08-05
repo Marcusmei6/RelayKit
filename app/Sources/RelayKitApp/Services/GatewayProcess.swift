@@ -73,6 +73,7 @@ final class GatewayProcess {
         usageLogPath: String? = nil,
         credentialHandoff: Data,
         controlTokenPath: String = "",
+        runtimeConfigSHA256: String = "",
         launchdManaged: Bool = false,
         managedRouteEnabled: Bool = true,
         parentProcessIdentifier: Int32? = nil,
@@ -89,43 +90,53 @@ final class GatewayProcess {
         if (directProcessRunning || previouslyAdopted),
            let parentProcessIdentifier,
            parentProcessIdentifier > 0 {
-            guard adoptRunningGateway(
+            try adoptRunningGateway(
                 binaryPath: binaryPath,
                 credentialHandoff: credentialHandoff,
                 controlTokenPath: controlTokenPath,
+                runtimeConfigSHA256: runtimeConfigSHA256,
                 parentProcessIdentifier: parentProcessIdentifier,
                 managedRouteEnabled: managedRouteEnabled,
+                launchdManaged: launchdManaged && previouslyAdopted,
                 attempts: launchdManaged ? 20 : 1
-            ) else {
-                throw GatewayProcessError.commandFailed("RelayKit gateway could not update its route mode.")
-            }
+            )
             adoptedBackgroundGateway = previouslyAdopted
             controlBinaryPath = binaryPath
             self.controlTokenPath = controlTokenPath
             controlParentProcessIdentifier = parentProcessIdentifier
-            usesManagedService = launchdManaged
+            usesManagedService = launchdManaged && previouslyAdopted
             expectedServiceMode = managedRouteEnabled ? "managed" : "official_fallback"
             return
         }
         if directProcessRunning || previouslyAdopted {
             return
         }
-        if let parentProcessIdentifier, parentProcessIdentifier > 0,
-           adoptRunningGateway(
-               binaryPath: binaryPath,
-               credentialHandoff: credentialHandoff,
-               controlTokenPath: controlTokenPath,
-               parentProcessIdentifier: parentProcessIdentifier,
-               managedRouteEnabled: managedRouteEnabled,
-               attempts: launchdManaged ? 20 : 1
-           ) {
-            adoptedBackgroundGateway = true
-            controlBinaryPath = binaryPath
-            self.controlTokenPath = controlTokenPath
-            controlParentProcessIdentifier = parentProcessIdentifier
-            usesManagedService = launchdManaged
-            expectedServiceMode = managedRouteEnabled ? "managed" : "official_fallback"
-            return
+        if launchdManaged,
+           let parentProcessIdentifier,
+           parentProcessIdentifier > 0 {
+            do {
+                try adoptRunningGateway(
+                    binaryPath: binaryPath,
+                    credentialHandoff: credentialHandoff,
+                    controlTokenPath: controlTokenPath,
+                    runtimeConfigSHA256: runtimeConfigSHA256,
+                    parentProcessIdentifier: parentProcessIdentifier,
+                    managedRouteEnabled: managedRouteEnabled,
+                    launchdManaged: launchdManaged,
+                    attempts: launchdManaged ? 20 : 1
+                )
+                adoptedBackgroundGateway = true
+                controlBinaryPath = binaryPath
+                self.controlTokenPath = controlTokenPath
+                controlParentProcessIdentifier = parentProcessIdentifier
+                usesManagedService = launchdManaged
+                expectedServiceMode = managedRouteEnabled ? "managed" : "official_fallback"
+                return
+            } catch {
+                adoptedBackgroundGateway = false
+                usesManagedService = false
+                throw error
+            }
         }
         if launchdManaged {
             adoptedBackgroundGateway = false
@@ -244,6 +255,12 @@ final class GatewayProcess {
 
     func leaveRunningForFallback() throws {
         if adoptedBackgroundGateway {
+            if !usesManagedService {
+                try requestAdoptedGatewayShutdownOrThrow()
+                adoptedBackgroundGateway = false
+                clearControlState()
+                return
+            }
             try requestAdoptedGatewayRelease()
             adoptedBackgroundGateway = false
             usesManagedService = false
@@ -251,6 +268,13 @@ final class GatewayProcess {
             return
         }
         guard let process, process.isRunning else {
+            self.process = nil
+            clearControlState()
+            return
+        }
+        if !usesManagedService {
+            process.terminationHandler = nil
+            terminateAndReap(process)
             self.process = nil
             clearControlState()
             return
@@ -353,34 +377,148 @@ final class GatewayProcess {
         )
     }
 
+    private struct GatewayControlStatus {
+        let mode: String
+        let runtimeConfigSHA256: String
+    }
+
+    private func requestGatewayControlStatus(
+        binaryPath: String,
+        controlTokenPath: String,
+        runtimeConfigSHA256: String? = nil
+    ) throws -> GatewayControlStatus {
+        var arguments = [
+            "gateway-control",
+            "-endpoint", endpoint.httpBaseURL.absoluteString,
+            "-token-file", controlTokenPath,
+            "-action", "status",
+        ]
+        if let runtimeConfigSHA256, !runtimeConfigSHA256.isEmpty {
+            arguments.append(contentsOf: ["-runtime-config-sha256", runtimeConfigSHA256])
+        }
+        let output = try Self.runGatewayCommand(binaryPath: binaryPath, arguments: arguments)
+        let tokens = output
+            .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" || $0 == "\t" })
+            .map(String.init)
+        guard let statusTokenIndex = tokens.firstIndex(where: { $0.hasPrefix("status:") }),
+              statusTokenIndex + 1 < tokens.count else {
+            throw GatewayProcessError.commandFailed("gateway control status is invalid")
+        }
+        let mode = tokens[statusTokenIndex].dropFirst("status:".count).isEmpty
+            ? tokens[statusTokenIndex + 1]
+            : String(tokens[statusTokenIndex].dropFirst("status:".count))
+        guard !mode.isEmpty,
+              let digestToken = tokens.first(where: { $0.hasPrefix("runtime_config_sha256=") }) else {
+            throw GatewayProcessError.commandFailed("gateway control status digest is unavailable")
+        }
+        let digest = String(digestToken.dropFirst("runtime_config_sha256=".count))
+        guard digest.count == 64,
+              digest.unicodeScalars.allSatisfy({
+                  (48...57).contains($0.value) || (97...102).contains($0.value)
+              }) else {
+            throw GatewayProcessError.commandFailed("gateway control status digest is invalid")
+        }
+        return GatewayControlStatus(mode: mode, runtimeConfigSHA256: digest)
+    }
+
+    private func requestAdoptedGatewayReplacement(
+        binaryPath: String,
+        controlTokenPath: String,
+        parentProcessIdentifier: Int32,
+        runtimeConfigSHA256: String
+    ) throws {
+        _ = try Self.runGatewayCommand(
+            binaryPath: binaryPath,
+            arguments: [
+                "gateway-control",
+                "-endpoint", endpoint.httpBaseURL.absoluteString,
+                "-token-file", controlTokenPath,
+                "-action", "replace",
+                "-parent-pid", "\(parentProcessIdentifier)",
+                "-runtime-config-sha256", runtimeConfigSHA256,
+            ]
+        )
+    }
+
     private func adoptRunningGateway(
         binaryPath: String,
         credentialHandoff: Data,
         controlTokenPath: String,
+        runtimeConfigSHA256: String,
         parentProcessIdentifier: Int32,
         managedRouteEnabled: Bool,
+        launchdManaged: Bool,
         attempts: Int
-    ) -> Bool {
+    ) throws {
+        var replacementRequested = false
+        var lastError: Error?
         for attempt in 0..<attempts {
-            if (try? Self.runGatewayCommand(
-                binaryPath: binaryPath,
-                arguments: [
-                    "gateway-control",
-                    "-endpoint", endpoint.httpBaseURL.absoluteString,
-                    "-token-file", controlTokenPath,
-                    "-action", "adopt",
-                    "-parent-pid", "\(parentProcessIdentifier)",
-                    "-route-enabled=\(managedRouteEnabled ? "true" : "false")",
-                ],
-                standardInput: credentialHandoff
-            )) != nil {
-                return true
+            do {
+                let status = try requestGatewayControlStatus(
+                    binaryPath: binaryPath,
+                    controlTokenPath: controlTokenPath,
+                    runtimeConfigSHA256: runtimeConfigSHA256
+                )
+                if status.runtimeConfigSHA256 != runtimeConfigSHA256 {
+                    guard launchdManaged,
+                          status.mode == "official_fallback" else {
+                        throw GatewayProcessError.commandFailed(
+                            "gateway runtime configuration is stale and cannot be adopted: the helper is owned or not background-managed"
+                        )
+                    }
+                    if replacementRequested {
+                        if attempt + 1 < attempts {
+                            Thread.sleep(forTimeInterval: 0.25)
+                            continue
+                        }
+                        throw GatewayProcessError.commandFailed(
+                            "gateway runtime configuration is stale and cannot be adopted: the replacement did not load the requested bytes"
+                        )
+                    }
+                    replacementRequested = true
+                    do {
+                        try requestAdoptedGatewayReplacement(
+                            binaryPath: binaryPath,
+                            controlTokenPath: controlTokenPath,
+                            parentProcessIdentifier: parentProcessIdentifier,
+                            runtimeConfigSHA256: runtimeConfigSHA256
+                        )
+                    } catch {
+                        throw GatewayProcessError.commandFailed(
+                            "RelayKit could not replace the stale background gateway: \(error.localizedDescription)"
+                        )
+                    }
+                    Thread.sleep(forTimeInterval: 0.25)
+                    continue
+                }
+                _ = try Self.runGatewayCommand(
+                    binaryPath: binaryPath,
+                    arguments: [
+                        "gateway-control",
+                        "-endpoint", endpoint.httpBaseURL.absoluteString,
+                        "-token-file", controlTokenPath,
+                        "-action", "adopt",
+                        "-parent-pid", "\(parentProcessIdentifier)",
+                        "-route-enabled=\(managedRouteEnabled ? "true" : "false")",
+                        "-runtime-config-sha256", runtimeConfigSHA256,
+                    ],
+                    standardInput: credentialHandoff
+                )
+                return
+            } catch {
+                lastError = error
+                if let gatewayError = error as? GatewayProcessError,
+                   gatewayError.errorDescription?.contains("stale and cannot be adopted") == true ||
+                   gatewayError.errorDescription?.contains("could not replace the stale background gateway") == true {
+                    throw gatewayError
+                }
             }
             if attempt + 1 < attempts {
                 Thread.sleep(forTimeInterval: 0.25)
             }
         }
-        return false
+        let detail = lastError?.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gateway control endpoint is unavailable"
+        throw GatewayProcessError.commandFailed("RelayKit gateway could not adopt the managed helper: \(detail)")
     }
 
     private func clearControlState() {

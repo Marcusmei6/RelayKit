@@ -44,6 +44,14 @@ func TestOfficialFallbackKeepsOfficialAndRejectsProviderWithoutCredential(t *tes
 	if credentialCount != 0 {
 		t.Fatalf("provider credentials retained after fallback: %d", credentialCount)
 	}
+	models := httptest.NewRecorder()
+	handler.ServeHTTP(models, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if models.Code != http.StatusOK {
+		t.Fatalf("fallback models status = %d", models.Code)
+	}
+	if providerHits.Load() != 1 {
+		t.Fatalf("provider upstream was probed by fallback catalog: %d", providerHits.Load())
+	}
 
 	rec := assertResponsesStatus(t, handler, "provider-model", http.StatusConflict)
 	if !strings.Contains(rec.Body.String(), `"type":"restart_codex_required"`) {

@@ -184,8 +184,27 @@ func TestGatewayParentLossRestoresConfigAndKeepsCachedClientContinuity(t *testin
 	if code := gatewayControl([]string{
 		"-endpoint", controlEndpoint,
 		"-token-file", controlTokenPath,
+		"-action", "status",
+	}, strings.NewReader(""), &controlOutput, &controlError); code != 0 {
+		t.Fatalf("new App could not read runtime config status: %s", controlError.String())
+	}
+	runtimeDigest := ""
+	for _, line := range strings.Split(controlOutput.String(), "\n") {
+		if strings.HasPrefix(line, "runtime_config_sha256=") {
+			runtimeDigest = strings.TrimPrefix(line, "runtime_config_sha256=")
+		}
+	}
+	if runtimeDigest == "" {
+		t.Fatalf("status did not report runtime config digest: %q", controlOutput.String())
+	}
+	controlOutput.Reset()
+	controlError.Reset()
+	if code := gatewayControl([]string{
+		"-endpoint", controlEndpoint,
+		"-token-file", controlTokenPath,
 		"-action", "adopt",
 		"-parent-pid", strconv.Itoa(os.Getpid()),
+		"-runtime-config-sha256", runtimeDigest,
 	}, strings.NewReader(`{"version":1,"credentials":{}}`), &controlOutput, &controlError); code != 0 {
 		t.Fatalf("new App could not adopt the fallback data plane: %s", controlError.String())
 	}
@@ -201,28 +220,8 @@ func TestGatewayParentLossRestoresConfigAndKeepsCachedClientContinuity(t *testin
 		"-token-file", controlTokenPath,
 		"-action", "release",
 		"-parent-pid", strconv.Itoa(os.Getpid()),
-	}, strings.NewReader(""), io.Discard, io.Discard); code != 0 {
-		t.Fatal("adopted App could not release the data plane into fallback")
-	}
-	assertGatewayMode(t, controlEndpoint, "official_fallback")
-	sendCachedOfficialRequest(t, cachedClient, cachedBaseURL)
-	if code := gatewayControl([]string{
-		"-endpoint", controlEndpoint,
-		"-token-file", controlTokenPath,
-		"-action", "adopt",
-		"-parent-pid", strconv.Itoa(os.Getpid()),
-		"-route-enabled=false",
-	}, strings.NewReader(`{"version":1,"credentials":{}}`), io.Discard, io.Discard); code != 0 {
-		t.Fatal("disabled App could not adopt the data plane for fallback monitoring")
-	}
-	assertGatewayMode(t, controlEndpoint, "official_fallback")
-	if code := gatewayControl([]string{
-		"-endpoint", controlEndpoint,
-		"-token-file", controlTokenPath,
-		"-action", "adopt",
-		"-parent-pid", strconv.Itoa(os.Getpid()),
-	}, strings.NewReader(`{"version":1,"credentials":{}}`), io.Discard, io.Discard); code != 0 {
-		t.Fatal("released data plane could not be adopted again")
+	}, strings.NewReader(""), io.Discard, io.Discard); code == 0 {
+		t.Fatal("adopted App direct-helper release unexpectedly succeeded")
 	}
 	if code := gatewayControl([]string{
 		"-endpoint", controlEndpoint,

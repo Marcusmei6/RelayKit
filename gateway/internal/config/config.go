@@ -105,6 +105,13 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, &Error{Code: CodeReadError, Err: err}
 	}
+	return LoadBytes(body)
+}
+
+// LoadBytes parses one exact runtime-config snapshot. Callers that need to
+// bind lifecycle state to the bytes they read should use this instead of
+// reading the file and calling Load separately.
+func LoadBytes(body []byte) (*Config, error) {
 
 	var cfg Config
 	var publicBoundary any

@@ -1,11 +1,27 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadBytesUsesExactRuntimeSnapshot(t *testing.T) {
+	body := []byte(`{"providers":[{"id":"p","name":"Public","base_url":"http://127.0.0.1:11434/v1","api_format":"openai_chat","models":[{"id":"m"}]}]}`)
+	original := append([]byte(nil), body...)
+	cfg, err := LoadBytes(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers[0].Models[0].ID != "m" {
+		t.Fatalf("parsed model = %+v", cfg.Providers[0].Models)
+	}
+	if !bytes.Equal(body, original) {
+		t.Fatal("LoadBytes mutated the runtime snapshot")
+	}
+}
 
 func TestLoadExampleConfig(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "examples", "providers.example.json")
