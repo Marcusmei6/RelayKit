@@ -46,10 +46,32 @@ print_contract() {
   }'
 }
 
+parse_runtime_config_sha256() {
+  local line digest="" digest_count=0
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    case "${line}" in
+      *runtime_config_sha256*)
+        digest_count=$((digest_count + 1))
+        [[ "${digest_count}" -eq 1 ]] || return 1
+        [[ "${line}" == runtime_config_sha256=* ]] || return 1
+        digest="${line#runtime_config_sha256=}"
+        [[ "${#digest}" -eq 64 && "${digest}" != *[!0123456789abcdef]* ]] || return 1
+        ;;
+    esac
+  done
+  [[ "${digest_count}" -eq 1 ]] || return 1
+  printf '%s\n' "${digest}"
+}
+
 if [[ "${1:-}" == "--print-contract" ]]; then
   [[ "$#" -eq 1 ]] || exit 2
   print_contract
   exit 0
+fi
+if [[ "${1:-}" == "--parse-runtime-config-sha256" ]]; then
+  [[ "$#" -eq 1 ]] || exit 2
+  parse_runtime_config_sha256
+  exit $?
 fi
 [[ "$#" -eq 0 ]] || exit 2
 
@@ -199,13 +221,24 @@ route_status() {
   "${HELPER}" codex-config-status -target "${TARGET}" -state "${STATE}" 2>/dev/null
 }
 
+gateway_runtime_config_sha256() {
+  local status
+  status="$(
+    "${HELPER}" gateway-control -endpoint "http://127.0.0.1:${PORT}" -token-file "${TOKEN_PATH}" \
+      -action status 2>/dev/null
+  )" || return 1
+  printf '%s\n' "${status}" | parse_runtime_config_sha256
+}
+
 adopt() {
-  local index
+  local index digest
   for ((index = 0; index < 20; index++)); do
-    if printf '%s' '{"version":1,"credentials":{}}' |
-      "${HELPER}" gateway-control -endpoint "http://127.0.0.1:${PORT}" -token-file "${TOKEN_PATH}" \
-        -action adopt -parent-pid "${PARENT_PID}" >/dev/null 2>&1; then
-      return 0
+    if digest="$(gateway_runtime_config_sha256)"; then
+      if printf '%s' '{"version":1,"credentials":{}}' |
+        "${HELPER}" gateway-control -endpoint "http://127.0.0.1:${PORT}" -token-file "${TOKEN_PATH}" \
+          -action adopt -parent-pid "${PARENT_PID}" -runtime-config-sha256 "${digest}" >/dev/null 2>&1; then
+        return 0
+      fi
     fi
     /bin/sleep 0.1
   done
