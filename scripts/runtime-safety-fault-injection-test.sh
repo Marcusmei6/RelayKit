@@ -64,6 +64,58 @@ require_source 'env -i'
 require_source 'HOME="${case_home}"'
 require_source 'CODEX_HOME="${case_codex_home}"'
 require_source 'CFFIXED_USER_HOME="${case_home}"'
+launch_source_app_contract="$(sed -n '/^launch_source_app() {$/,/^}$/p' "${HARNESS}")"
+count_fixed_occurrences() {
+  local content="$1" token="$2"
+  { grep -Fo -- "${token}" <<<"${content}" || true; } | wc -l | tr -d '[:space:]'
+}
+count_standalone_home_occurrences() {
+  local content="$1"
+  { grep -Eo '(^|[[:space:]\\])HOME="\$\{case_home\}"([[:space:]\\]|$)' <<<"${content}" || true; } |
+    wc -l | tr -d '[:space:]'
+}
+runtime_launch_contract_is_valid() {
+  local content="$1"
+  [[ "$(count_fixed_occurrences "${content}" 'RELAYKIT_RUNTIME_SAFETY_ROOT=')" == "1" &&
+     "$(count_fixed_occurrences "${content}" 'RELAYKIT_RUNTIME_SAFETY_ROOT="${case_home}"')" == "1" &&
+     "$(count_standalone_home_occurrences "${content}")" == "1" &&
+     "$(count_fixed_occurrences "${content}" 'CFFIXED_USER_HOME="${case_home}"')" == "1" ]] || return 1
+  ! grep -Eq 'RELAYKIT_RUNTIME_SAFETY_ROOT=("?\$\{?HOME\}?"?|"?/tmp"?)([[:space:]\\]|$)' <<<"${content}"
+}
+
+normal_launch_contract='env -i HOME="${case_home}" CFFIXED_USER_HOME="${case_home}" RELAYKIT_RUNTIME_SAFETY_ROOT="${case_home}"'
+duplicate_root_contract='env -i HOME="${case_home}" CFFIXED_USER_HOME="${case_home}" RELAYKIT_RUNTIME_SAFETY_ROOT="${case_home}" RELAYKIT_RUNTIME_SAFETY_ROOT="${case_home}"'
+cffixed_only_contract='env -i CFFIXED_USER_HOME="${case_home}" RELAYKIT_RUNTIME_SAFETY_ROOT="${case_home}"'
+[[ "$(count_fixed_occurrences "${duplicate_root_contract}" 'RELAYKIT_RUNTIME_SAFETY_ROOT=')" == "2" ]] ||
+  fail "same-line duplicate runtime roots were not counted as two assignments"
+[[ "$(count_standalone_home_occurrences "${cffixed_only_contract}")" == "0" ]] ||
+  fail "CFFIXED_USER_HOME was miscounted as standalone HOME"
+[[ "$(count_fixed_occurrences "${normal_launch_contract}" 'RELAYKIT_RUNTIME_SAFETY_ROOT=')" == "1" &&
+   "$(count_fixed_occurrences "${normal_launch_contract}" 'RELAYKIT_RUNTIME_SAFETY_ROOT="${case_home}"')" == "1" &&
+   "$(count_standalone_home_occurrences "${normal_launch_contract}")" == "1" &&
+   "$(count_fixed_occurrences "${normal_launch_contract}" 'CFFIXED_USER_HOME="${case_home}"')" == "1" ]] ||
+  fail "normal isolated launch assignment cardinality is not exactly one each"
+runtime_launch_contract_is_valid "${normal_launch_contract}" || fail "normal isolated launch contract was rejected"
+if runtime_launch_contract_is_valid "${duplicate_root_contract}"; then fail "same-line duplicate runtime roots were accepted"; fi
+if runtime_launch_contract_is_valid "${cffixed_only_contract}"; then fail "launch without standalone HOME was accepted"; fi
+if runtime_launch_contract_is_valid 'env -i HOME="${case_home}" CFFIXED_USER_HOME="${case_home}" RELAYKIT_RUNTIME_SAFETY_ROOT=""'; then
+  fail "empty runtime safety root was accepted"
+fi
+if runtime_launch_contract_is_valid 'env -i HOME="${case_home}" CFFIXED_USER_HOME="${case_home}" RELAYKIT_RUNTIME_SAFETY_ROOT="${HOME}"'; then
+  fail "HOME fallback runtime safety root was accepted"
+fi
+if runtime_launch_contract_is_valid 'env -i HOME="${case_home}" CFFIXED_USER_HOME="${case_home}" RELAYKIT_RUNTIME_SAFETY_ROOT="/tmp"'; then
+  fail "broad /tmp runtime safety root was accepted"
+fi
+runtime_launch_contract_is_valid "${launch_source_app_contract}" ||
+  fail "launch_source_app does not have exact isolated assignment cardinality"
+grep -Fq 'local case_home="${CASE_HOME}"' <<<"${launch_source_app_contract}" ||
+  fail "runtime safety root is not derived from the current isolated case"
+prepare_case_contract="$(sed -n '/^prepare_case() {$/,/^}$/p' "${HARNESS}")"
+grep -Fq 'case_root="${WORK_ROOT}/cases/${name}"' <<<"${prepare_case_contract}" ||
+  fail "runtime safety case root is not below the current isolated work root"
+grep -Fq 'CASE_HOME="${case_root}/home"' <<<"${prepare_case_contract}" ||
+  fail "runtime safety launch home is not below the current isolated case root"
 require_source 'RELAYKIT_RUNTIME_SAFETY_TEST=1'
 require_source 'RELAYKIT_RUNTIME_SAFETY_PORT="${RUNTIME_PORT}"'
 require_source 'rev-parse HEAD'

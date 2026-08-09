@@ -578,6 +578,7 @@ launch_source_app() {
     cd "${WORK_ROOT}/layout/app"
     exec env -i HOME="${case_home}" CODEX_HOME="${case_codex_home}" CFFIXED_USER_HOME="${case_home}" \
       PATH="/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="${CASE_TMP}" \
+      RELAYKIT_RUNTIME_SAFETY_ROOT="${case_home}" \
       RELAYKIT_RUNTIME_SAFETY_TEST=1 RELAYKIT_RUNTIME_SAFETY_PORT="${RUNTIME_PORT}" \
       RELAYKIT_RUNTIME_SAFETY_OFFICIAL_BASE_URL="${UPSTREAM_BASE_URL}/v1" \
       RELAYKIT_RUNTIME_SAFETY_OFFICIAL_KEY_FILE="${CASE_HOME}/Library/Application Support/RelayKit/runtime-safety-official.key" \
