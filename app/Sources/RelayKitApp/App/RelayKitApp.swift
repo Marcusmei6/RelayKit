@@ -19,16 +19,19 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
     private let smokeUsageLogPath = value(after: "--ui-smoke-usage-log")
     private let smokeUsageRefreshIntervalSeconds = UInt64(value(after: "--ui-smoke-usage-refresh-interval") ?? "") ?? 60
     private let smokeCatalogURL = value(after: "--ui-smoke-catalog-url")
-    private let smokeSeedKeychainService = value(after: "--ui-smoke-seed-keychain")
     private let smokeModelHealthFixture = CommandLine.arguments.contains("--ui-smoke-model-health-fixture")
     private let smokeSkipsGatewayExercise = CommandLine.arguments.contains("--ui-smoke-skip-gateway-exercise")
     private let smokeKeepsPopoverOpen = CommandLine.arguments.contains("--ui-smoke-keep-open")
     private var smokeQuitMenuVisible = false
     private var outsideClickMonitor: Any?
 
-    init(endpoint: RelayKitRuntimeEndpoint) {
-        model = AppModel(endpoint: endpoint)
+    init(endpoint: RelayKitRuntimeEndpoint, initialization: AppModelInitialization) {
+        model = AppModel(endpoint: endpoint, initialization: initialization)
         super.init()
+    }
+
+    convenience init(endpoint: RelayKitRuntimeEndpoint) {
+        self.init(endpoint: endpoint, initialization: AppModelInitialization.ordinary())
     }
 
     static func main() {
@@ -37,6 +40,13 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             endpoint = try RelayKitRuntimeEndpoint.resolve()
         } catch {
             FileHandle.standardError.write(Data("RelayKit runtime safety test endpoint is invalid.\n".utf8))
+            exit(2)
+        }
+        let pathContext: RelayKitPathContext
+        do {
+            pathContext = try RelayKitPaths.runtimeContext(environment: ProcessInfo.processInfo.environment)
+        } catch {
+            FileHandle.standardError.write(Data("RelayKit runtime context is invalid.\n".utf8))
             exit(2)
         }
         if CommandLine.arguments.contains("--verify-bundled-gateway") {
@@ -48,8 +58,36 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         if let service = value(after: "--delete-desktop-proof-keychain") {
             exit(deleteFixtureKeychain(service: service, requiredPrefix: "relaykit.desktop-proof.provider-"))
         }
+        let isUISmoke = CommandLine.arguments.contains("--ui-smoke")
+        let initialization: AppModelInitialization
+        if isUISmoke {
+            guard let smokeAppearance = parseSmokeAppearance(value(after: "--ui-smoke-appearance")) else {
+                FileHandle.standardError.write(Data("RelayKit UI smoke appearance is invalid.\n".utf8))
+                exit(2)
+            }
+            guard let rootURL = pathContext.rootURL,
+                  let providerPath = value(after: "--ui-smoke-provider-config"),
+                  isIsolatedSmokePath(providerPath, rootURL: rootURL),
+                  (value(after: "--ui-smoke-usage-log").map { isIsolatedSmokePath($0, rootURL: rootURL) } ?? true) else {
+                FileHandle.standardError.write(Data("RelayKit UI smoke paths are invalid.\n".utf8))
+                exit(2)
+            }
+            initialization = AppModelInitialization(
+                pathContext: pathContext,
+                providerConfigPath: providerPath,
+                usageLogPath: value(after: "--ui-smoke-usage-log"),
+                appearanceMode: smokeAppearance,
+                launchAtLoginRequested: false,
+                persistSettings: false,
+                loadDesktopAcceptance: false,
+                catalogURL: value(after: "--ui-smoke-catalog-url").flatMap(URL.init(string:)),
+                isUISmoke: true
+            )
+        } else {
+            initialization = AppModelInitialization.ordinary(pathContext: pathContext)
+        }
         let app = NSApplication.shared
-        let delegate = RelayKitApp(endpoint: endpoint)
+        let delegate = RelayKitApp(endpoint: endpoint, initialization: initialization)
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
         app.run()
@@ -59,19 +97,9 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--ui-smoke") {
             model.opensOfficialAuthURL = false
-            seedSmokeKeychainCredentialIfNeeded()
-        }
-        if let smokeProviderConfigPath {
-            model.useTemporaryProviderConfigPath(smokeProviderConfigPath)
-        }
-        if let smokeUsageLogPath {
-            model.usageLogPath = smokeUsageLogPath
         }
         if smokeModelHealthFixture {
             model.useSmokeModelHealthFixture()
-        }
-        if let smokeCatalogURL, let url = URL(string: smokeCatalogURL) {
-            model.setLocalCatalogURL(url)
         }
         if !CommandLine.arguments.contains("--ui-smoke") {
             Task { await model.startGatewayOnOrdinaryLaunch() }
@@ -175,6 +203,22 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         return CommandLine.arguments[index + 1]
     }
 
+    private static func parseSmokeAppearance(_ rawValue: String?) -> AppAppearanceMode? {
+        guard let rawValue else { return .system }
+        switch rawValue {
+        case "system": return .system
+        case "light": return .light
+        case "dark": return .dark
+        default: return nil
+        }
+    }
+
+    private static func isIsolatedSmokePath(_ path: String, rootURL: URL) -> Bool {
+        guard (path as NSString).isAbsolutePath else { return false }
+        let candidate = URL(fileURLWithPath: path).standardizedFileURL
+        return candidate.path == path && candidate.path.hasPrefix(rootURL.standardizedFileURL.path + "/")
+    }
+
     private static func deleteFixtureKeychain(service: String, requiredPrefix: String) -> Int32 {
         guard service.hasPrefix(requiredPrefix),
               !service.contains("\n"),
@@ -187,15 +231,6 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         } catch {
             FileHandle.standardError.write(Data("RelayKit fixture Keychain cleanup failed\n".utf8))
             return 1
-        }
-    }
-
-    private func seedSmokeKeychainCredentialIfNeeded() {
-        guard let smokeSeedKeychainService else { return }
-        do {
-            try KeychainCredentialStore.save(value: "relaykit-ui-smoke-key", service: smokeSeedKeychainService)
-        } catch {
-            fputs("failed to seed UI smoke keychain credential\n", stderr)
         }
     }
 
@@ -290,7 +325,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
         }
         var connectEvidence: [String: Any] = [
             "display_mode": "model-access",
-            "provider_config_path_is_app_support": model.providerConfigPath == RelayKitPaths.providerConfigPath(),
+            "provider_config_path_is_app_support": model.providerConfigPath == model.activePathContext.providerConfigPath,
             "stale_tmp_provider_config_recovered": model.staleProviderConfigPreferenceRecovered,
             "status_summary_inline": smokeSections.contains("status-summary-inline"),
             "model_access_and_model_list_merged": smokeSections.contains("model-access-merged"),
@@ -310,7 +345,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             "official_device_url_captured": !model.officialAuthURL.isEmpty,
             "official_device_code_captured": !model.officialDeviceCode.isEmpty,
             "official_device_code_copied": model.officialDeviceCodeCopied,
-            "official_credential_ref_exists": FileManager.default.fileExists(atPath: RelayKitPaths.officialCredentialRefPath()),
+            "official_credential_ref_exists": FileManager.default.fileExists(atPath: model.activePathContext.officialCredentialRefPath),
             "official_current_status": model.officialAuthStatus,
             "official_connected_by_login_status": officialConnected,
             "official_connected_cta_disabled": officialConnected && smokeSections.contains("official-connected-cta-disabled"),
@@ -402,7 +437,7 @@ final class RelayKitApp: NSObject, NSApplicationDelegate {
             "provider_hidden_models_toggle_visible": smokeSections.contains("provider-hidden-models-toggle"),
             "provider_hidden_model_reasons_visible": smokeSections.contains("provider-hidden-model-reasons"),
             "real_demo_provider_clicked": realDemo != nil,
-            "real_demo_provider_config_path": model.providerConfigPath == RelayKitPaths.providerConfigPath() ||
+            "real_demo_provider_config_path": model.providerConfigPath == model.activePathContext.providerConfigPath ||
                 model.providerConfigPath.hasPrefix("/tmp/relaykit-") ||
                 model.providerConfigPath.hasPrefix("/private/tmp/relaykit-"),
             "real_demo_base_url_visible": realDemo?.baseURL == "https://example.test/api" ||

@@ -1,6 +1,84 @@
 import Foundation
 
+public struct RelayKitPathContext: Equatable, Sendable {
+    public let rootURL: URL?
+    public let applicationSupportDirectory: URL
+    public let providerConfigPath: String
+    public let gatewayRuntimeConfigPath: String
+    public let usageLogPath: String
+    public let codexConfigPath: String
+    public let codexCatalogPath: String
+    public let codexConfigStatePath: String
+    public let gatewayControlTokenPath: String
+    public let officialProofRootPath: String
+    public let desktopProofRootPath: String
+    public let officialHomePath: String
+    public let officialCodexHomePath: String
+    public let officialCredentialRefPath: String
+    public let officialRouteEvidencePath: String
+
+    fileprivate init(rootURL: URL?, homeDirectory: URL, runtime: Bool) {
+        self.rootURL = rootURL
+        let supportRoot = runtime
+            ? homeDirectory.appendingPathComponent("Library/Application Support/RelayKit", isDirectory: true)
+            : homeDirectory.appendingPathComponent("Library/Application Support/RelayKit", isDirectory: true)
+        applicationSupportDirectory = supportRoot.standardizedFileURL
+        providerConfigPath = applicationSupportDirectory.appendingPathComponent("providers.json").path
+        gatewayRuntimeConfigPath = applicationSupportDirectory.appendingPathComponent("gateway-runtime.json").path
+        usageLogPath = applicationSupportDirectory.appendingPathComponent("usage.jsonl").path
+        codexConfigPath = homeDirectory.appendingPathComponent(".codex/config.toml").standardizedFileURL.path
+        codexCatalogPath = applicationSupportDirectory.appendingPathComponent("codex-model-catalog.json").path
+        codexConfigStatePath = applicationSupportDirectory.appendingPathComponent("codex-config-state.json").path
+        gatewayControlTokenPath = applicationSupportDirectory.appendingPathComponent("gateway-control.token").path
+        let officialProofRoot = applicationSupportDirectory.appendingPathComponent("OfficialProof", isDirectory: true)
+        let desktopProofRoot = applicationSupportDirectory.appendingPathComponent("DesktopProof", isDirectory: true)
+        officialProofRootPath = officialProofRoot.path
+        desktopProofRootPath = desktopProofRoot.path
+        officialHomePath = officialProofRoot.appendingPathComponent("home", isDirectory: true).path
+        officialCodexHomePath = officialProofRoot.appendingPathComponent("codex-home", isDirectory: true).path
+        officialCredentialRefPath = officialProofRoot.appendingPathComponent("official-credential.json").path
+        officialRouteEvidencePath = officialProofRoot.appendingPathComponent("evidence.json").path
+    }
+}
+
+public enum RelayKitRuntimePathError: LocalizedError, Equatable {
+    case missingRoot
+    case invalidRoot
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingRoot:
+            return "RelayKit runtime safety mode requires an explicit runtime root."
+        case .invalidRoot:
+            return "RelayKit runtime safety root must be an absolute normalized path."
+        }
+    }
+}
+
 public enum RelayKitPaths {
+    public static func runtimeContext(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws -> RelayKitPathContext {
+        guard environment["RELAYKIT_RUNTIME_SAFETY_TEST"] == "1" else {
+            return RelayKitPathContext(rootURL: nil, homeDirectory: homeDirectory, runtime: false)
+        }
+        guard let rawRoot = environment["RELAYKIT_RUNTIME_SAFETY_ROOT"], !rawRoot.isEmpty else {
+            throw RelayKitRuntimePathError.missingRoot
+        }
+        guard (rawRoot as NSString).isAbsolutePath else {
+            throw RelayKitRuntimePathError.invalidRoot
+        }
+        let rootURL = URL(fileURLWithPath: rawRoot, isDirectory: true).standardizedFileURL
+        guard rootURL.path == rawRoot,
+              rootURL.path != "/",
+              rootURL.path != "/tmp",
+              rootURL.path != "/private/tmp" else {
+            throw RelayKitRuntimePathError.invalidRoot
+        }
+        return RelayKitPathContext(rootURL: rootURL, homeDirectory: rootURL, runtime: true)
+    }
+
     public static func gatewayBinaryPath(bundle: Bundle = .main) -> String {
         let bundled = bundle.bundleURL
             .appendingPathComponent("Contents/MacOS/relay")
@@ -35,7 +113,7 @@ public enum RelayKitPaths {
     }
 
     public static func recoveredStaleTemporaryProviderConfig(savedPath: String?, fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:)) -> Bool {
-        guard let savedPath else {
+        guard let savedPath, !savedPath.isEmpty else {
             return false
         }
         return resolvedProviderConfigPath(savedPath: savedPath, fileExists: fileExists) != savedPath

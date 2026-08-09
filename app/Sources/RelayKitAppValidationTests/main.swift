@@ -2,6 +2,230 @@ import Foundation
 import RelayKitCore
 import Security
 
+private final class GatewayBackgroundRegistrationFake: GatewayBackgroundRegistration {
+    let states: [GatewayBackgroundStatus]
+    let registerError: Error?
+    private(set) var currentReadCount = 0
+    private(set) var registerCount = 0
+
+    init(states: [GatewayBackgroundStatus], registerError: Error?) {
+        self.states = states
+        self.registerError = registerError
+    }
+
+    var status: GatewayBackgroundStatus {
+        currentReadCount += 1
+        return states[min(currentReadCount - 1, states.count - 1)]
+    }
+
+    func register() throws {
+        registerCount += 1
+        if let registerError { throw registerError }
+    }
+}
+
+private struct RegistrationFixtureError: LocalizedError {
+    var errorDescription: String? { "fixture registration failed" }
+}
+
+private func expectGatewayBackgroundRegistrationStateMachine() throws {
+    let enabled = GatewayBackgroundRegistrationFake(states: [.enabled], registerError: nil)
+    try GatewayBackgroundRegistrationCoordinator(enabled).ensureEnabled()
+    guard enabled.currentReadCount == 1, enabled.registerCount == 0 else {
+        fatalError("enabled registration must not register and must read status once")
+    }
+
+    let notRegistered = GatewayBackgroundRegistrationFake(states: [.notRegistered, .enabled], registerError: nil)
+    try GatewayBackgroundRegistrationCoordinator(notRegistered).ensureEnabled()
+    guard notRegistered.currentReadCount == 2, notRegistered.registerCount == 1 else {
+        fatalError("notRegistered must register once and reread once")
+    }
+
+    let approval = GatewayBackgroundRegistrationFake(states: [.requiresApproval], registerError: nil)
+    do {
+        try GatewayBackgroundRegistrationCoordinator(approval).ensureEnabled()
+        fatalError("initial requiresApproval must fail closed")
+    } catch let error as GatewayBackgroundRegistrationError {
+        guard error == .requiresApproval, approval.currentReadCount == 1, approval.registerCount == 0 else {
+            fatalError("initial requiresApproval must be actionable without registration")
+        }
+    }
+
+    let postApproval = GatewayBackgroundRegistrationFake(states: [.notRegistered, .requiresApproval], registerError: nil)
+    do {
+        try GatewayBackgroundRegistrationCoordinator(postApproval).ensureEnabled()
+        fatalError("post-register requiresApproval must fail closed")
+    } catch let error as GatewayBackgroundRegistrationError {
+        guard error == .requiresApproval, postApproval.currentReadCount == 2, postApproval.registerCount == 1 else {
+            fatalError("post-register requiresApproval must register once then report approval")
+        }
+    }
+
+    let thrownApproval = GatewayBackgroundRegistrationFake(
+        states: [.notRegistered, .requiresApproval],
+        registerError: RegistrationFixtureError()
+    )
+    do {
+        try GatewayBackgroundRegistrationCoordinator(thrownApproval).ensureEnabled()
+        fatalError("registration error with approval state must translate to actionable error")
+    } catch let error as GatewayBackgroundRegistrationError {
+        guard error == .requiresApproval, thrownApproval.currentReadCount == 2, thrownApproval.registerCount == 1 else {
+            fatalError("registration error must reread once and translate requiresApproval")
+        }
+    }
+
+    let thrown = GatewayBackgroundRegistrationFake(states: [.notRegistered, .notRegistered], registerError: RegistrationFixtureError())
+    do {
+        try GatewayBackgroundRegistrationCoordinator(thrown).ensureEnabled()
+        fatalError("registration error must be preserved when reread is not approval")
+    } catch let error as RegistrationFixtureError {
+        guard error.localizedDescription == "fixture registration failed", thrown.currentReadCount == 2, thrown.registerCount == 1 else {
+            fatalError("registration error identity/details must be preserved")
+        }
+    }
+
+    for terminal in [GatewayBackgroundStatus.notFound, .unavailable, .notRegistered] {
+        let fixture = GatewayBackgroundRegistrationFake(states: [terminal], registerError: nil)
+        do {
+            try GatewayBackgroundRegistrationCoordinator(fixture).ensureEnabled()
+            fatalError("terminal state \(terminal) must fail closed")
+        } catch let error as GatewayBackgroundRegistrationError {
+            let expectedRegisterCount = terminal == .notRegistered ? 1 : 0
+            guard fixture.registerCount == expectedRegisterCount else { fatalError("terminal state registration count mismatch") }
+            switch terminal {
+            case .notFound: guard error == .notFound else { fatalError("notFound error mismatch") }
+            case .unavailable: guard error == .unavailable else { fatalError("unavailable error mismatch") }
+            case .notRegistered: guard error == .persistentlyNotRegistered else { fatalError("persistent notRegistered error mismatch") }
+            default: fatalError("unexpected terminal fixture")
+            }
+        }
+    }
+}
+
+private func expectBuild19BackgroundServiceContracts() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let core = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitCore/GatewayBackgroundServiceRegistration.swift"), encoding: .utf8)
+    let service = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Services/GatewayBackgroundService.swift"), encoding: .utf8)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+
+    for required in ["GatewayBackgroundStatus", "GatewayBackgroundRegistration", "GatewayBackgroundRegistrationError", "GatewayBackgroundRegistrationCoordinator", "register()", "requiresApproval", "persistentlyNotRegistered"] {
+        if !core.contains(required) { fatalError("Build19 core registration contract missing \(required)") }
+    }
+    for required in ["GatewayBackgroundServiceProviding", "openLoginItemsSettings()", "SMAppService.openSystemSettingsLoginItems()", "GatewayBackgroundRegistrationCoordinator", "embeddedPlistURL", "return false"] {
+        if !service.contains(required) { fatalError("Build19 service contract missing \(required)") }
+    }
+    if service.contains("makeStartProcess") || service.contains("gateway.start(") {
+        fatalError("background service must not add a direct-child fallback")
+    }
+    for required in ["private var backgroundService", "GatewayBackgroundServiceProviding", "backgroundService.ensureRegisteredIfPackaged()", "GatewayBackgroundRegistrationError", "backgroundServiceRecovery"] {
+        if !appModel.contains(required) { fatalError("Build19 AppModel injection/error contract missing \(required)") }
+    }
+    for required in ["Open Login Items", "openLoginItemsSettings()", "requiresApproval", "open-login-items-settings"] {
+        if !content.contains(required) { fatalError("Build19 Login Items recovery UI contract missing \(required)") }
+    }
+    guard let owner = appModel.range(of: "try gateway.holdControlOwnerLease"),
+          let route = appModel.range(of: "managedCodexRouteStatus()", range: owner.upperBound..<appModel.endIndex),
+          let serviceRegistration = appModel.range(of: "ensureRegisteredIfPackaged()", range: route.upperBound..<appModel.endIndex),
+          let start = appModel.range(of: "try gateway.start(", range: serviceRegistration.upperBound..<appModel.endIndex),
+          owner.lowerBound < route.lowerBound && route.lowerBound < serviceRegistration.lowerBound && serviceRegistration.lowerBound < start.lowerBound else {
+        fatalError("Build19 must preserve owner lease -> route status -> service registration -> helper start order")
+    }
+    if let enableStart = appModel.range(of: "func enableCodexForDesktop() async throws"),
+       let enableEnd = appModel.range(of: "    func disableCodexForDesktop()", range: enableStart.upperBound..<appModel.endIndex) {
+        let enable = appModel[enableStart.lowerBound..<enableEnd.lowerBound]
+        if !enable.contains("throw startupError") || !enable.contains("throw restartError") {
+            fatalError("Build19 enable path must preserve background-service errors instead of masking them")
+        }
+    }
+}
+
+private func expectBuild19ProviderCredentialAccessContracts() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let core = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitCore/ProviderCredentialAccess.swift"), encoding: .utf8)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    let app = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift"), encoding: .utf8)
+
+    for required in [
+        "protocol ProviderCredentialAccess",
+        "func load(service: String)",
+        "func loadIfPresent(service: String)",
+        "func save(value: String, service: String)",
+        "func delete(service: String)",
+        "KeychainProviderCredentialAccess",
+        "InMemoryProviderCredentialAccess",
+        "private var values: [String: String]",
+    ] {
+        if !core.contains(required) { fatalError("provider credential access contract missing \(required)") }
+    }
+    for required in [
+        "try KeychainCredentialStore.load(service: service)",
+        "try KeychainCredentialStore.loadIfPresent(service: service)",
+        "try KeychainCredentialStore.save(value: value, service: service)",
+        "try KeychainCredentialStore.delete(service: service)",
+    ] {
+        if !core.contains(required) { fatalError("Keychain credential backend must delegate exactly to \(required)") }
+    }
+    for required in [
+        "private let credentialAccess: any ProviderCredentialAccess",
+        "InMemoryProviderCredentialAccess(seed:",
+        "relaykit.ui-smoke.provider.fixture",
+        "relaykit-ui-smoke-key",
+        "KeychainProviderCredentialAccess()",
+        "try credentialAccess.load(service: reference)",
+        "credentialAccess.loadIfPresent(service:",
+        "credentialAccess.save(value: value, service: service)",
+        "credentialAccess.delete(service: service)",
+        "func loadProviderCredential(service: String)",
+    ] {
+        if !appModel.contains(required) { fatalError("AppModel credential access routing missing \(required)") }
+    }
+    if content.contains("KeychainCredentialStore.load") {
+        fatalError("ContentView must use AppModel credential access, not direct Keychain reads")
+    }
+    for required in [
+        "model.loadProviderCredential(service: credentialReferenceForSave)",
+        "model.loadProviderCredential(service: credentialReferenceForSave)",
+    ] {
+        if !content.contains(required) { fatalError("ContentView credential access routing missing \(required)") }
+    }
+    for forbidden in ["smokeSeedKeychainService", "--ui-smoke-seed-keychain", "seedSmokeKeychainCredentialIfNeeded"] {
+        if app.contains(forbidden) { fatalError("obsolete UI smoke Keychain seeding must be removed: \(forbidden)") }
+    }
+    for required in ["--delete-dogfood-keychain", "--delete-desktop-proof-keychain", "deleteFixtureKeychain"] {
+        if !app.contains(required) { fatalError("fixture Keychain cleanup CLI regressed: \(required)") }
+    }
+
+    let seeded = InMemoryProviderCredentialAccess(seed: [
+        "relaykit.ui-smoke.provider.fixture": "relaykit-ui-smoke-key",
+    ])
+    guard try seeded.load(service: "relaykit.ui-smoke.provider.fixture") == "relaykit-ui-smoke-key" else {
+        fatalError("UI smoke credential fixture was not preseeded")
+    }
+    guard try seeded.loadIfPresent(service: "relaykit.ui-smoke.provider.unknown") == nil else {
+        fatalError("unknown UI smoke credential must fail closed")
+    }
+    try seeded.save(value: "updated-fixture", service: "relaykit.ui-smoke.provider.fixture")
+    guard try seeded.load(service: "relaykit.ui-smoke.provider.fixture") == "updated-fixture" else {
+        fatalError("in-memory credential save/load failed")
+    }
+    try seeded.delete(service: "relaykit.ui-smoke.provider.fixture")
+    guard try seeded.loadIfPresent(service: "relaykit.ui-smoke.provider.fixture") == nil else {
+        fatalError("in-memory credential delete failed")
+    }
+    do {
+        _ = try seeded.load(service: "relaykit.ui-smoke.provider.fixture")
+        fatalError("missing in-memory credential load must fail closed")
+    } catch {
+    }
+    let independent = InMemoryProviderCredentialAccess(seed: ["fixture": "value"])
+    guard try independent.load(service: "fixture") == "value",
+          try seeded.loadIfPresent(service: "fixture") == nil else {
+        fatalError("in-memory credential stores must be independent")
+    }
+}
+
 let validConfig = """
 {
   "providers": [
@@ -878,12 +1102,12 @@ func expectRuntimeSafetyEndpointContract() throws {
             fatalError("bundled verifier endpoint contract missing \(required)")
         }
     }
-    for required in ["let runtimeEndpoint: RelayKitRuntimeEndpoint", "init(endpoint: RelayKitRuntimeEndpoint)", "GatewayProcess(endpoint: endpoint)", "GatewayClient(endpoint: endpoint)", "runtimeEndpoint.listenAddress"] {
+    for required in ["let runtimeEndpoint: RelayKitRuntimeEndpoint", "init(endpoint: RelayKitRuntimeEndpoint", "GatewayProcess(endpoint: endpoint)", "GatewayClient(endpoint: endpoint)", "runtimeEndpoint.listenAddress"] {
         if !appModel.contains(required) {
             fatalError("AppModel endpoint contract missing \(required)")
         }
     }
-    for required in ["let endpoint: RelayKitRuntimeEndpoint", "try RelayKitRuntimeEndpoint.resolve()", "RelayKit runtime safety test endpoint is invalid.", "exit(2)", "RelayKitApp(endpoint: endpoint)", "model.runtimeEndpoint.listenAddress"] {
+    for required in ["let endpoint: RelayKitRuntimeEndpoint", "try RelayKitRuntimeEndpoint.resolve()", "RelayKit runtime safety test endpoint is invalid.", "exit(2)", "RelayKitApp(endpoint: endpoint, initialization: initialization)", "model.runtimeEndpoint.listenAddress"] {
         if !app.contains(required) {
             fatalError("App entrypoint fail-closed contract missing \(required)")
         }
@@ -924,7 +1148,7 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
         "if disabled.stopHelper {\n                gateway.stop()",
         "gatewayStatus = gateway.isRunning ? \"running\" : \"stopped\"",
         "lastOfficialCatalog",
-        "GatewayBackgroundService().ensureRegisteredIfPackaged()",
+        "backgroundService.ensureRegisteredIfPackaged()",
         "gateway.holdControlOwnerLease(at: controlTokenPath)",
         "beginGatewayServiceMonitorIfNeeded()",
         "healthMode()",
@@ -940,7 +1164,7 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
     guard let tokenPath = appModel.range(of: "let controlTokenPath = try ensureGatewayControlToken()"),
           let ownerLease = appModel.range(of: "try gateway.holdControlOwnerLease(at: controlTokenPath)", range: tokenPath.upperBound..<appModel.endIndex),
           let routeStatus = appModel.range(of: "let managedRouteEnabled = managedCodexRouteStatus() == \"enabled\"", range: ownerLease.upperBound..<appModel.endIndex),
-          let serviceRegistration = appModel.range(of: "GatewayBackgroundService().ensureRegisteredIfPackaged()", range: routeStatus.upperBound..<appModel.endIndex),
+          let serviceRegistration = appModel.range(of: "backgroundService.ensureRegisteredIfPackaged()", range: routeStatus.upperBound..<appModel.endIndex),
           tokenPath.lowerBound < ownerLease.lowerBound && ownerLease.lowerBound < routeStatus.lowerBound && routeStatus.lowerBound < serviceRegistration.lowerBound else {
         fatalError("App must hold the control-token owner lease before reading route state or starting launchd")
     }
@@ -949,7 +1173,7 @@ func expectRuntimeSafetyLifecycleSourceContracts() throws {
             fatalError("two-epoch App route-mode contract missing \(required)")
         }
     }
-    for required in ["SMAppService.agent(plistName:", "case .requiresApproval:", "System Settings > General > Login Items", "return false"] {
+    for required in ["SMAppService.agent(plistName:", "GatewayBackgroundRegistrationCoordinator", "return false"] {
         if !backgroundService.contains(required) {
             fatalError("background service fail-closed contract missing \(required)")
         }
@@ -1067,7 +1291,7 @@ func expectBuild18AppLifecycleRemediationContracts() throws {
         }
     }
 
-    guard let initializerStart = appModel.range(of: "    init(endpoint: RelayKitRuntimeEndpoint) {"),
+    guard let initializerStart = appModel.range(of: "    init(endpoint: RelayKitRuntimeEndpoint, initialization:"),
           let initializerEnd = appModel.range(of: "    func useTemporaryProviderConfigPath", range: initializerStart.upperBound..<appModel.endIndex) else {
         fatalError("Build 18 initializer boundary is missing")
     }
@@ -1199,6 +1423,11 @@ func expectAppSettingsPersistence() {
 }
 
 func expectProviderConfigPathRecoversStaleTemporaryPreference() {
+    guard RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: nil) == false,
+          RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: "") == false,
+          RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: "/opt/relaykit-public-fixture/providers.json") == false else {
+        fatalError("nil, empty, and ordinary provider preferences must not be marked stale")
+    }
     let stale = "/tmp/relaykit-detail-debug.dead/fixture-providers.json"
     let resolved = RelayKitPaths.resolvedProviderConfigPath(savedPath: stale) { _ in false }
     if resolved != RelayKitPaths.providerConfigPath() {
@@ -1230,6 +1459,708 @@ func expectProviderConfigPathRecoversStaleTemporaryPreference() {
     let preservedUnrelatedDist = RelayKitPaths.resolvedProviderConfigPath(savedPath: unrelatedDist) { $0 == unrelatedDist }
     if preservedUnrelatedDist != unrelatedDist {
         fatalError("unrelated dist provider config should remain explicit: \(preservedUnrelatedDist)")
+    }
+}
+
+func expectBuild19ActivePathContextAndProviderConfigResolution() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+
+    for required in [
+        "providerConfigDefaults",
+        "initialization.providerConfigDefaults",
+        "RelayKitPaths.resolvedProviderConfigPath(savedPath: savedPath)",
+        "RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: savedPath)",
+        "providerConfigDefaults.set(resolvedProviderConfigPath, forKey: \"providerConfigPath\")",
+    ] {
+        if !appModel.contains(required) { fatalError("provider config path resolution contract missing \(required)") }
+    }
+    guard let explicitPath = appModel.range(of: "if let explicitProviderConfigPath = initialization.providerConfigPath"),
+          let resolvedPath = appModel.range(of: "RelayKitPaths.resolvedProviderConfigPath(savedPath: savedPath)", range: explicitPath.upperBound..<appModel.endIndex),
+          let recovery = appModel.range(of: "RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: savedPath)", range: resolvedPath.upperBound..<appModel.endIndex),
+          explicitPath.lowerBound < resolvedPath.lowerBound,
+          resolvedPath.lowerBound < recovery.lowerBound else {
+        fatalError("explicit injected provider path must bypass ordinary resolution and recovery")
+    }
+
+    let isolatedDefaultsName = "relaykit-provider-path-contract-\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: isolatedDefaultsName) else {
+        fatalError("isolated defaults suite unavailable")
+    }
+    defaults.removePersistentDomain(forName: isolatedDefaultsName)
+    let stale = "/tmp/relaykit-provider-path-contract-\(UUID().uuidString)/providers.json"
+    defaults.set(stale, forKey: "providerConfigPath")
+    guard defaults.string(forKey: "providerConfigPath") == stale else {
+        fatalError("isolated provider path fixture did not persist")
+    }
+    guard RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: nil) == false,
+          RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: "/opt/relaykit-provider-valid/providers.json") == false,
+          RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: stale) else {
+        fatalError("provider path recovery matrix regressed")
+    }
+    defaults.removePersistentDomain(forName: isolatedDefaultsName)
+
+    for required in [
+        "model.activePathContext.codexConfigPath",
+        "model.activePathContext.codexConfigStatePath",
+        "model.activePathContext.officialCodexHomePath",
+        "model.activePathContext.codexCatalogPath",
+        "model.activePathContext.officialRouteEvidencePath",
+    ] {
+        if !content.contains(required) { fatalError("active path context display contract missing \(required)") }
+    }
+    for forbidden in [
+        "RelayKitPaths.defaultCodexConfigPath()",
+        "RelayKitPaths.codexConfigStatePath()",
+        "RelayKitPaths.officialCodexHomePath()",
+        "RelayKitPaths.codexCatalogPath()",
+        "RelayKitPaths.officialRouteEvidencePath()",
+    ] {
+        if content.contains(forbidden) { fatalError("static path display remains in ContentView: \(forbidden)") }
+    }
+}
+
+func expectBuild19RuntimePathIsolation() throws {
+    let root = URL(fileURLWithPath: "/tmp/relaykit-runtime-root")
+    let environment = [
+        "RELAYKIT_RUNTIME_SAFETY_TEST": "1",
+        "RELAYKIT_RUNTIME_SAFETY_ROOT": root.path,
+        "HOME": "/tmp/relaykit-fake-home",
+        "CFFIXED_USER_HOME": "/tmp/relaykit-fake-preferences",
+        "CODEX_HOME": "/tmp/relaykit-fake-codex",
+    ]
+    let context = try RelayKitPaths.runtimeContext(environment: environment)
+    guard context.rootURL?.path == root.standardizedFileURL.path else {
+        fatalError("runtime context must retain the explicit normalized root")
+    }
+    let derivedPaths = [
+        context.applicationSupportDirectory.path,
+        context.providerConfigPath,
+        context.usageLogPath,
+        context.codexConfigPath,
+        context.codexCatalogPath,
+        context.codexConfigStatePath,
+        context.gatewayControlTokenPath,
+        context.officialProofRootPath,
+        context.desktopProofRootPath,
+        context.officialHomePath,
+        context.officialCodexHomePath,
+        context.officialCredentialRefPath,
+        context.officialRouteEvidencePath,
+    ]
+    for path in derivedPaths where !path.hasPrefix(root.path + "/") {
+        fatalError("runtime path escaped explicit root: (path)")
+    }
+    guard context.codexConfigPath != "/tmp/relaykit-fake-home/.codex/config.toml",
+          context.applicationSupportDirectory.path != "/tmp/relaykit-fake-home/Library/Application Support/RelayKit" else {
+        fatalError("fake HOME/CFFIXED_USER_HOME/CODEX_HOME must not control runtime paths")
+    }
+
+    do {
+        _ = try RelayKitPaths.runtimeContext(environment: ["RELAYKIT_RUNTIME_SAFETY_TEST": "1"])
+        fatalError("runtime safety mode must require an explicit root")
+    } catch {
+    }
+    do {
+        _ = try RelayKitPaths.runtimeContext(environment: [
+            "RELAYKIT_RUNTIME_SAFETY_TEST": "1",
+            "RELAYKIT_RUNTIME_SAFETY_ROOT": "relative/runtime-root",
+        ])
+        fatalError("runtime safety mode must reject a relative root")
+    } catch {
+    }
+    do {
+        _ = try RelayKitPaths.runtimeContext(environment: [
+            "RELAYKIT_RUNTIME_SAFETY_TEST": "1",
+            "RELAYKIT_RUNTIME_SAFETY_ROOT": "/tmp/relaykit-runtime-root/../escape",
+        ])
+        fatalError("runtime safety mode must reject a non-normalized root")
+    } catch {
+    }
+
+    let ordinary = try RelayKitPaths.runtimeContext(environment: ["HOME": "/tmp/fake-home"])
+    guard ordinary.rootURL == nil else { fatalError("ordinary mode must not enter runtime-root mode") }
+}
+
+func expectBuild19RuntimeOfficialFixtureIsolation() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let paths = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitCore/RelayKitPaths.swift"), encoding: .utf8)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+
+    for required in [
+        "public let desktopProofRootPath: String",
+        "let officialProofRoot = applicationSupportDirectory.appendingPathComponent(\"OfficialProof\"",
+        "let desktopProofRoot = applicationSupportDirectory.appendingPathComponent(\"DesktopProof\"",
+        "desktopProofRootPath = desktopProofRoot.path",
+    ] {
+        if !paths.contains(required) { fatalError("distinct DesktopProof path context contract missing \(required)") }
+    }
+    for required in [
+        "let support = pathContext.applicationSupportDirectory.standardizedFileURL",
+        "lstat(",
+        "S_IFLNK",
+        "pathContext.desktopProofRootPath",
+    ] {
+        if !appModel.contains(required) { fatalError("runtime Official/Desktop fixture containment contract missing \(required)") }
+    }
+    if appModel.contains("let support = RelayKitPaths.applicationSupportDirectory()") {
+        fatalError("runtime Official fixture must use the active path context")
+    }
+    let runtime = try RelayKitPaths.runtimeContext(environment: [
+        "RELAYKIT_RUNTIME_SAFETY_TEST": "1",
+        "RELAYKIT_RUNTIME_SAFETY_ROOT": "/tmp/relaykit-runtime-official-proof",
+    ])
+    let ordinary = try RelayKitPaths.runtimeContext(environment: [:], homeDirectory: URL(fileURLWithPath: "/tmp/relaykit-ordinary-proof-user"))
+    guard runtime.officialProofRootPath != runtime.desktopProofRootPath,
+          ordinary.officialProofRootPath != ordinary.desktopProofRootPath,
+          runtime.officialProofRootPath.hasSuffix("/OfficialProof"),
+          runtime.desktopProofRootPath.hasSuffix("/DesktopProof"),
+          ordinary.officialProofRootPath.hasSuffix("/OfficialProof"),
+          ordinary.desktopProofRootPath.hasSuffix("/DesktopProof") else {
+        fatalError("OfficialProof and DesktopProof roots must remain distinct in ordinary and runtime contexts")
+    }
+    for path in [runtime.officialProofRootPath, runtime.desktopProofRootPath] {
+        guard path.hasPrefix(runtime.applicationSupportDirectory.path + "/") else {
+            fatalError("runtime proof root escaped active Application Support")
+        }
+    }
+}
+
+func expectBuild19UISmokeInitializationContracts() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let paths = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitCore/RelayKitPaths.swift"), encoding: .utf8)
+    let app = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift"), encoding: .utf8)
+    let model = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+
+    for required in [
+        "public struct RelayKitPathContext",
+        "public static func runtimeContext(",
+        "environment: [String: String]",
+        "RELAYKIT_RUNTIME_SAFETY_ROOT",
+        "rootURL",
+        "officialProofRootPath",
+        "codexConfigStatePath",
+        "gatewayControlTokenPath",
+    ] {
+        if !paths.contains(required) { fatalError("runtime path context contract missing (required)") }
+    }
+    for required in [
+        "RelayKitPaths.runtimeContext(environment: ProcessInfo.processInfo.environment)",
+        "AppModelInitialization",
+        "--ui-smoke-provider-config",
+        "initialization",
+        "runtime context is invalid",
+        "exit(2)",
+    ] {
+        if !app.contains(required) { fatalError("ui-smoke initialization contract missing (required)") }
+    }
+    if app.contains("model.useTemporaryProviderConfigPath(smokeProviderConfigPath)") {
+        fatalError("ui-smoke provider path must be passed during initialization, before first refresh")
+    }
+    for required in [
+        "struct AppModelInitialization",
+        "pathContext",
+        "providerConfigPath",
+        "usageLogPath",
+        "persistSettings",
+        "DesktopAcceptanceEvidence.load(bundle: .main, pathContext:",
+    ] {
+        if !model.contains(required) { fatalError("AppModel isolated initialization contract missing (required)") }
+    }
+    if model.contains("@Published var usageLogPath = AppModel.defaultUsageLogPath()") ||
+        model.contains("@Published var desktopAcceptance = DesktopAcceptanceEvidence.load()") {
+        fatalError("smoke-sensitive paths must not be initialized through ordinary global defaults")
+    }
+    if model.contains("refreshLaunchAtLoginStatus()\n        refreshConfiguredProviders()") {
+        fatalError("ui-smoke initialization must not query global login-item status")
+    }
+}
+
+func expectBuild19UISmokeAppearanceContracts() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let app = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/App/RelayKitApp.swift"), encoding: .utf8)
+    let model = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+
+    for required in [
+        "--ui-smoke-appearance",
+        "parseSmokeAppearance",
+        "case \"system\": return .system",
+        "case \"light\": return .light",
+        "case \"dark\": return .dark",
+        "default: return nil",
+        "if isUISmoke",
+        "appearanceMode: smokeAppearance",
+    ] {
+        if !app.contains(required) { fatalError("UI smoke appearance contract missing (required)") }
+    }
+    guard let smokeStart = app.range(of: "if isUISmoke"),
+          let modelInit = app.range(of: "RelayKitApp(endpoint: endpoint, initialization: initialization)") else {
+        fatalError("UI smoke appearance must be resolved before AppModel construction")
+    }
+    guard smokeStart.lowerBound < modelInit.lowerBound else {
+        fatalError("UI smoke appearance was resolved after AppModel construction")
+    }
+    if app.contains("appearanceMode: AppAppearanceMode(rawValue: value(after: \"--ui-smoke-appearance\"))") {
+        fatalError("UI smoke appearance must use the exact public mapping, not raw-value passthrough")
+    }
+    for required in [
+        "appearanceMode = initialization.appearanceMode",
+        "settingsStore = initialization.persistSettings ? AppSettingsStore() : nil",
+        "settingsStore?.appearanceMode = appearanceMode",
+        "persistSettings: false",
+    ] {
+        if !model.contains(required) && !app.contains(required) {
+            fatalError("nonpersistent smoke appearance contract missing (required)")
+        }
+    }
+    if !model.contains("appearanceMode: AppSettingsStore().appearanceMode") {
+        fatalError("ordinary launch must retain persisted appearance initialization")
+    }
+}
+
+func expectBuild19UISmokeGatewayStartFailClosed() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let appModel = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    guard let start = appModel.range(of: "func startGateway(officialCatalog: Data? = nil) -> Error?"),
+          let end = appModel.range(of: "    func stopGateway()", range: start.upperBound..<appModel.endIndex) else {
+        fatalError("startGateway source boundary is missing")
+    }
+    let body = appModel[start.lowerBound..<end.lowerBound]
+    guard let smokeGuard = body.range(of: "if isUISmoke"),
+          let message = body.range(of: "Gateway start is disabled in UI smoke.", range: smokeGuard.upperBound..<body.endIndex),
+          let returnError = body.range(of: "return error", range: message.upperBound..<body.endIndex) else {
+        fatalError("UI smoke startGateway must fail closed with a public-safe message and error")
+    }
+    for forbidden in ["ensureGatewayControlToken()", "holdControlOwnerLease", "makeGatewayRuntimeConfig", "GatewayCredentialHandoff.encode", "backgroundService.ensureRegisteredIfPackaged()", "try gateway.start("] {
+        guard let forbiddenRange = body.range(of: forbidden) else { continue }
+        guard smokeGuard.lowerBound < forbiddenRange.lowerBound else {
+            fatalError("UI smoke startGateway guard must precede (forbidden)")
+        }
+    }
+    guard smokeGuard.lowerBound < message.lowerBound,
+          message.lowerBound < returnError.lowerBound else {
+        fatalError("UI smoke startGateway must return its fail-closed error")
+    }
+}
+
+func expectBuild19UISmokeVisibleAPIKeyToggle() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let model = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Stores/AppModel.swift"), encoding: .utf8)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+
+    guard model.contains("var isUISmokePresentation: Bool") else {
+        fatalError("AppModel must expose a read-only UI-smoke presentation state")
+    }
+    guard let smokeBranch = content.range(of: "if model.isUISmokePresentation"),
+          let textLabel = content.range(of: "Text(ProviderFormLabels.apiKeyEyeLabel(showingKey: showsNewAPIKey))", range: smokeBranch.upperBound..<content.endIndex),
+          let ordinaryBranch = content.range(of: "Image(systemName: showsNewAPIKey ? \"eye.slash\" : \"eye\")", range: smokeBranch.upperBound..<content.endIndex) else {
+        fatalError("API key toggle must use visible text in UI smoke and the existing eye image otherwise")
+    }
+    guard smokeBranch.lowerBound < textLabel.lowerBound,
+          smokeBranch.lowerBound < ordinaryBranch.lowerBound else {
+        fatalError("API key toggle presentation branches are ordered incorrectly")
+    }
+    let smokeTextBody = content[textLabel.lowerBound..<ordinaryBranch.lowerBound]
+    if smokeTextBody.contains(".frame(width: 22)") {
+        fatalError("UI smoke API key text must keep its natural width")
+    }
+    let ordinaryImageBody = content[ordinaryBranch.lowerBound..<content.endIndex]
+    if !ordinaryImageBody.contains(".frame(width: 22)") {
+        fatalError("ordinary API key eye image must retain its 22pt frame")
+    }
+    let apiKeyEntryStart = content.range(of: "private var apiKeyEntryField")?.lowerBound ?? content.startIndex
+    let apiKeyEntry = content[apiKeyEntryStart..<content.endIndex]
+    for required in [
+        ".accessibilityLabel(ProviderFormLabels.apiKeyEyeLabel(showingKey: showsNewAPIKey))",
+        ".accessibilityIdentifier(ProviderFormLabels.apiKeyEyeLabel(showingKey: showsNewAPIKey))",
+    ] {
+        if !apiKeyEntry.contains(required) { fatalError("API key toggle accessibility contract missing (required)") }
+    }
+    if !apiKeyEntry.contains("Button {") || !apiKeyEntry.contains("showsNewAPIKey.toggle()") {
+        fatalError("API key toggle action must remain unchanged")
+    }
+    if !apiKeyEntry.contains(".disabled(keychainCredential.isEmpty)") {
+        fatalError("API key toggle disabled-state contract must remain unchanged")
+    }
+}
+
+func expectBuild19UISmokeDeterministicProviderPlacement() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    let formStart = content.range(of: "private struct ProviderFormView")?.lowerBound ?? content.startIndex
+    let form = content[formStart..<content.endIndex]
+
+    for forbidden in [
+        "ScrollViewReader",
+        "provider-api-key-scroll-target",
+        "provider-hidden-models-scroll-target",
+        "didUISmokeInitialScroll",
+        "hiddenModelCount",
+        "scrollTo(",
+        "Task.yield()",
+    ] {
+        if form.contains(forbidden) { fatalError("UI smoke provider form retained removed scroll mechanism: \(forbidden)") }
+    }
+    guard let smokeGuard = form.range(of: "if model.isUISmokePresentation, let provider = editingProvider"),
+          let smokePanel = form.range(of: "providerHealthPanel(provider)", range: smokeGuard.upperBound..<form.endIndex),
+          let modelsHeader = form.range(of: "Text(\"Models\")", range: smokePanel.upperBound..<form.endIndex),
+          smokeGuard.lowerBound < smokePanel.lowerBound,
+          smokePanel.lowerBound < modelsHeader.lowerBound else {
+        fatalError("UI smoke provider health panel must render before the Models header")
+    }
+    guard let ordinaryGuard = form.range(of: "if !model.isUISmokePresentation, let provider = editingProvider"),
+          let connectionStatus = form.range(of: "connectionTestStatusRow"),
+          let ordinaryPanel = form.range(of: "providerHealthPanel(provider)", range: ordinaryGuard.upperBound..<form.endIndex),
+          let modelRows = form.range(of: "ForEach($modelRows)", range: ordinaryPanel.upperBound..<form.endIndex),
+          connectionStatus.lowerBound < ordinaryPanel.lowerBound,
+          ordinaryPanel.lowerBound < modelRows.lowerBound else {
+        fatalError("ordinary provider health panel must remain after connection status and before model rows")
+    }
+    guard form.components(separatedBy: "providerHealthPanel(provider)").count - 1 == 2 else {
+        fatalError("provider health panel must have exactly two mutually exclusive render sites")
+    }
+    guard form.components(separatedBy: "Text(\"Hidden models\")").count - 1 == 2,
+          form.components(separatedBy: "isHiddenModelsExpanded.toggle()").count - 1 == 1 else {
+        fatalError("hidden-model label branches/action are not stable")
+    }
+    for required in [
+        "if model.isUISmokePresentation",
+        "Text(\"Hidden models\")\n                                .font(.system(size: 13, weight: .semibold))\n                                .foregroundStyle(primaryText)",
+        ".font(.system(size: 10, weight: .semibold))",
+        ".foregroundStyle(secondaryText)",
+        ".smokeRecordOnly(\"provider-hidden-models-toggle\", recorder: smokeSectionRecorder)",
+    ] {
+        if !form.contains(required) { fatalError("hidden-model presentation contract missing \(required)") }
+    }
+    guard let hiddenStart = form.range(of: "if !health.hidden.isEmpty {"),
+          let toggleEnd = form.range(of: ".smokeRecordOnly(\"provider-hidden-models-toggle\"", range: hiddenStart.upperBound..<form.endIndex),
+          let smokeStart = form.range(of: "if model.isUISmokePresentation", range: hiddenStart.upperBound..<toggleEnd.lowerBound),
+          let ordinaryStart = form.range(of: "else {", range: smokeStart.upperBound..<toggleEnd.lowerBound) else {
+        fatalError("hidden-model smoke/ordinary branches are missing")
+    }
+    let smokeBranch = form[smokeStart.lowerBound..<ordinaryStart.lowerBound]
+    let ordinaryBranch = form[ordinaryStart.lowerBound..<toggleEnd.lowerBound]
+    if smokeBranch.contains("Image(systemName:") {
+        fatalError("UI smoke hidden-model label must not render a chevron symbol")
+    }
+    guard let ordinaryImage = ordinaryBranch.range(of: "Image(systemName: isHiddenModelsExpanded ? \"chevron.down\" : \"chevron.right\")"),
+          let ordinaryImageFont = ordinaryBranch.range(of: ".font(.system(size: 9, weight: .semibold))", range: ordinaryImage.upperBound..<ordinaryBranch.endIndex),
+          let ordinaryText = ordinaryBranch.range(of: "Text(\"Hidden models\")", range: ordinaryImageFont.upperBound..<ordinaryBranch.endIndex),
+          ordinaryImage.lowerBound < ordinaryImageFont.lowerBound,
+          ordinaryImageFont.lowerBound < ordinaryText.lowerBound else {
+        fatalError("ordinary hidden-model branch must retain chevron then bare label")
+    }
+}
+
+func expectBuild19UISmokeSecureFieldVisualAnchor() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    guard let start = content.range(of: "private var shouldShowUISmokeSecureFieldAnchor: Bool"),
+          let end = content.range(of: "    private var modelsSection", range: start.upperBound..<content.endIndex) else {
+        fatalError("API key replacement input source boundary is missing")
+    }
+    let source = content[start.lowerBound..<end.lowerBound]
+
+    for required in [
+        "private var shouldShowUISmokeSecureFieldAnchor: Bool",
+        "model.isUISmokePresentation && !keychainCredential.isEmpty",
+        "SecureField(placeholder, text: $keychainCredential)",
+        ".textFieldStyle(.plain)",
+        ".foregroundStyle(shouldShowUISmokeSecureFieldAnchor ? Color.clear : primaryText.opacity(0.90))",
+        ".overlay(alignment: .leading)",
+        "if shouldShowUISmokeSecureFieldAnchor",
+        "Text(placeholder)",
+        ".foregroundStyle(primaryText.opacity(0.90))",
+        ".allowsHitTesting(false)",
+        ".accessibilityLabel(\"API key field\")",
+        ".accessibilityIdentifier(\"api-key-new-input-field\")",
+    ] {
+        if !source.contains(required) { fatalError("UI smoke SecureField visual anchor contract missing \(required)") }
+    }
+    guard source.components(separatedBy: "SecureField(placeholder, text: $keychainCredential)").count - 1 == 1,
+          source.components(separatedBy: "TextField(placeholder, text: $keychainCredential)").count - 1 == 1 else {
+        fatalError("API key masked/visible field branches must remain single")
+    }
+    for forbidden in ["Button", "FocusState", ".focused(", ".gesture(", ".frame(", "DispatchQueue", "Task {"] {
+        if source.contains(forbidden) { fatalError("SecureField visual anchor added forbidden interaction/layout behavior: \(forbidden)") }
+    }
+    guard let visible = source.range(of: "TextField(placeholder, text: $keychainCredential)"),
+          let secure = source.range(of: "SecureField(placeholder, text: $keychainCredential)"),
+          visible.lowerBound < secure.lowerBound else {
+        fatalError("visible TextField must remain before masked SecureField")
+    }
+}
+
+func expectBuild19UISmokeAdvancedPresentation() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    guard let start = content.range(of: "private var advancedSection: some View"),
+          let end = content.range(of: "            if isAdvancedExpanded", range: start.upperBound..<content.endIndex) else {
+        fatalError("advanced provider section source boundary is missing")
+    }
+    let source = content[start.lowerBound..<end.lowerBound]
+    for required in [
+        "if model.isUISmokePresentation",
+        "Text(\"Advanced\")\n                            .font(.system(size: 13, weight: .semibold))\n                            .foregroundStyle(primaryText)",
+        "Image(systemName: isAdvancedExpanded ? \"chevron.down\" : \"chevron.right\")",
+        ".font(.system(size: 10, weight: .semibold))",
+        ".contentShape(Rectangle())",
+        ".font(.caption)",
+        ".foregroundStyle(secondaryText)",
+        ".accessibilityIdentifier(\"provider-advanced-toggle-row\")",
+        ".smokeRecordOnly(\"provider-advanced-toggle-row\", recorder: smokeSectionRecorder)",
+        "isAdvancedExpanded.toggle()",
+    ] {
+        if !source.contains(required) { fatalError("Advanced UI smoke presentation contract missing \(required)") }
+    }
+    guard source.components(separatedBy: "Text(\"Advanced\")").count - 1 == 2,
+          source.components(separatedBy: "Image(systemName: isAdvancedExpanded ? \"chevron.down\" : \"chevron.right\")").count - 1 == 1,
+          source.components(separatedBy: "isAdvancedExpanded.toggle()").count - 1 == 1 else {
+        fatalError("Advanced label/chevron/action cardinality changed")
+    }
+    guard let smokeStart = source.range(of: "if model.isUISmokePresentation"),
+          let ordinaryStart = source.range(of: "else {", range: smokeStart.upperBound..<source.endIndex) else {
+        fatalError("Advanced smoke/ordinary branches are missing")
+    }
+    let smokeBranch = source[smokeStart.lowerBound..<ordinaryStart.lowerBound]
+    let ordinaryBranch = source[ordinaryStart.lowerBound..<source.endIndex]
+    if smokeBranch.contains("Image(systemName:") {
+        fatalError("Advanced smoke branch must not render a chevron symbol")
+    }
+    guard let ordinaryImage = ordinaryBranch.range(of: "Image(systemName: isAdvancedExpanded ? \"chevron.down\" : \"chevron.right\")"),
+          let ordinaryText = ordinaryBranch.range(of: "Text(\"Advanced\")", range: ordinaryImage.upperBound..<ordinaryBranch.endIndex),
+          ordinaryImage.lowerBound < ordinaryText.lowerBound else {
+        fatalError("Advanced ordinary branch must retain chevron then bare label")
+    }
+}
+
+func expectBuild19UISmokeAdvancedDeterministicPlacement() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    guard let formStart = content.range(of: "private struct ProviderFormView"),
+          let bodyStart = content.range(of: "    var body: some View", range: formStart.upperBound..<content.endIndex),
+          let bodyEnd = content.range(of: "    private var formHeader", range: bodyStart.upperBound..<content.endIndex) else {
+        fatalError("provider form body source boundary is missing")
+    }
+    let body = content[bodyStart.lowerBound..<bodyEnd.lowerBound]
+    guard let smokeAPIHeader = body.range(of: "if model.isUISmokePresentation"),
+          let smokeAPI = body.range(of: "AnyView(apiKeyField)", range: smokeAPIHeader.upperBound..<body.endIndex),
+          let grid = body.range(of: "LazyVGrid(columns:", range: smokeAPI.upperBound..<body.endIndex),
+          let ordinaryAPIHeader = body.range(of: "if !model.isUISmokePresentation", range: grid.upperBound..<body.endIndex),
+          let ordinaryAPI = body.range(of: "AnyView(apiKeyField)", range: ordinaryAPIHeader.upperBound..<body.endIndex),
+          let smokeAdvancedHeader = body.range(of: "if model.isUISmokePresentation", range: ordinaryAPI.upperBound..<body.endIndex),
+          let smokeAdvanced = body.range(of: "AnyView(advancedSection)", range: smokeAdvancedHeader.upperBound..<body.endIndex),
+          let models = body.range(of: "AnyView(modelsSection)", range: smokeAdvanced.upperBound..<body.endIndex),
+          let ordinaryAdvancedHeader = body.range(of: "if !model.isUISmokePresentation", range: models.upperBound..<body.endIndex),
+          let ordinaryAdvanced = body.range(of: "AnyView(advancedSection)", range: ordinaryAdvancedHeader.upperBound..<body.endIndex),
+          smokeAPIHeader.lowerBound < smokeAPI.lowerBound,
+          smokeAPI.lowerBound < grid.lowerBound,
+          grid.lowerBound < ordinaryAPIHeader.lowerBound,
+          ordinaryAPIHeader.lowerBound < ordinaryAPI.lowerBound,
+          ordinaryAPI.lowerBound < smokeAdvancedHeader.lowerBound,
+          smokeAdvancedHeader.lowerBound < smokeAdvanced.lowerBound,
+          smokeAdvanced.lowerBound < models.lowerBound,
+          models.lowerBound < ordinaryAdvancedHeader.lowerBound,
+          ordinaryAdvancedHeader.lowerBound < ordinaryAdvanced.lowerBound else {
+        fatalError("provider form order must be smoke api key, grid, ordinary api key, smoke Advanced, Models, ordinary Advanced")
+    }
+    guard body.components(separatedBy: "AnyView(apiKeyField)").count - 1 == 2 else {
+        fatalError("provider form API key must have exactly two mutually exclusive render sites")
+    }
+    guard body.components(separatedBy: "AnyView(advancedSection)").count - 1 == 2 else {
+        fatalError("provider form Advanced must have exactly two render sites")
+    }
+    let definitionCount = content.components(separatedBy: "private var advancedSection: some View").count - 1
+    guard definitionCount == 1 else {
+        fatalError("provider form Advanced must have exactly one definition")
+    }
+    if body.contains("AnyView(advancedSection)\n\n                    Text(validationMessage)") {
+        fatalError("provider form Advanced must not retain an unconditional render site")
+    }
+}
+
+func expectBuild19UISmokeDeveloperPresentation() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    guard let start = content.range(of: "private var developerDiagnosticsSection: some View"),
+          let end = content.range(of: ".smokeRecordOnly(showingDeveloperDiagnostics", range: start.upperBound..<content.endIndex) else {
+        fatalError("Developer diagnostics source boundary is missing")
+    }
+    let source = content[start.lowerBound..<end.lowerBound]
+    for required in [
+        "if model.isUISmokePresentation",
+        "Text(\"Developer / Diagnostics\")",
+        ".font(.system(size: 13, weight: .semibold))",
+        ".foregroundStyle(primaryText)",
+        "sectionEyebrow(\"DEVELOPER / DIAGNOSTICS\")",
+        ".font(.headline)",
+        "Text(\"Manual proof, raw local paths, and evidence paths.\")",
+        ".font(.caption)",
+        ".foregroundStyle(secondaryText)",
+        "Image(systemName: showingDeveloperDiagnostics ? \"chevron.up\" : \"chevron.down\")",
+        "showingDeveloperDiagnostics.toggle()",
+        ".buttonStyle(.plain)",
+        ".accessibilityLabel(\"Developer / Diagnostics\")",
+        ".accessibilityIdentifier(\"settings-developer-toggle\")",
+    ] {
+        if !source.contains(required) { fatalError("Developer UI smoke presentation contract missing \(required)") }
+    }
+    guard let smokeStart = source.range(of: "if model.isUISmokePresentation"),
+          let ordinaryStart = source.range(of: "else {", range: smokeStart.upperBound..<source.endIndex) else {
+        fatalError("Developer smoke/ordinary branches are missing")
+    }
+    let smokeBranch = source[smokeStart.lowerBound..<ordinaryStart.lowerBound]
+    let ordinaryBranch = source[ordinaryStart.lowerBound..<source.endIndex]
+    for forbidden in ["sectionEyebrow(", "Manual proof, raw local paths", "Image(systemName:"] {
+        if smokeBranch.contains(forbidden) { fatalError("Developer smoke branch retained ordinary content: \(forbidden)") }
+    }
+    guard let ordinaryEyebrow = ordinaryBranch.range(of: "sectionEyebrow(\"DEVELOPER / DIAGNOSTICS\")"),
+          let ordinaryTitle = ordinaryBranch.range(of: "Text(\"Developer / Diagnostics\")", range: ordinaryEyebrow.upperBound..<ordinaryBranch.endIndex),
+          let ordinarySubtitle = ordinaryBranch.range(of: "Text(\"Manual proof, raw local paths, and evidence paths.\")", range: ordinaryTitle.upperBound..<ordinaryBranch.endIndex),
+          let ordinarySpacer = ordinaryBranch.range(of: "Spacer()", range: ordinarySubtitle.upperBound..<ordinaryBranch.endIndex),
+          let ordinaryImage = ordinaryBranch.range(of: "Image(systemName: showingDeveloperDiagnostics ? \"chevron.up\" : \"chevron.down\")", range: ordinarySpacer.upperBound..<ordinaryBranch.endIndex),
+          ordinaryEyebrow.lowerBound < ordinaryTitle.lowerBound,
+          ordinaryTitle.lowerBound < ordinarySubtitle.lowerBound,
+          ordinarySubtitle.lowerBound < ordinarySpacer.lowerBound,
+          ordinarySpacer.lowerBound < ordinaryImage.lowerBound else {
+        fatalError("Developer ordinary branch order changed")
+    }
+    guard source.components(separatedBy: "showingDeveloperDiagnostics.toggle()").count - 1 == 1,
+          source.components(separatedBy: "Text(\"Developer / Diagnostics\")").count - 1 == 2 else {
+        fatalError("Developer title/action cardinality changed")
+    }
+}
+
+func expectBuild19UISmokeDeveloperDeterministicPlacement() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    guard let settingsStart = content.range(of: "private var settingsTab: some View"),
+          let definitionStart = content.range(of: "private var developerDiagnosticsSection: some View"),
+          let settingsEnd = content.range(of: "    private var developerDiagnosticsSection: some View", range: settingsStart.upperBound..<content.endIndex),
+          let definitionEnd = content.range(of: "    private func settingsInfoRow", range: definitionStart.upperBound..<content.endIndex) else {
+        fatalError("Developer diagnostics section definition/settings boundaries are missing")
+    }
+    let settings = content[settingsStart.lowerBound..<settingsEnd.lowerBound]
+    let definition = content[definitionStart.lowerBound..<definitionEnd.lowerBound]
+    guard content.components(separatedBy: "private var developerDiagnosticsSection: some View").count - 1 == 1 else {
+        fatalError("Developer diagnostics section must have exactly one definition")
+    }
+    guard let settingsHeader = settings.range(of: ".smokeRecordOnly(\"tab-settings\""),
+          let smokeGuard = settings.range(of: "if model.isUISmokePresentation", range: settingsHeader.upperBound..<settings.endIndex),
+          let smokeCall = settings.range(of: "developerDiagnosticsSection", range: smokeGuard.upperBound..<settings.endIndex),
+          let generalGroup = settings.range(of: ".smokeSection(\"settings-general-group\"", range: smokeCall.upperBound..<settings.endIndex),
+          let dataPrivacyGroup = settings.range(of: ".smokeSection(\"settings-data-privacy-group\""),
+          let ordinaryGuard = settings.range(of: "if !model.isUISmokePresentation", range: dataPrivacyGroup.upperBound..<settings.endIndex),
+          let ordinaryCall = settings.range(of: "developerDiagnosticsSection", range: ordinaryGuard.upperBound..<settings.endIndex),
+          settingsHeader.lowerBound < smokeGuard.lowerBound,
+          smokeGuard.lowerBound < smokeCall.lowerBound,
+          smokeCall.lowerBound < generalGroup.lowerBound,
+          dataPrivacyGroup.lowerBound < ordinaryGuard.lowerBound,
+          ordinaryGuard.lowerBound < ordinaryCall.lowerBound else {
+        fatalError("Developer diagnostics call sites are not in smoke-header/ordinary-data order")
+    }
+    guard settings.components(separatedBy: "developerDiagnosticsSection").count - 1 == 2 else {
+        fatalError("Developer diagnostics section must have exactly two call sites")
+    }
+    for required in [
+        "showingDeveloperDiagnostics.toggle()",
+        "Developer / Diagnostics",
+        "Manual proof, raw local paths, and evidence paths.",
+        "ManualProofEntryView(",
+        ".buttonStyle(.plain)",
+        ".accessibilityIdentifier(\"settings-developer-toggle\")",
+        ".smokeRecordOnly(showingDeveloperDiagnostics ? \"settings-developer-expanded\" : \"settings-developer-collapsed\"",
+        "if showingDeveloperDiagnostics",
+        "desktop-acceptance-manual-proof-entry",
+        "advanced-paths",
+    ] {
+        if !definition.contains(required) { fatalError("Developer diagnostics extracted section lost \(required)") }
+    }
+    if settings.contains("sectionEyebrow(\"DEVELOPER / DIAGNOSTICS\")") || settings.contains("ManualProofEntryView(") {
+        fatalError("Developer diagnostics content must live only in its extracted section")
+    }
+}
+
+func expectBuild19UISmokeSaveFooter() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let content = try String(contentsOf: root.appendingPathComponent("Sources/RelayKitApp/Views/ContentView.swift"), encoding: .utf8)
+    guard let formStart = content.range(of: "private struct ProviderFormView"),
+          let bodyStart = content.range(of: "    var body: some View", range: formStart.upperBound..<content.endIndex),
+          let bodyEnd = content.range(of: "    private var formHeader", range: bodyStart.upperBound..<content.endIndex) else {
+        fatalError("provider form footer source boundary is missing")
+    }
+    let body = content[bodyStart.lowerBound..<bodyEnd.lowerBound]
+    guard let scrollView = body.range(of: "ScrollView {"),
+          let formHeaderStart = content.range(of: "private var formHeader: some View"),
+          let formHeaderEnd = content.range(of: "    private var advancedSection", range: formHeaderStart.upperBound..<content.endIndex),
+          let smokeStart = body.range(of: "if model.isUISmokePresentation", range: body.startIndex..<scrollView.lowerBound),
+          let smokeFormHeader = body.range(of: "formHeader", range: smokeStart.upperBound..<scrollView.lowerBound),
+          let smokeFrame = body.range(of: ".frame(maxWidth: .infinity, alignment: .leading)", range: smokeFormHeader.upperBound..<scrollView.lowerBound),
+          let smokeOverlay = body.range(of: ".overlay(alignment: .trailing)", range: smokeFrame.upperBound..<scrollView.lowerBound),
+          let ordinaryStart = body.range(of: "if !model.isUISmokePresentation", range: smokeOverlay.upperBound..<scrollView.lowerBound),
+          let ordinaryFormHeader = body.range(of: "formHeader", range: ordinaryStart.upperBound..<scrollView.lowerBound),
+          let ordinaryCancel = body.range(of: "Button(\"取消\")", range: ordinaryStart.upperBound..<body.endIndex),
+          let ordinarySave = body.range(of: "Button(mode.saveTitle) { save() }", range: ordinaryCancel.upperBound..<body.endIndex),
+          smokeStart.lowerBound < smokeFormHeader.lowerBound,
+          smokeFormHeader.lowerBound < smokeFrame.lowerBound,
+          smokeFrame.lowerBound < smokeOverlay.lowerBound,
+          smokeOverlay.lowerBound < ordinaryStart.lowerBound,
+          ordinaryStart.lowerBound < ordinaryFormHeader.lowerBound,
+          ordinaryStart.lowerBound < scrollView.lowerBound,
+          ordinaryStart.lowerBound < ordinaryCancel.lowerBound,
+          ordinaryCancel.lowerBound < ordinarySave.lowerBound else {
+        fatalError("provider form save placement must be smoke full-width header overlay, ordinary header, then ScrollView and footer")
+    }
+    let header = body[body.startIndex..<scrollView.lowerBound]
+    let smoke = body[smokeOverlay.lowerBound..<ordinaryStart.lowerBound]
+    let ordinary = body[ordinaryStart.lowerBound..<body.endIndex]
+    let formHeader = content[formHeaderStart.lowerBound..<formHeaderEnd.lowerBound]
+    if formHeader.contains("if model.isUISmokePresentation") || formHeader.contains(".overlay(alignment: .trailing)") || formHeader.contains(".frame(maxWidth: .infinity") {
+        fatalError("ordinary formHeader must remain bare without smoke frame or overlay")
+    }
+    guard header.components(separatedBy: "formHeader").count - 1 == 2,
+          header.contains(".padding(.bottom, 12)") else {
+        fatalError("provider form header branches must share one existing bottom padding")
+    }
+    guard smoke.contains("Text(\"Save\")"),
+          smoke.contains(".font(.system(size: 13, weight: .semibold))"),
+          smoke.contains(".foregroundStyle(primaryText)"),
+          smoke.contains("save()"),
+          smoke.contains(".buttonStyle(.plain)"),
+          smoke.contains(".accessibilityLabel(\"Save provider\")"),
+          smoke.contains(".accessibilityIdentifier(\"provider-form-save\")"),
+          smoke.contains(".disabled(!canSave)") else {
+        fatalError("UI smoke full-width save overlay contract is missing")
+    }
+    if smoke.contains("Text(mode.saveTitle)") {
+        fatalError("UI smoke save overlay must expose the stable public Save label")
+    }
+    if smoke.contains("取消") || smoke.contains("Spacer()") {
+        fatalError("UI smoke save overlay must be a unique natural-width save action without cancel")
+    }
+    if smoke.contains("ControlButtonStyle") || smoke.contains("prominent: true") || smoke.contains(".background(") || smoke.contains(".border(") {
+        fatalError("UI smoke save overlay must remain plain without prominent/background/border styling")
+    }
+    if smoke.contains(".frame(height:") || smoke.contains("ScrollView") || smoke.contains("Task {") || smoke.contains("DispatchQueue") {
+        fatalError("UI smoke save overlay added forbidden height/layout/timing behavior")
+    }
+    guard body.components(separatedBy: "Text(\"Save\")").count - 1 == 1,
+          body.components(separatedBy: "Button(mode.saveTitle) { save() }").count - 1 == 1 else {
+        fatalError("provider form save controls must have one smoke Text and one ordinary Button")
+    }
+    for required in [
+        "Spacer()",
+        "Button(\"取消\") { onClose() }",
+        "Button(mode.saveTitle) { save() }",
+        ".buttonStyle(ControlButtonStyle(prominent: true))",
+        ".accessibilityLabel(\"Cancel provider\")",
+        ".accessibilityIdentifier(\"provider-form-cancel\")",
+        ".accessibilityLabel(\"Save provider\")",
+        ".accessibilityIdentifier(\"provider-form-save\")",
+        ".disabled(!canSave)",
+    ] {
+        if !ordinary.contains(required) { fatalError("ordinary save footer regressed \(required)") }
     }
 }
 
@@ -1861,7 +2792,7 @@ func expectSignedBetaAppContracts() throws {
         "wasConnected != officialSnapshot.isConnected, gateway.isRunning",
         "reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)",
         "func reloadGatewayAfterProviderConfigChange() throws",
-        "func enableCodexForDesktop() async",
+        "func enableCodexForDesktop() async throws",
         "func disableCodexForDesktop() async",
         "func rebuildCodexCatalog(gatewayModels snapshot: Data? = nil, officialCatalog: Data? = nil) async throws",
         "let gatewayModels = try await client.modelListData()",
@@ -1874,16 +2805,16 @@ func expectSignedBetaAppContracts() throws {
         "let providers = root[\"providers\"] as? [[String: Any]]",
         "includeOfficialModels: includeOfficial",
         "var codexIntegrationHasManagedState: Bool",
-        "RelayKitPaths.defaultCodexConfigPath()",
-        "RelayKitPaths.codexCatalogPath()",
-        "RelayKitPaths.codexConfigStatePath()",
+        "pathContext.codexConfigPath",
+        "pathContext.codexCatalogPath",
+        "pathContext.codexConfigStatePath",
     ] {
         if !appModel.contains(required) { fatalError("Signed Beta App contract missing \(required)") }
     }
     if appModel.components(separatedBy: "reconcileGatewayAfterOfficialStatusChange(wasConnected: wasConnected)").count - 1 < 2 {
         fatalError("Official status refresh and explicit disconnect must both reconcile the running gateway")
     }
-    guard let initializerStart = appModel.range(of: "    init(endpoint: RelayKitRuntimeEndpoint) {"),
+    guard let initializerStart = appModel.range(of: "    init(endpoint: RelayKitRuntimeEndpoint, initialization:"),
           let initializerEnd = appModel.range(of: "    func useTemporaryProviderConfigPath", range: initializerStart.upperBound..<appModel.endIndex) else {
         fatalError("AppModel initializer contract is missing")
     }
@@ -1896,7 +2827,7 @@ func expectSignedBetaAppContracts() throws {
     }
     for required in [
         "confirmationDialog(", "Enable RelayKit", "Disable RelayKit", "managed fields", "restart Codex",
-        "openai_base_url", "model_catalog_json", ".bak.<timestamp>", "RelayKitPaths.codexConfigStatePath()",
+        "openai_base_url", "model_catalog_json", ".bak.<timestamp>", "model.activePathContext.codexConfigStatePath",
         "restores their pre-existing values", "never reads or writes auth.json", "does not change model or model_provider",
     ] {
         if !content.localizedCaseInsensitiveContains(required) { fatalError("Codex confirmation UI contract missing \(required)") }
@@ -2032,7 +2963,7 @@ func expectGracefulTerminationRestoresCodexRouteBeforeStoppingGateway() throws {
         fatalError("graceful termination must check guarded Codex state before guarded restoration")
     }
     let shutdown = appModel[shutdownStart.lowerBound..<appModel.endIndex]
-    for required in ["case \"enabled\"", "case \"disabled\"", "case \"drifted\"", "RelayKitPaths.defaultCodexConfigPath()", "RelayKitPaths.codexConfigStatePath()", "gatewayMustSurviveTermination = gateway.usesManagedService && gateway.isRunning", "managedRouteEpochObserved && gateway.isRunning"] {
+    for required in ["case \"enabled\"", "case \"disabled\"", "case \"drifted\"", "pathContext.codexConfigPath", "pathContext.codexConfigStatePath", "gatewayMustSurviveTermination = gateway.usesManagedService && gateway.isRunning", "managedRouteEpochObserved && gateway.isRunning"] {
         if !shutdown.contains(required) {
             fatalError("graceful termination guard is missing \(required)")
         }
@@ -2091,6 +3022,20 @@ try expectCredentialRefContract()
 try expectCapabilityContract()
 expectAppSettingsPersistence()
 expectProviderConfigPathRecoversStaleTemporaryPreference()
+try expectBuild19ActivePathContextAndProviderConfigResolution()
+try expectBuild19RuntimePathIsolation()
+try expectBuild19RuntimeOfficialFixtureIsolation()
+try expectBuild19UISmokeInitializationContracts()
+try expectBuild19UISmokeAppearanceContracts()
+try expectBuild19UISmokeGatewayStartFailClosed()
+try expectBuild19UISmokeVisibleAPIKeyToggle()
+try expectBuild19UISmokeDeterministicProviderPlacement()
+try expectBuild19UISmokeSecureFieldVisualAnchor()
+try expectBuild19UISmokeAdvancedPresentation()
+try expectBuild19UISmokeAdvancedDeterministicPlacement()
+try expectBuild19UISmokeDeveloperPresentation()
+try expectBuild19UISmokeDeveloperDeterministicPlacement()
+try expectBuild19UISmokeSaveFooter()
 expectOfficialProofRootOverride()
 expectProviderFormPresentationLabels()
 expectExplicitUpstreamProtocolSelectionWins()
@@ -2111,6 +3056,9 @@ try expectStatusPopoverContract()
 try expectGracefulTerminationRestoresCodexRouteBeforeStoppingGateway()
 try expectKeychainCredentialStore()
 try expectGatewayCredentialHandoff()
+try expectGatewayBackgroundRegistrationStateMachine()
+try expectBuild19BackgroundServiceContracts()
+try expectBuild19ProviderCredentialAccessContracts()
 if RelayKitPaths.gatewayBinaryPath(bundle: Bundle(for: BundleSentinel.self)) != "../gateway/bin/relay" {
     fatalError("non-app bundle should fall back to development gateway path")
 }

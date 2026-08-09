@@ -34,6 +34,77 @@ else:
 PY
 }
 
+run_isolated_extracted_app_verifier() (
+  local verify_port="$1"
+  local verifier="$2"
+  shift 2
+  local verify_root verifier_rc=0 cleanup_rc=0 cleanup_done=0
+
+  verify_root="$(mktemp -d /tmp/relaykit-package-verify.XXXXXX)"
+  case "${verify_root}" in
+    /tmp/relaykit-package-verify.*|/private/tmp/relaykit-package-verify.*) ;;
+    *) echo "Unsafe extracted-App verification root" >&2; return 1 ;;
+  esac
+
+  cleanup_isolated_extracted_app_verifier() {
+    if ((cleanup_done != 0)); then
+      return "${cleanup_rc}"
+    fi
+    cleanup_done=1
+    cleanup_rc=0
+    case "${verify_root}" in
+      /tmp/relaykit-package-verify.*|/private/tmp/relaykit-package-verify.*)
+        rm -rf -- "${verify_root}" || cleanup_rc="$?"
+        ;;
+      *) cleanup_rc=1 ;;
+    esac
+    return "${cleanup_rc}"
+  }
+
+  finish_isolated_extracted_app_verifier() {
+    local incoming_rc="$1"
+    trap - EXIT
+    trap '' HUP INT TERM
+    if cleanup_isolated_extracted_app_verifier; then
+      cleanup_rc=0
+    else
+      cleanup_rc="$?"
+    fi
+    if ((incoming_rc != 0)); then
+      if ((cleanup_rc != 0)); then
+        echo "isolated App verifier and cleanup both failed; preserving verifier result" >&2
+      fi
+      exit "${incoming_rc}"
+    fi
+    if ((cleanup_rc != 0)); then
+      echo "isolated App verifier cleanup failed" >&2
+      exit "${cleanup_rc}"
+    fi
+    exit 0
+  }
+  trap 'finish_isolated_extracted_app_verifier "$?"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  mkdir -p "${verify_root}/home" "${verify_root}/preferences" "${verify_root}/codex" "${verify_root}/tmp"
+  cd "${verify_root}"
+  if env \
+    HOME="${verify_root}/home" \
+    CFFIXED_USER_HOME="${verify_root}/preferences" \
+    CODEX_HOME="${verify_root}/codex" \
+    TMPDIR="${verify_root}/tmp/" \
+    RELAYKIT_RUNTIME_SAFETY_ROOT="${verify_root}" \
+    RELAYKIT_RUNTIME_SAFETY_TEST=1 \
+    RELAYKIT_RUNTIME_SAFETY_PORT="${verify_port}" \
+    "${verifier}" "$@"; then
+    verifier_rc=0
+  else
+    verifier_rc="$?"
+  fi
+  finish_isolated_extracted_app_verifier "${verifier_rc}"
+)
+
 package_app() {
   "${ROOT_DIR}/script/build_app_bundle.sh" --verify >&2
   rm -f "${ZIP_PATH}"
@@ -76,10 +147,13 @@ verify_package() {
     echo "Could not allocate an isolated extracted-bundle verification port" >&2
     exit 1
   }
-  env RELAYKIT_RUNTIME_SAFETY_TEST=1 RELAYKIT_RUNTIME_SAFETY_PORT="${verify_port}" \
-    "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" --verify-bundled-gateway
+  run_isolated_extracted_app_verifier "${verify_port}" "${EXTRACTED_APP}/Contents/MacOS/RelayKitApp.bin" --verify-bundled-gateway
   echo "RelayKit local beta package verified: ${artifact}"
 }
+
+if [[ "${RELAYKIT_PACKAGE_RELEASE_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "${MODE}" in
   package)

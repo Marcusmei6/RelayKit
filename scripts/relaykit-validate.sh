@@ -376,7 +376,6 @@ if live:
     )
 if "packaging" in classes:
     add("package-verify", "./script/package_release.sh --verify", "packaging inputs require package verification")
-    add("extracted-app-dogfood", "RELAYKIT_DOGFOOD_REUSE_CURRENT_ZIP=1 ./scripts/local-beta-dogfood-smoke.sh", "packaging inputs require extracted-App dogfood")
 if full:
     add(
         "full-desktop-e2e",
@@ -400,7 +399,7 @@ for command_id, command in catalog.items():
     reason = {
         "swift-build": "no App source change requires a Swift build",
         "package-verify": "no packaging input changed",
-        "extracted-app-dogfood": "no packaging input changed",
+        "extracted-app-dogfood": "requires separate authorization because it uses the exclusive installed App, port 19777, and user state",
         "menu-ui-smoke": "no App UI or lifecycle change requires GUI smoke",
         "live-desktop-query": "no explicit justified --live-query request",
         "full-desktop-e2e": "--full was not explicitly requested",
@@ -410,7 +409,7 @@ for command_id, command in catalog.items():
 
 requires_build = bool(classes & {"gateway", "app_ui", "keychain", "gateway_lifecycle", "packaging"})
 requires_package = "packaging" in classes
-requires_gui = bool(classes & {"app_ui", "keychain", "gateway_lifecycle", "packaging"}) or live or full
+requires_gui = bool(classes & {"app_ui", "keychain", "gateway_lifecycle"}) or live or full
 
 print(json.dumps({
     "status": "planned",

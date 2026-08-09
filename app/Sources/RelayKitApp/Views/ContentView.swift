@@ -167,7 +167,7 @@ struct ContentView: View {
             Button(pendingCodexEnable ? "Enable RelayKit" : "Disable RelayKit", role: pendingCodexEnable ? nil : .destructive) {
                 Task {
                     if pendingCodexEnable {
-                        await model.enableCodexForDesktop()
+                        try? await model.enableCodexForDesktop()
                     } else {
                         await model.disableCodexForDesktop()
                     }
@@ -400,6 +400,13 @@ struct ContentView: View {
                     .foregroundStyle(secondaryText)
                     .lineLimit(1)
             }
+            if model.backgroundServiceRecovery == .requiresApproval {
+                Button("Open Login Items") {
+                    model.openLoginItemsSettings()
+                }
+                .buttonStyle(ControlButtonStyle())
+                .accessibilityIdentifier("open-login-items-settings")
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -408,8 +415,8 @@ struct ContentView: View {
     }
 
     private var codexConfigConfirmationMessage: String {
-        let target = RelayKitPaths.defaultCodexConfigPath()
-        let state = RelayKitPaths.codexConfigStatePath()
+        let target = model.activePathContext.codexConfigPath
+        let state = model.activePathContext.codexConfigStatePath
         if pendingCodexEnable {
             return "Target: \(target)\n\nManaged fields: openai_base_url and model_catalog_json. If the target exists, RelayKit creates \(target).bak.<timestamp>; rollback state is stored at \(state). Disable restores pre-existing values that RelayKit replaced, while a later user edit is left untouched. RelayKit never reads or writes auth.json and does not change model or model_provider. Restart Codex after enabling."
         }
@@ -1235,6 +1242,10 @@ struct ContentView: View {
             }
             .smokeRecordOnly("tab-settings", recorder: smokeSectionRecorder)
 
+            if model.isUISmokePresentation {
+                developerDiagnosticsSection
+            }
+
             SectionCard {
                 VStack(alignment: .leading, spacing: 12) {
                     sectionEyebrow("GENERAL")
@@ -1312,7 +1323,7 @@ struct ContentView: View {
             SectionCard {
                 sectionEyebrow("CODEX INTEGRATION")
                 settingsInfoRow(title: "Official auth status", subtitle: model.officialAuthStatus)
-                settingsInfoRow(title: "Isolated CODEX_HOME", subtitle: shortPath(RelayKitPaths.officialCodexHomePath()))
+                settingsInfoRow(title: "Isolated CODEX_HOME", subtitle: shortPath(model.activePathContext.officialCodexHomePath))
                 settingsInfoRow(
                     title: "Route proof",
                     subtitle: model.officialAuthStatus == "route verified" ? "Route verified" : "Not verified"
@@ -1331,11 +1342,25 @@ struct ContentView: View {
             }
             .smokeSection("settings-data-privacy-group", recorder: smokeSectionRecorder)
 
-            SectionCard {
-                Button {
-                    showingDeveloperDiagnostics.toggle()
-                } label: {
-                    HStack {
+            if !model.isUISmokePresentation {
+                developerDiagnosticsSection
+            }
+
+        }
+    }
+
+    private var developerDiagnosticsSection: some View {
+        SectionCard {
+            Button {
+                showingDeveloperDiagnostics.toggle()
+            } label: {
+                HStack {
+                    if model.isUISmokePresentation {
+                        Text("Developer / Diagnostics")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(primaryText)
+                        Spacer()
+                    } else {
                         VStack(alignment: .leading, spacing: 4) {
                             sectionEyebrow("DEVELOPER / DIAGNOSTICS")
                             Text("Developer / Diagnostics")
@@ -1349,41 +1374,41 @@ struct ContentView: View {
                             .foregroundStyle(secondaryText)
                     }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Developer / Diagnostics")
-                .accessibilityIdentifier("settings-developer-toggle")
-                .smokeRecordOnly(showingDeveloperDiagnostics ? "settings-developer-expanded" : "settings-developer-collapsed", recorder: smokeSectionRecorder)
-
-                if showingDeveloperDiagnostics {
-                    ManualProofEntryView(
-                        acceptance: model.desktopAcceptance,
-                        secondaryText: secondaryText,
-                        surfaceSubtle: surfaceSubtle,
-                        open: {
-                            smokeSectionRecorder?("desktop-acceptance-manual-proof-action")
-                            model.openManualProofTerminal()
-                        }
-                    )
-                    Divider().overlay(borderColor)
-                    Text("Raw local paths")
-                        .font(.subheadline.weight(.semibold))
-                    VStack(spacing: 8) {
-                        labeledField("Gateway binary", text: $model.gatewayBinaryPath)
-                        labeledField("Provider config", text: $model.providerConfigPath)
-                        labeledField("Usage log", text: $model.usageLogPath)
-                        settingsInfoRow(title: "Codex target (managed)", subtitle: shortPath(RelayKitPaths.defaultCodexConfigPath()))
-                        settingsInfoRow(title: "Codex catalog", subtitle: shortPath(RelayKitPaths.codexCatalogPath()))
-                    }
-                    Text("Evidence path: \(shortPath(RelayKitPaths.officialRouteEvidencePath()))")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(mutedText)
-                }
             }
-            .smokeRecordOnly("settings-developer-group", recorder: smokeSectionRecorder)
-            .smokeRecordOnly("developer-verification", recorder: smokeSectionRecorder)
-            .smokeRecordOnly("advanced-paths", recorder: smokeSectionRecorder)
-            .smokeRecordOnly(showingDeveloperDiagnostics ? "desktop-acceptance-manual-proof-entry" : "desktop-acceptance-manual-proof-entry-hidden", recorder: smokeSectionRecorder)
+            .buttonStyle(.plain)
+            .accessibilityLabel("Developer / Diagnostics")
+            .accessibilityIdentifier("settings-developer-toggle")
+            .smokeRecordOnly(showingDeveloperDiagnostics ? "settings-developer-expanded" : "settings-developer-collapsed", recorder: smokeSectionRecorder)
+
+            if showingDeveloperDiagnostics {
+                ManualProofEntryView(
+                    acceptance: model.desktopAcceptance,
+                    secondaryText: secondaryText,
+                    surfaceSubtle: surfaceSubtle,
+                    open: {
+                        smokeSectionRecorder?("desktop-acceptance-manual-proof-action")
+                        model.openManualProofTerminal()
+                    }
+                )
+                Divider().overlay(borderColor)
+                Text("Raw local paths")
+                    .font(.subheadline.weight(.semibold))
+                VStack(spacing: 8) {
+                    labeledField("Gateway binary", text: $model.gatewayBinaryPath)
+                    labeledField("Provider config", text: $model.providerConfigPath)
+                    labeledField("Usage log", text: $model.usageLogPath)
+                    settingsInfoRow(title: "Codex target (managed)", subtitle: shortPath(model.activePathContext.codexConfigPath))
+                    settingsInfoRow(title: "Codex catalog", subtitle: shortPath(model.activePathContext.codexCatalogPath))
+                }
+                Text("Evidence path: \(shortPath(model.activePathContext.officialRouteEvidencePath))")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(mutedText)
+            }
         }
+        .smokeRecordOnly("settings-developer-group", recorder: smokeSectionRecorder)
+        .smokeRecordOnly("developer-verification", recorder: smokeSectionRecorder)
+        .smokeRecordOnly("advanced-paths", recorder: smokeSectionRecorder)
+        .smokeRecordOnly(showingDeveloperDiagnostics ? "desktop-acceptance-manual-proof-entry" : "desktop-acceptance-manual-proof-entry-hidden", recorder: smokeSectionRecorder)
     }
 
     private func settingsInfoRow(title: String, subtitle: String) -> some View {
@@ -1693,11 +1718,35 @@ private struct ProviderFormView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            formHeader
-                .padding(.bottom, 12)
+            Group {
+                if model.isUISmokePresentation {
+                    formHeader
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .overlay(alignment: .trailing) {
+                            Button {
+                                save()
+                            } label: {
+                                Text("Save")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(primaryText)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Save provider")
+                            .accessibilityIdentifier("provider-form-save")
+                            .disabled(!canSave)
+                        }
+                }
+                if !model.isUISmokePresentation {
+                    formHeader
+                }
+            }
+            .padding(.bottom, 12)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    if model.isUISmokePresentation {
+                        AnyView(apiKeyField)
+                    }
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("Provider name")
@@ -1721,30 +1770,40 @@ private struct ProviderFormView: View {
                             .smokeRecordOnly("provider-base-url-field", recorder: smokeSectionRecorder)
                     }
 
-                    AnyView(apiKeyField)
+                    if !model.isUISmokePresentation {
+                        AnyView(apiKeyField)
+                    }
+                    if model.isUISmokePresentation {
+                        AnyView(advancedSection)
+                    }
                     AnyView(modelsSection)
-                    AnyView(advancedSection)
+                    if !model.isUISmokePresentation {
+                        AnyView(advancedSection)
+                    }
 
                     Text(validationMessage)
                         .font(.caption)
                         .foregroundStyle(canSave ? secondaryText : Color(hex: 0xFF8FA3))
                 }
-                .padding(.trailing, 4)
             }
             .frame(maxHeight: isAdvancedExpanded ? 520 : 420)
             .smokeRecordOnly(isAdvancedExpanded ? "provider-advanced-scroll-container" : "", recorder: smokeSectionRecorder)
 
-            HStack {
-                Spacer()
-                Button("取消") { onClose() }
-                    .buttonStyle(ControlButtonStyle())
-                    .accessibilityLabel("Cancel provider")
-                    .accessibilityIdentifier("provider-form-cancel")
-                Button(mode.saveTitle) { save() }
-                    .buttonStyle(ControlButtonStyle(prominent: true))
-                    .accessibilityLabel("Save provider")
-                    .accessibilityIdentifier("provider-form-save")
-                    .disabled(!canSave)
+            Group {
+                if !model.isUISmokePresentation {
+                    HStack {
+                        Spacer()
+                        Button("取消") { onClose() }
+                            .buttonStyle(ControlButtonStyle())
+                            .accessibilityLabel("Cancel provider")
+                            .accessibilityIdentifier("provider-form-cancel")
+                        Button(mode.saveTitle) { save() }
+                            .buttonStyle(ControlButtonStyle(prominent: true))
+                            .accessibilityLabel("Save provider")
+                            .accessibilityIdentifier("provider-form-save")
+                            .disabled(!canSave)
+                    }
+                }
             }
             .padding(.top, 12)
         }
@@ -1801,9 +1860,15 @@ private struct ProviderFormView: View {
                 isAdvancedExpanded.toggle()
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: isAdvancedExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("Advanced")
+                    if model.isUISmokePresentation {
+                        Text("Advanced")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(primaryText)
+                    } else {
+                        Image(systemName: isAdvancedExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Advanced")
+                    }
                     Spacer()
                 }
                 .contentShape(Rectangle())
@@ -1924,8 +1989,12 @@ private struct ProviderFormView: View {
                 showsNewAPIKey.toggle()
                 smokeSectionRecorder?("api-key-eye-toggle-action")
             } label: {
-                Image(systemName: showsNewAPIKey ? "eye.slash" : "eye")
-                    .frame(width: 22)
+                if model.isUISmokePresentation {
+                    Text(ProviderFormLabels.apiKeyEyeLabel(showingKey: showsNewAPIKey))
+                } else {
+                    Image(systemName: showsNewAPIKey ? "eye.slash" : "eye")
+                        .frame(width: 22)
+                }
             }
             .accessibilityLabel(ProviderFormLabels.apiKeyEyeLabel(showingKey: showsNewAPIKey))
             .accessibilityIdentifier(ProviderFormLabels.apiKeyEyeLabel(showingKey: showsNewAPIKey))
@@ -1961,6 +2030,10 @@ private struct ProviderFormView: View {
         savedKeyUnavailable ? "api-key-saved-key-unavailable" : ""
     }
 
+    private var shouldShowUISmokeSecureFieldAnchor: Bool {
+        model.isUISmokePresentation && !keychainCredential.isEmpty
+    }
+
     private var apiKeyReplacementInput: AnyView {
         let placeholder = ProviderFormLabels.apiKeyPlaceholder(hasReference: hasExistingCredentialReference)
         if showsNewAPIKey {
@@ -1975,7 +2048,14 @@ private struct ProviderFormView: View {
         return AnyView(
             SecureField(placeholder, text: $keychainCredential)
                 .textFieldStyle(.plain)
-                .foregroundStyle(primaryText.opacity(0.90))
+                .foregroundStyle(shouldShowUISmokeSecureFieldAnchor ? Color.clear : primaryText.opacity(0.90))
+                .overlay(alignment: .leading) {
+                    if shouldShowUISmokeSecureFieldAnchor {
+                        Text(placeholder)
+                            .foregroundStyle(primaryText.opacity(0.90))
+                            .allowsHitTesting(false)
+                    }
+                }
                 .accessibilityLabel("API key field")
                 .accessibilityIdentifier("api-key-new-input-field")
         )
@@ -1983,6 +2063,9 @@ private struct ProviderFormView: View {
 
     private var modelsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if model.isUISmokePresentation, let provider = editingProvider {
+                providerHealthPanel(provider)
+            }
             VStack(alignment: .leading, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
@@ -2032,7 +2115,7 @@ private struct ProviderFormView: View {
                 connectionTestStatusRow
                     .smokeRecordOnly("provider-connection-\(connectionTestKind)", recorder: smokeSectionRecorder)
             }
-            if let provider = editingProvider {
+            if !model.isUISmokePresentation, let provider = editingProvider {
                 providerHealthPanel(provider)
             }
             VStack(spacing: 6) {
@@ -2165,9 +2248,15 @@ private struct ProviderFormView: View {
                     isHiddenModelsExpanded.toggle()
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: isHiddenModelsExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                        Text("Hidden models")
+                        if model.isUISmokePresentation {
+                            Text("Hidden models")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(primaryText)
+                        } else {
+                            Image(systemName: isHiddenModelsExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text("Hidden models")
+                        }
                         Spacer()
                     }
                 }
@@ -2557,7 +2646,7 @@ private struct ProviderFormView: View {
         guard hasExistingKeychainReference else {
             return ""
         }
-        return try KeychainCredentialStore.load(service: credentialReferenceForSave)
+        return try model.loadProviderCredential(service: credentialReferenceForSave)
     }
 
     private func loadSavedAPIKeyIfNeeded() {
@@ -2568,7 +2657,7 @@ private struct ProviderFormView: View {
         }
         savedKeyLoadAttempted = true
         do {
-            keychainCredential = try KeychainCredentialStore.load(service: credentialReferenceForSave)
+            keychainCredential = try model.loadProviderCredential(service: credentialReferenceForSave)
             savedKeyUnavailable = false
         } catch {
             savedKeyUnavailable = true

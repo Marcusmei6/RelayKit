@@ -68,6 +68,77 @@ else:
 PY
 }
 
+run_isolated_app_verifier() (
+  local verify_port="$1"
+  local verifier="$2"
+  shift 2
+  local verify_root verifier_rc=0 cleanup_rc=0 cleanup_done=0
+
+  verify_root="$(mktemp -d /tmp/relaykit-bundle-verify.XXXXXX)"
+  case "${verify_root}" in
+    /tmp/relaykit-bundle-verify.*|/private/tmp/relaykit-bundle-verify.*) ;;
+    *) echo "Unsafe bundled-gateway verification root" >&2; return 1 ;;
+  esac
+
+  cleanup_isolated_app_verifier() {
+    if ((cleanup_done != 0)); then
+      return "${cleanup_rc}"
+    fi
+    cleanup_done=1
+    cleanup_rc=0
+    case "${verify_root}" in
+      /tmp/relaykit-bundle-verify.*|/private/tmp/relaykit-bundle-verify.*)
+        rm -rf -- "${verify_root}" || cleanup_rc="$?"
+        ;;
+      *) cleanup_rc=1 ;;
+    esac
+    return "${cleanup_rc}"
+  }
+
+  finish_isolated_app_verifier() {
+    local incoming_rc="$1"
+    trap - EXIT
+    trap '' HUP INT TERM
+    if cleanup_isolated_app_verifier; then
+      cleanup_rc=0
+    else
+      cleanup_rc="$?"
+    fi
+    if ((incoming_rc != 0)); then
+      if ((cleanup_rc != 0)); then
+        echo "isolated App verifier and cleanup both failed; preserving verifier result" >&2
+      fi
+      exit "${incoming_rc}"
+    fi
+    if ((cleanup_rc != 0)); then
+      echo "isolated App verifier cleanup failed" >&2
+      exit "${cleanup_rc}"
+    fi
+    exit 0
+  }
+  trap 'finish_isolated_app_verifier "$?"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  mkdir -p "${verify_root}/home" "${verify_root}/preferences" "${verify_root}/codex" "${verify_root}/tmp"
+  cd "${verify_root}"
+  if env \
+    HOME="${verify_root}/home" \
+    CFFIXED_USER_HOME="${verify_root}/preferences" \
+    CODEX_HOME="${verify_root}/codex" \
+    TMPDIR="${verify_root}/tmp/" \
+    RELAYKIT_RUNTIME_SAFETY_ROOT="${verify_root}" \
+    RELAYKIT_RUNTIME_SAFETY_TEST=1 \
+    RELAYKIT_RUNTIME_SAFETY_PORT="${verify_port}" \
+    "${verifier}" "$@"; then
+    verifier_rc=0
+  else
+    verifier_rc="$?"
+  fi
+  finish_isolated_app_verifier "${verifier_rc}"
+)
+
 build_bundle() {
   cd "${ROOT_DIR}/gateway"
   go build -trimpath -o bin/relay ./cmd/gateway
@@ -193,9 +264,12 @@ verify_bundle() {
     echo "Could not allocate an isolated bundled-gateway verification port" >&2
     exit 1
   }
-  env RELAYKIT_RUNTIME_SAFETY_TEST=1 RELAYKIT_RUNTIME_SAFETY_PORT="${verify_port}" \
-    "${APP_REAL_BINARY}" --verify-bundled-gateway
+  run_isolated_app_verifier "${verify_port}" "${APP_REAL_BINARY}" --verify-bundled-gateway
 }
+
+if [[ "${RELAYKIT_BUILD_APP_BUNDLE_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 case "${MODE}" in
   build)

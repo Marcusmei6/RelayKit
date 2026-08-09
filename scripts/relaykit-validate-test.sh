@@ -14,6 +14,89 @@ fail() {
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/relaykit-validate-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 
+verifier_fixture="${tmp}/verifier-fixture.sh"
+cat >"${verifier_fixture}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${HOME}" == */home && "${CFFIXED_USER_HOME}" == */preferences && "${CODEX_HOME}" == */codex && "${TMPDIR}" == */tmp/ ]] || exit 91
+[[ "${RELAYKIT_RUNTIME_SAFETY_TEST}" == "1" && "${RELAYKIT_RUNTIME_SAFETY_ROOT}" == /tmp/relaykit-*-verify.* ]] || exit 92
+exit "${RELAYKIT_TEST_VERIFIER_RC}"
+SH
+chmod 700 "${verifier_fixture}"
+
+run_verifier_cleanup_case() {
+  local source_script="$1"
+  local source_env="$2"
+  local function_name="$3"
+  local prefix="$4"
+  local verifier_rc="$5"
+  local fixture_cleanup_rc="$6"
+  local expected_rc="$7"
+  local expected_output="$8"
+  local case_id="${prefix}.${verifier_rc}.${fixture_cleanup_rc}"
+  local fixture_root="/tmp/${prefix}.contract.$$.${verifier_rc}.${fixture_cleanup_rc}"
+  local cleanup_counter="${tmp}/${case_id}.cleanup-count"
+  local output_file="${tmp}/${case_id}.output"
+  local rc
+  (
+    export "${source_env}=1"
+    source "${source_script}"
+    mktemp() {
+      /bin/mkdir -p "${fixture_root}"
+      printf '%s\n' "${fixture_root}"
+    }
+    rm() {
+      local count=0
+      [[ -f "${cleanup_counter}" ]] && count="$(<"${cleanup_counter}")"
+      printf '%s\n' "$((count + 1))" >"${cleanup_counter}"
+      return "${fixture_cleanup_rc}"
+    }
+    export RELAYKIT_TEST_VERIFIER_RC="${verifier_rc}"
+    "${function_name}" 29091 "${verifier_fixture}" --verify-fixture
+  ) >"${output_file}" 2>&1 && rc=0 || rc="$?"
+  [[ "${rc}" == "${expected_rc}" ]] ||
+    fail "${prefix} verifier/cleanup rc composition expected ${expected_rc}, got ${rc}: $(<"${output_file}")"
+  [[ "$(<"${cleanup_counter}")" == "1" ]] ||
+    fail "${prefix} verifier cleanup did not run exactly once"
+  [[ "$(<"${output_file}")" == "${expected_output}" ]] ||
+    fail "${prefix} verifier cleanup diagnostic changed or leaked a path"
+  /bin/rm -rf -- "${fixture_root}"
+}
+
+run_verifier_cleanup_contract() {
+  local source_script source_env function_name prefix
+  while IFS='|' read -r source_script source_env function_name prefix; do
+    run_verifier_cleanup_case "${source_script}" "${source_env}" "${function_name}" "${prefix}" 0 0 0 ""
+    run_verifier_cleanup_case "${source_script}" "${source_env}" "${function_name}" "${prefix}" 7 0 7 ""
+    run_verifier_cleanup_case "${source_script}" "${source_env}" "${function_name}" "${prefix}" 0 9 9 'isolated App verifier cleanup failed'
+    run_verifier_cleanup_case "${source_script}" "${source_env}" "${function_name}" "${prefix}" 7 9 7 'isolated App verifier and cleanup both failed; preserving verifier result'
+  done <<CASES
+${ROOT}/script/build_app_bundle.sh|RELAYKIT_BUILD_APP_BUNDLE_SOURCE_ONLY|run_isolated_app_verifier|relaykit-bundle-verify
+${ROOT}/script/package_release.sh|RELAYKIT_PACKAGE_RELEASE_SOURCE_ONLY|run_isolated_extracted_app_verifier|relaykit-package-verify
+CASES
+}
+
+run_verifier_cleanup_contract
+
+while IFS='|' read -r source_script function_name finish_name cleanup_name; do
+  verifier_wrapper_body="$(sed -n "/^${function_name}() (/,/^)/p" "${source_script}")"
+  grep -Fq "trap '${finish_name} \"\$?\"' EXIT" <<<"${verifier_wrapper_body}" ||
+    fail "${function_name} lacks explicit EXIT rc composition"
+  for signal_contract in "trap 'exit 129' HUP" "trap 'exit 130' INT" "trap 'exit 143' TERM"; do
+    grep -Fq "${signal_contract}" <<<"${verifier_wrapper_body}" ||
+      fail "${function_name} signal path can bypass cleanup"
+  done
+  [[ "$(grep -Fc "if ${cleanup_name}; then" <<<"${verifier_wrapper_body}")" == "1" ]] ||
+    fail "${function_name} finish path does not invoke cleanup exactly once"
+  grep -Fq 'if ((incoming_rc != 0)); then' <<<"${verifier_wrapper_body}" ||
+    fail "${function_name} does not preserve verifier failure precedence"
+  grep -Fq 'if ((cleanup_rc != 0)); then' <<<"${verifier_wrapper_body}" ||
+    fail "${function_name} can hide cleanup-only failure"
+done <<VERIFIER_WRAPPERS
+${ROOT}/script/build_app_bundle.sh|run_isolated_app_verifier|finish_isolated_app_verifier|cleanup_isolated_app_verifier
+${ROOT}/script/package_release.sh|run_isolated_extracted_app_verifier|finish_isolated_extracted_app_verifier|cleanup_isolated_extracted_app_verifier
+VERIFIER_WRAPPERS
+
 write_fixture() {
   local name="$1"
   shift
@@ -298,11 +381,19 @@ jq -e '
   (.change_classes | index("packaging")) != null and
   .requires_build == true and
   .requires_package == true and
-  .requires_gui == true and
+  .requires_gui == false and
   .requires_full_e2e == false
 ' "${tmp}/packaging.json" >/dev/null || fail "packaging plan boundary is invalid"
 selected packaging package-verify || fail "packaging plan omitted package verification"
-selected packaging extracted-app-dogfood || fail "packaging plan omitted extracted-App dogfood"
+not_selected packaging extracted-app-dogfood || fail "packaging plan auto-selected extracted-App dogfood"
+jq -e '
+  any(.skipped_commands[];
+    .id == "extracted-app-dogfood" and
+    (.reason | contains("separate authorization")) and
+    (.reason | contains("exclusive installed App")) and
+    (.reason | contains("19777")) and
+    (.reason | contains("user state")))
+' "${tmp}/packaging.json" >/dev/null || fail "packaging plan did not explain the separate dogfood authorization boundary"
 not_selected packaging full-desktop-e2e || fail "packaging plan selected full E2E without --full"
 
 invalid_plan_status=0

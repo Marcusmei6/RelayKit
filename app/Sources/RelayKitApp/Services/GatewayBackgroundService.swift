@@ -1,8 +1,19 @@
 import Foundation
+import RelayKitCore
 import ServiceManagement
 
+enum GatewayBackgroundRecovery: Equatable {
+    case requiresApproval
+}
+
 @MainActor
-struct GatewayBackgroundService {
+protocol GatewayBackgroundServiceProviding {
+    func ensureRegisteredIfPackaged() throws -> Bool
+    func openLoginItemsSettings()
+}
+
+@MainActor
+struct GatewayBackgroundService: GatewayBackgroundServiceProviding {
     static let plistName = "dev.relaykit.gateway.plist"
 
     private var embeddedPlistURL: URL {
@@ -13,24 +24,41 @@ struct GatewayBackgroundService {
 
     func ensureRegisteredIfPackaged() throws -> Bool {
         guard FileManager.default.fileExists(atPath: embeddedPlistURL.path) else {
+            guard Bundle.main.bundleURL.pathExtension != "app" else {
+                throw GatewayBackgroundRegistrationError.notFound
+            }
             return false
         }
-        let service = SMAppService.agent(plistName: Self.plistName)
+
+        let registration = SMAppServiceRegistration(service: SMAppService.agent(plistName: Self.plistName))
+        try GatewayBackgroundRegistrationCoordinator(registration).ensureEnabled()
+        return true
+    }
+
+    func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+}
+
+private struct SMAppServiceRegistration: GatewayBackgroundRegistration {
+    let service: SMAppService
+
+    var status: GatewayBackgroundStatus {
         switch service.status {
         case .enabled:
-            return true
+            return .enabled
         case .notRegistered:
-            try service.register()
-            guard service.status == .enabled else {
-                throw GatewayProcessError.commandFailed("RelayKit background gateway requires approval in System Settings > General > Login Items.")
-            }
-            return true
+            return .notRegistered
         case .requiresApproval:
-            throw GatewayProcessError.commandFailed("RelayKit background gateway requires approval in System Settings > General > Login Items.")
+            return .requiresApproval
         case .notFound:
-            throw GatewayProcessError.commandFailed("RelayKit background gateway is missing from this app package.")
+            return .notFound
         @unknown default:
-            throw GatewayProcessError.commandFailed("RelayKit background gateway status is unavailable.")
+            return .unavailable
         }
+    }
+
+    func register() throws {
+        try service.register()
     }
 }

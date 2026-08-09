@@ -5,6 +5,38 @@ import Foundation
 import RelayKitCore
 import Security
 
+struct AppModelInitialization {
+    let pathContext: RelayKitPathContext
+    let providerConfigPath: String?
+    let providerConfigDefaults: UserDefaults? = nil
+    let usageLogPath: String?
+    let appearanceMode: AppAppearanceMode
+    let launchAtLoginRequested: Bool
+    let persistSettings: Bool
+    let loadDesktopAcceptance: Bool
+    let catalogURL: URL?
+    let isUISmoke: Bool
+
+    static func ordinary() -> AppModelInitialization {
+        let pathContext = try! RelayKitPaths.runtimeContext(environment: [:])
+        return ordinary(pathContext: pathContext)
+    }
+
+    static func ordinary(pathContext: RelayKitPathContext) -> AppModelInitialization {
+        return AppModelInitialization(
+            pathContext: pathContext,
+            providerConfigPath: nil,
+            usageLogPath: nil,
+            appearanceMode: AppSettingsStore().appearanceMode,
+            launchAtLoginRequested: AppSettingsStore().launchAtLoginRequested,
+            persistSettings: true,
+            loadDesktopAcceptance: true,
+            catalogURL: nil,
+            isUISmoke: false
+        )
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     enum GatewayDisplayState: String {
@@ -27,7 +59,7 @@ final class AppModel: ObservableObject {
     @Published var providerConfigPath: String {
         didSet {
             if persistsProviderConfigPath {
-                UserDefaults.standard.set(providerConfigPath, forKey: "providerConfigPath")
+                providerConfigDefaults.set(providerConfigPath, forKey: "providerConfigPath")
             }
             refreshConfiguredProviders()
         }
@@ -37,20 +69,20 @@ final class AppModel: ObservableObject {
             refreshCodexConnectionStatus()
         }
     }
-    @Published var gatewayBinaryPath = RelayKitPaths.gatewayBinaryPath()
-    @Published var usageLogPath = AppModel.defaultUsageLogPath()
-    @Published var codexSourcePath = RelayKitPaths.codexConfigSourcePath()
+    @Published var gatewayBinaryPath: String
+    @Published var usageLogPath: String
+    @Published var codexSourcePath: String
     @Published var codexConnectionStatus = "target not set"
     @Published var gatewayStatus = "stopped"
     @Published private(set) var runtimeSafetyState: RuntimeSafetyState = .disabled
     @Published var models: [RelayModel] = []
     @Published var gatewayModelHealth = GatewayModelHealth.empty
     @Published var localCatalog: LocalModelCatalog?
-    @Published var localCatalogURL = LocalCatalogClient.defaultModelsURL()
+    @Published var localCatalogURL: URL
     @Published var localCatalogStatus = "not scanned"
     @Published var localCatalogAuthState = "credential reference needed"
     @Published var staleProviderConfigPreferenceRecovered = false
-    @Published var desktopAcceptance = DesktopAcceptanceEvidence.load()
+    @Published var desktopAcceptance: DesktopAcceptanceEvidence
     @Published var usageSummaries: [UsageSummary] = []
     @Published var usageRefreshInProgress = false
     @Published var usageRefreshCount = 0
@@ -58,14 +90,15 @@ final class AppModel: ObservableObject {
     @Published var providerConfigText = ""
     @Published var configuredProviders: [ConfiguredProviderEntry] = []
     @Published var message = ""
+    @Published private(set) var backgroundServiceRecovery: GatewayBackgroundRecovery? = nil
     @Published var appearanceMode: AppAppearanceMode {
         didSet {
-            settingsStore.appearanceMode = appearanceMode
+            settingsStore?.appearanceMode = appearanceMode
         }
     }
     @Published var launchAtLoginRequested: Bool {
         didSet {
-            settingsStore.launchAtLoginRequested = launchAtLoginRequested
+            settingsStore?.launchAtLoginRequested = launchAtLoginRequested
         }
     }
     @Published var launchAtLoginStatus = "not registered"
@@ -90,9 +123,11 @@ final class AppModel: ObservableObject {
     let runtimeEndpoint: RelayKitRuntimeEndpoint
     private let gateway: GatewayProcess
     private let client: GatewayClient
-    private var catalogClient = LocalCatalogClient()
+    private var backgroundService: any GatewayBackgroundServiceProviding = GatewayBackgroundService()
+    private var catalogClient: LocalCatalogClient
     private var persistsProviderConfigPath = true
-    private let settingsStore = AppSettingsStore()
+    private let providerConfigDefaults: UserDefaults
+    private let settingsStore: AppSettingsStore?
     private let loginItemService = LoginItemService()
     private let appStartedAt = Date()
     private var gatewayStartedAt: Date?
@@ -104,21 +139,55 @@ final class AppModel: ObservableObject {
     private var gatewayMustSurviveTermination = false
     private var gatewayServiceMonitor: Task<Void, Never>?
     private var managedRouteStatusError: Error?
+    private let pathContext: RelayKitPathContext
+    private let isUISmoke: Bool
+    private let credentialAccess: any ProviderCredentialAccess
 
-    init(endpoint: RelayKitRuntimeEndpoint) {
+    init(endpoint: RelayKitRuntimeEndpoint, initialization: AppModelInitialization? = nil) {
+        let initialization = initialization ?? AppModelInitialization.ordinary()
+        pathContext = initialization.pathContext
+        isUISmoke = initialization.isUISmoke
+        providerConfigDefaults = initialization.providerConfigDefaults ?? .standard
+        if initialization.isUISmoke {
+            credentialAccess = InMemoryProviderCredentialAccess(seed: [
+                "relaykit.ui-smoke.provider.fixture": "relaykit-ui-smoke-key",
+            ])
+        } else {
+            credentialAccess = KeychainProviderCredentialAccess()
+        }
         runtimeEndpoint = endpoint
         gateway = GatewayProcess(endpoint: endpoint)
         client = GatewayClient(endpoint: endpoint)
-        let savedPath = UserDefaults.standard.string(forKey: "providerConfigPath")
-        let resolvedProviderConfigPath = RelayKitPaths.resolvedProviderConfigPath(savedPath: savedPath)
-        staleProviderConfigPreferenceRecovered = RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: savedPath)
-        providerConfigPath = resolvedProviderConfigPath
-        if savedPath != resolvedProviderConfigPath {
-            UserDefaults.standard.set(resolvedProviderConfigPath, forKey: "providerConfigPath")
+        settingsStore = initialization.persistSettings ? AppSettingsStore() : nil
+        gatewayBinaryPath = RelayKitPaths.gatewayBinaryPath()
+        usageLogPath = initialization.usageLogPath ?? pathContext.usageLogPath
+        codexSourcePath = RelayKitPaths.codexConfigSourcePath()
+        let resolvedCatalogURL = initialization.catalogURL ?? (pathContext.rootURL == nil ? LocalCatalogClient.defaultModelsURL() : endpoint.httpBaseURL.appendingPathComponent("v1/models"))
+        localCatalogURL = resolvedCatalogURL
+        catalogClient = LocalCatalogClient(modelsURL: resolvedCatalogURL)
+        desktopAcceptance = initialization.loadDesktopAcceptance
+            ? DesktopAcceptanceEvidence.load(bundle: .main, pathContext: pathContext)
+            : DesktopAcceptanceEvidence.empty(pathContext: pathContext)
+
+        let savedPath = initialization.providerConfigPath == nil && initialization.persistSettings
+            ? providerConfigDefaults.string(forKey: "providerConfigPath")
+            : nil
+        let resolvedProviderConfigPath: String
+        if let explicitProviderConfigPath = initialization.providerConfigPath {
+            resolvedProviderConfigPath = explicitProviderConfigPath
+            staleProviderConfigPreferenceRecovered = false
+        } else {
+            resolvedProviderConfigPath = RelayKitPaths.resolvedProviderConfigPath(savedPath: savedPath)
+            staleProviderConfigPreferenceRecovered = RelayKitPaths.recoveredStaleTemporaryProviderConfig(savedPath: savedPath)
         }
-        codexTargetPath = RelayKitPaths.defaultCodexConfigPath()
-        appearanceMode = settingsStore.appearanceMode
-        launchAtLoginRequested = settingsStore.launchAtLoginRequested
+        providerConfigPath = resolvedProviderConfigPath
+        persistsProviderConfigPath = initialization.persistSettings && initialization.providerConfigPath == nil
+        if initialization.persistSettings && savedPath != nil && savedPath != resolvedProviderConfigPath {
+            providerConfigDefaults.set(resolvedProviderConfigPath, forKey: "providerConfigPath")
+        }
+        codexTargetPath = pathContext.codexConfigPath
+        appearanceMode = initialization.appearanceMode
+        launchAtLoginRequested = initialization.launchAtLoginRequested
         do {
             _ = try acquireControlOwnerLease()
             refreshCodexConnectionStatus()
@@ -126,7 +195,9 @@ final class AppModel: ObservableObject {
             managedRouteStatusError = error
             codexConnectionStatus = "Needs attention · gateway control owner lease unavailable"
         }
-        refreshLaunchAtLoginStatus()
+        if initialization.persistSettings {
+            refreshLaunchAtLoginStatus()
+        }
         refreshConfiguredProviders()
         loadOfficialAuthStateFromDisk()
         gateway.onUnexpectedTermination = { [weak self] in
@@ -134,6 +205,11 @@ final class AppModel: ObservableObject {
                 await self?.recoverUnexpectedManagedGatewayExit()
             }
         }
+    }
+
+    convenience init(endpoint: RelayKitRuntimeEndpoint, backgroundService: any GatewayBackgroundServiceProviding) {
+        self.init(endpoint: endpoint)
+        self.backgroundService = backgroundService
     }
 
     func useTemporaryProviderConfigPath(_ path: String) {
@@ -212,7 +288,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func startGateway(officialCatalog: Data? = nil) {
+    @discardableResult
+    func startGateway(officialCatalog: Data? = nil) -> Error? {
+        if isUISmoke {
+            let error = GatewayProcessError.commandFailed("Gateway start is disabled in UI smoke.")
+            gatewayStatus = "stopped"
+            message = error.localizedDescription
+            return error
+        }
+        backgroundServiceRecovery = nil
         do {
             let controlTokenPath = try ensureGatewayControlToken()
             try gateway.holdControlOwnerLease(at: controlTokenPath)
@@ -224,9 +308,9 @@ final class AppModel: ObservableObject {
             lastOfficialCatalog = resolvedOfficialCatalog
             let runtimeConfig = try makeGatewayRuntimeConfig(officialCatalog: resolvedOfficialCatalog)
             let credentialHandoff = try GatewayCredentialHandoff.encode(configData: runtimeConfig.data) { reference in
-                try KeychainCredentialStore.load(service: reference)
+                try credentialAccess.load(service: reference)
             }
-            let launchdManaged = try GatewayBackgroundService().ensureRegisteredIfPackaged()
+            let launchdManaged = try backgroundService.ensureRegisteredIfPackaged()
             try gateway.start(
                 binaryPath: gatewayBinaryPath,
                 configPath: runtimeConfig.path,
@@ -237,8 +321,8 @@ final class AppModel: ObservableObject {
                 launchdManaged: launchdManaged,
                 managedRouteEnabled: managedRouteEnabled,
                 parentProcessIdentifier: ProcessInfo.processInfo.processIdentifier,
-                managedCodexTarget: RelayKitPaths.defaultCodexConfigPath(),
-                managedCodexState: RelayKitPaths.codexConfigStatePath()
+                managedCodexTarget: pathContext.codexConfigPath,
+                managedCodexState: pathContext.codexConfigStatePath
             )
             gatewayStatus = managedRouteEnabled ? "running" : "official fallback"
             gatewayStartedAt = Date()
@@ -248,11 +332,23 @@ final class AppModel: ObservableObject {
             message = "Gateway started on \(runtimeEndpoint.listenAddress)"
             beginGatewayServiceMonitorIfNeeded()
             refreshOfficialGatewayProjection()
+            return nil
         } catch {
             gatewayStatus = "error"
             message = gatewayFailureMessage(error)
+            if let registrationError = error as? GatewayBackgroundRegistrationError,
+               registrationError == .requiresApproval {
+                backgroundServiceRecovery = .requiresApproval
+            }
             refreshOfficialGatewayProjection()
+            return error
         }
+    }
+
+    func openLoginItemsSettings() {
+        guard backgroundServiceRecovery == .requiresApproval else { return }
+        backgroundService.openLoginItemsSettings()
+        message = "Approve RelayKit background gateway in System Settings > General > Login Items, then try again."
     }
 
     func stopGateway() {
@@ -319,8 +415,8 @@ final class AppModel: ObservableObject {
         do {
             _ = try gateway.disableCodexConfig(
                 binaryPath: gatewayBinaryPath,
-                target: RelayKitPaths.defaultCodexConfigPath(),
-                state: RelayKitPaths.codexConfigStatePath()
+                target: pathContext.codexConfigPath,
+                state: pathContext.codexConfigStatePath
             )
             managedRouteEpochObserved = true
             gatewayMustSurviveTermination = false
@@ -439,10 +535,10 @@ final class AppModel: ObservableObject {
             let result = await Self.runShell(command, environment: ["RELAYKIT_DESKTOP_PROOF_TRIGGER": "relaykit_app"])
             switch result {
             case .success:
-                desktopAcceptance = DesktopAcceptanceEvidence.load()
+                desktopAcceptance = DesktopAcceptanceEvidence.load(bundle: .main, pathContext: pathContext)
                 message = "Isolated proof setup passed"
             case .failure(let error):
-                desktopAcceptance = DesktopAcceptanceEvidence.load()
+                desktopAcceptance = DesktopAcceptanceEvidence.load(bundle: .main, pathContext: pathContext)
                 message = "Isolated proof setup failed: \(error.localizedDescription)"
             }
             proofCheckInProgress = false
@@ -528,7 +624,7 @@ final class AppModel: ObservableObject {
             officialDeviceCodeCopied = false
             return
         }
-        let authURL = URL(fileURLWithPath: RelayKitPaths.officialCodexHomePath())
+        let authURL = URL(fileURLWithPath: pathContext.officialCodexHomePath)
             .appendingPathComponent("auth.json")
         let loggedIn = OfficialCodexAuthState.isConnected(at: authURL)
         if loggedIn {
@@ -566,7 +662,7 @@ final class AppModel: ObservableObject {
         officialAuthProcess = nil
         officialAuthInProgress = false
         do {
-            let codexHome = RelayKitPaths.officialCodexHomePath()
+            let codexHome = pathContext.officialCodexHomePath
             if FileManager.default.fileExists(atPath: codexHome) {
                 try FileManager.default.removeItem(atPath: codexHome)
             }
@@ -729,9 +825,9 @@ final class AppModel: ObservableObject {
             originalConfig: originalConfig,
             credential: credential,
             dependencies: .init(
-                loadCredential: { try KeychainCredentialStore.loadIfPresent(service: $0) },
-                saveCredential: { service, value in try KeychainCredentialStore.save(value: value, service: service) },
-                deleteCredential: { try KeychainCredentialStore.delete(service: $0) },
+                loadCredential: { try self.credentialAccess.loadIfPresent(service: $0) },
+                saveCredential: { service, value in try self.credentialAccess.save(value: value, service: service) },
+                deleteCredential: { service in try self.credentialAccess.delete(service: service) },
                 writeConfig: { data in
                     try self.ensureProviderConfigDirectory()
                     try data.write(to: configURL, options: .atomic)
@@ -754,6 +850,10 @@ final class AppModel: ObservableObject {
                 }
             )
         )
+    }
+
+    func loadProviderCredential(service: String) throws -> String {
+        try credentialAccess.load(service: service)
     }
 
     func refreshUsageSummary() async {
@@ -787,10 +887,12 @@ final class AppModel: ObservableObject {
         }.value
     }
 
-    func enableCodexForDesktop() async {
+    func enableCodexForDesktop() async throws {
         do {
             if !gateway.isRunning {
-                startGateway()
+                if let startupError = startGateway() {
+                    throw startupError
+                }
             }
             guard gateway.isRunning else {
                 throw GatewayClientError.gatewayUnavailable
@@ -798,12 +900,14 @@ final class AppModel: ObservableObject {
             try await rebuildCodexCatalog()
             let output = try gateway.enableCodexConfig(
                 binaryPath: gatewayBinaryPath,
-                target: RelayKitPaths.defaultCodexConfigPath(),
-                catalog: RelayKitPaths.codexCatalogPath(),
-                state: RelayKitPaths.codexConfigStatePath()
+                target: pathContext.codexConfigPath,
+                catalog: pathContext.codexCatalogPath,
+                state: pathContext.codexConfigStatePath
             )
             managedRouteEpochObserved = true
-            startGateway(officialCatalog: lastOfficialCatalog)
+            if let restartError = startGateway(officialCatalog: lastOfficialCatalog) {
+                throw restartError
+            }
             guard gateway.isRunning else {
                 throw GatewayClientError.gatewayUnavailable
             }
@@ -818,6 +922,7 @@ final class AppModel: ObservableObject {
             }
         } catch {
             message = gatewayFailureMessage(error)
+            throw error
         }
     }
 
@@ -825,8 +930,8 @@ final class AppModel: ObservableObject {
         do {
             let output = try gateway.disableCodexConfig(
                 binaryPath: gatewayBinaryPath,
-                target: RelayKitPaths.defaultCodexConfigPath(),
-                state: RelayKitPaths.codexConfigStatePath()
+                target: pathContext.codexConfigPath,
+                state: pathContext.codexConfigStatePath
             )
             let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
             message = detail.isEmpty ? "RelayKit disabled for Codex. Restart Codex to restore its previous configuration." : "\(detail) Restart Codex to restore its previous configuration."
@@ -854,8 +959,8 @@ final class AppModel: ObservableObject {
             case "enabled":
                 _ = try gateway.disableCodexConfig(
                     binaryPath: gatewayBinaryPath,
-                    target: RelayKitPaths.defaultCodexConfigPath(),
-                    state: RelayKitPaths.codexConfigStatePath()
+                    target: pathContext.codexConfigPath,
+                    state: pathContext.codexConfigStatePath
                 )
                 recoveryRestartInFlight = false
                 managedRouteEpochObserved = true
@@ -891,11 +996,19 @@ final class AppModel: ObservableObject {
     }
 
     var codexIntegrationHasManagedState: Bool {
-        FileManager.default.fileExists(atPath: RelayKitPaths.codexConfigStatePath())
+        FileManager.default.fileExists(atPath: pathContext.codexConfigStatePath)
     }
 
     var gatewayIsRunning: Bool {
         gateway.isRunning
+    }
+
+    var activePathContext: RelayKitPathContext {
+        pathContext
+    }
+
+    var isUISmokePresentation: Bool {
+        isUISmoke
     }
 
     var gatewayDisplayState: GatewayDisplayState {
@@ -956,12 +1069,22 @@ final class AppModel: ObservableObject {
     }
 
     func refreshLaunchAtLoginStatus() {
+        guard !isUISmoke else {
+            launchAtLoginStatus = "not queried in UI smoke"
+            return
+        }
         let status = loginItemService.status
         launchAtLoginStatus = status.rawValue
         launchAtLoginRequested = status.isRequested
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
+        guard !isUISmoke else {
+            launchAtLoginRequested = enabled
+            launchAtLoginStatus = "not persisted in UI smoke"
+            message = "Launch at login is disabled in UI smoke."
+            return
+        }
         do {
             try loginItemService.setEnabled(enabled)
             refreshLaunchAtLoginStatus()
@@ -979,8 +1102,8 @@ final class AppModel: ObservableObject {
     }
 
     private func ensureOfficialAuthDirs() throws {
-        try FileManager.default.createDirectory(atPath: RelayKitPaths.officialHomePath(), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(atPath: RelayKitPaths.officialCodexHomePath(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: pathContext.officialHomePath, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: pathContext.officialCodexHomePath, withIntermediateDirectories: true)
         try writeOfficialCredentialReference()
     }
 
@@ -988,21 +1111,21 @@ final class AppModel: ObservableObject {
         let body: [String: Any] = [
             "credential_ref": [
                 "kind": "codex_home",
-                "value": RelayKitPaths.officialCodexHomePath(),
+                "value": pathContext.officialCodexHomePath,
             ],
             "managed_by": "RelayKit",
             "token_material": "Codex CLI isolated CODEX_HOME",
         ]
         let data = try JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys])
-        let url = URL(fileURLWithPath: RelayKitPaths.officialCredentialRefPath())
+        let url = URL(fileURLWithPath: pathContext.officialCredentialRefPath)
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func officialCodexEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
-        environment["HOME"] = RelayKitPaths.officialHomePath()
-        environment["CODEX_HOME"] = RelayKitPaths.officialCodexHomePath()
+        environment["HOME"] = pathContext.officialHomePath
+        environment["CODEX_HOME"] = pathContext.officialCodexHomePath
         environment["PATH"] = Self.codexSearchPath(existing: environment["PATH"])
         return environment
     }
@@ -1034,7 +1157,7 @@ final class AppModel: ObservableObject {
     }
 
     private func officialRouteEvidence(gatewayRunning: Bool, executableHash: String?, providerConfigHash: String?) -> OfficialRouteEvidence {
-        let url = URL(fileURLWithPath: RelayKitPaths.officialRouteEvidencePath())
+        let url = URL(fileURLWithPath: pathContext.officialRouteEvidencePath)
         guard let data = try? Data(contentsOf: url),
               let object = try? JSONSerialization.jsonObject(with: data),
               let evidence = object as? [String: Any] else {
@@ -1197,7 +1320,7 @@ final class AppModel: ObservableObject {
     }
 
     private func ensureGatewayControlToken() throws -> String {
-        let tokenURL = URL(fileURLWithPath: RelayKitPaths.gatewayControlTokenPath())
+        let tokenURL = URL(fileURLWithPath: pathContext.gatewayControlTokenPath)
         try FileManager.default.createDirectory(
             at: tokenURL.deletingLastPathComponent(),
             withIntermediateDirectories: true,
@@ -1306,16 +1429,33 @@ final class AppModel: ObservableObject {
               let rawCatalogPath = environment["RELAYKIT_RUNTIME_SAFETY_OFFICIAL_CATALOG"] else {
             throw GatewayProcessError.commandFailed("runtime safety Official fixture is invalid")
         }
-        let support = RelayKitPaths.applicationSupportDirectory().standardizedFileURL
-        let keyURL = URL(fileURLWithPath: rawKeyPath).standardizedFileURL
-        let catalogURL = URL(fileURLWithPath: rawCatalogPath).standardizedFileURL
-        guard keyURL.path.hasPrefix(support.path + "/"),
-              catalogURL.path.hasPrefix(support.path + "/"),
+        let support = pathContext.applicationSupportDirectory.standardizedFileURL
+        guard let keyURL = secureRuntimeSafetyFixtureURL(rawKeyPath, support: support),
+              let catalogURL = secureRuntimeSafetyFixtureURL(rawCatalogPath, support: support),
               FileManager.default.isReadableFile(atPath: keyURL.path),
               FileManager.default.isReadableFile(atPath: catalogURL.path) else {
             throw GatewayProcessError.commandFailed("runtime safety Official fixture is outside isolated RelayKit state")
         }
         return (baseURL, keyURL, catalogURL)
+    }
+
+    private func secureRuntimeSafetyFixtureURL(_ rawPath: String, support: URL) -> URL? {
+        guard (rawPath as NSString).isAbsolutePath else { return nil }
+        let candidate = URL(fileURLWithPath: rawPath).standardizedFileURL
+        guard candidate.path == rawPath,
+              candidate.path.hasPrefix(support.path + "/") else { return nil }
+
+        var cursor = candidate
+        while true {
+            var info = stat()
+            guard lstat(cursor.path, &info) == 0,
+                  (info.st_mode & S_IFMT) != S_IFLNK else { return nil }
+            if cursor.path == support.path { break }
+            let parent = cursor.deletingLastPathComponent()
+            guard parent.path != cursor.path else { return nil }
+            cursor = parent
+        }
+        return candidate
     }
 
     private func makeGatewayRuntimeConfig(officialCatalog: Data? = nil) throws -> (path: String, data: Data, sha256: String) {
@@ -1353,7 +1493,7 @@ final class AppModel: ObservableObject {
             } else {
                 root["official_passthrough"] = [
                     "base_url": "https://chatgpt.com/backend-api/codex",
-                    "credential_ref": ["kind": "codex_home", "value": RelayKitPaths.officialCodexHomePath()],
+                    "credential_ref": ["kind": "codex_home", "value": pathContext.officialCodexHomePath],
                     "models": officialModels,
                 ]
             }
@@ -1364,7 +1504,7 @@ final class AppModel: ObservableObject {
         }
         root["providers"] = providers
         let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-        let runtimeURL = URL(fileURLWithPath: RelayKitPaths.gatewayRuntimeConfigPath())
+        let runtimeURL = URL(fileURLWithPath: pathContext.gatewayRuntimeConfigPath)
         try FileManager.default.createDirectory(at: runtimeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: runtimeURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: runtimeURL.path)
@@ -1408,7 +1548,7 @@ final class AppModel: ObservableObject {
             gatewayModels: gatewayModels,
             includeOfficialModels: includeOfficial
         )
-        let catalogURL = URL(fileURLWithPath: RelayKitPaths.codexCatalogPath())
+        let catalogURL = URL(fileURLWithPath: pathContext.codexCatalogPath)
         try FileManager.default.createDirectory(at: catalogURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try merged.write(to: catalogURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: catalogURL.path)
@@ -1488,8 +1628,8 @@ final class AppModel: ObservableObject {
         do {
             _ = try gateway.disableCodexConfig(
                 binaryPath: gatewayBinaryPath,
-                target: RelayKitPaths.defaultCodexConfigPath(),
-                state: RelayKitPaths.codexConfigStatePath()
+                target: pathContext.codexConfigPath,
+                state: pathContext.codexConfigStatePath
             )
             let disabled = applyRuntimeSafety(event: .managedFieldsDisabled(helperIsRunning: gateway.isRunning))
             if disabled.stopHelper {
@@ -1522,8 +1662,8 @@ final class AppModel: ObservableObject {
         _ = try acquireControlOwnerLease()
         return try gateway.codexConfigStatus(
             binaryPath: gatewayBinaryPath,
-            target: RelayKitPaths.defaultCodexConfigPath(),
-            state: RelayKitPaths.codexConfigStatePath()
+            target: pathContext.codexConfigPath,
+            state: pathContext.codexConfigStatePath
         ).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -1735,9 +1875,27 @@ struct DesktopAcceptanceEvidence: Equatable {
     let routeProof: String
     let globalFiles: String
 
-    static func load(bundle: Bundle = .main) -> DesktopAcceptanceEvidence {
-        let automaticPath = evidencePath(bundle: bundle, name: "codex-desktop-acceptance")
-        let manualPath = evidencePath(bundle: bundle, name: "codex-desktop-manual-proof")
+    static func empty(pathContext: RelayKitPathContext) -> DesktopAcceptanceEvidence {
+        DesktopAcceptanceEvidence(
+            available: false,
+            evidencePath: evidencePath(bundle: .main, name: "codex-desktop-acceptance", pathContext: pathContext),
+            manualAvailable: false,
+            manualEvidencePath: evidencePath(bundle: .main, name: "codex-desktop-manual-proof", pathContext: pathContext),
+            proofRoot: pathContext.desktopProofRootPath,
+            manualStatus: "not run",
+            startCommand: manualProofCommand(bundle: .main),
+            gateway: "not run",
+            catalog: "not run",
+            tempConfig: "not run",
+            pickerData: "not run",
+            routeProof: "not run",
+            globalFiles: "not run"
+        )
+    }
+
+    static func load(bundle: Bundle = .main, pathContext: RelayKitPathContext) -> DesktopAcceptanceEvidence {
+        let automaticPath = evidencePath(bundle: bundle, name: "codex-desktop-acceptance", pathContext: pathContext)
+        let manualPath = evidencePath(bundle: bundle, name: "codex-desktop-manual-proof", pathContext: pathContext)
         let automaticJSON = readJSON(path: automaticPath)
         let manualJSON = readJSON(path: manualPath)
         guard automaticJSON != nil || manualJSON != nil else {
@@ -1746,7 +1904,7 @@ struct DesktopAcceptanceEvidence: Equatable {
                 evidencePath: automaticPath,
                 manualAvailable: false,
                 manualEvidencePath: manualPath,
-                proofRoot: defaultProofRoot(),
+                proofRoot: pathContext.desktopProofRootPath,
                 manualStatus: "not run",
                 startCommand: manualProofCommand(bundle: bundle),
                 gateway: "not run",
@@ -1766,7 +1924,7 @@ struct DesktopAcceptanceEvidence: Equatable {
             evidencePath: automaticPath,
             manualAvailable: manualJSON != nil,
             manualEvidencePath: manualPath,
-            proofRoot: primary["proof_root"] as? String ?? defaultProofRoot(),
+            proofRoot: primary["proof_root"] as? String ?? pathContext.desktopProofRootPath,
             manualStatus: manualStatus(primary["manual_status"] as? String),
             startCommand: manualProofCommand(bundle: bundle),
             gateway: (primary["gateway_health_ok"] as? Bool) == true ? "gateway ok" : "gateway missing",
@@ -1778,7 +1936,13 @@ struct DesktopAcceptanceEvidence: Equatable {
         )
     }
 
-    private static func evidencePath(bundle: Bundle, name: String) -> String {
+    private static func evidencePath(bundle: Bundle, name: String, pathContext: RelayKitPathContext) -> String {
+        if pathContext.rootURL != nil {
+            return URL(fileURLWithPath: pathContext.desktopProofRootPath)
+                .appendingPathComponent(name, isDirectory: true)
+                .appendingPathComponent("evidence.json")
+                .path
+        }
         let bundleSibling = bundle.bundleURL
             .deletingLastPathComponent()
             .appendingPathComponent("\(name)/evidence.json")
@@ -1819,12 +1983,6 @@ struct DesktopAcceptanceEvidence: Equatable {
             return parent.path
         }
         return cwd.path
-    }
-
-    private static func defaultProofRoot() -> String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/RelayKit/DesktopProof")
-            .path
     }
 
     private static func globalFiles(_ json: [String: Any]) -> String {
